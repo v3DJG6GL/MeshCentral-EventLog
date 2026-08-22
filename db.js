@@ -255,7 +255,7 @@ module.exports.CreateDB = function(meshserver) {
         Datastore = loadModule(['@seald-io/nedb', '@yetzt/nedb', 'nedb']); // same fallback order as MeshCentral itself
         if (obj.eventsFile == null) {
             obj.eventsFile = new Datastore({ filename: meshserver.getConfigFilePath('plugin-eventlog-events.db'), autoload: true });
-            obj.eventsFile.persistence.setAutocompactionInterval(40000);
+            if (typeof obj.eventsFile.setAutocompactionInterval == 'function') obj.eventsFile.setAutocompactionInterval(40000); else obj.eventsFile.persistence.setAutocompactionInterval(40000);
             obj.eventsFile.ensureIndex({ fieldName: 'nodeid' });
             obj.eventsFile.ensureIndex({ fieldName: 'TimeCreated' });
             obj.eventsFile.ensureIndex({ fieldName: 'tc' });
@@ -263,7 +263,7 @@ module.exports.CreateDB = function(meshserver) {
         }
         if (obj.settingsFile == null) {
             obj.settingsFile = new Datastore({ filename: meshserver.getConfigFilePath('plugin-eventlog-settings.db'), autoload: true });
-            obj.settingsFile.persistence.setAutocompactionInterval(40000);
+            if (typeof obj.settingsFile.setAutocompactionInterval == 'function') obj.settingsFile.setAutocompactionInterval(40000); else obj.settingsFile.persistence.setAutocompactionInterval(40000);
         }
         
         obj.addEventsFor = function(nodeid, events) {

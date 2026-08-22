@@ -33,6 +33,7 @@ module.exports.eventlog = function (parent) {
       'elState',
       'elLevelInfo',
       'elHash',
+      'elFixText',
       'elNormalize',
       'elFmtTime',
       'elParseIds',
@@ -159,6 +160,14 @@ module.exports.eventlog = function (parent) {
         return h.toString(36);
     };
 
+    // Repair UTF-8 text that was decoded as Latin-1 on the agent ("Ã„nderungen" -> "Änderungen").
+    obj.elFixText = function(v) {
+        if (v == null) return '';
+        v = String(v);
+        if (!/[\u00C2-\u00F4][\u0080-\u00BF]/.test(v)) return v;
+        try { return decodeURIComponent(escape(v)); } catch (e) { return v; }
+    };
+
     obj.elNormalize = function(raw) {
         try {
             if (raw == null || typeof raw != 'object') return null;
@@ -174,10 +183,10 @@ module.exports.eventlog = function (parent) {
             var ev = {
                 level: lvl, levelName: li.name, levelCls: li.cls,
                 time: t,
-                log: (raw.LogName == null) ? '' : String(raw.LogName),
-                source: (raw.ProviderName == null) ? '' : String(raw.ProviderName),
+                log: pluginHandler.eventlog.elFixText(raw.LogName),
+                source: pluginHandler.eventlog.elFixText(raw.ProviderName),
                 id: (raw.Id == null) ? '' : String(raw.Id),
-                message: (raw.Message == null) ? '' : String(raw.Message)
+                message: pluginHandler.eventlog.elFixText(raw.Message)
             };
             ev.sig = pluginHandler.eventlog.elHash(ev.level + '|' + ev.log + '|' + ev.source + '|' + ev.id + '|' + ev.message);
             ev.key = pluginHandler.eventlog.elHash(ev.sig + '|' + ev.time);
@@ -336,7 +345,8 @@ body.night #pluginEventLog {
 #pluginEventLog .evlFacet .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #pluginEventLog .evlFacet .n { margin-left:auto; color:var(--evl-muted); font-variant-numeric:tabular-nums; font-size:12px; }
 #pluginEventLog .evlMore { color:var(--evl-acc); font-size:12px; cursor:pointer; display:inline-block; margin-top:3px; }
-#pluginEventLog .evlVList { overflow:auto; max-height:300px; outline:none; }
+#pluginEventLog .evlScroll { overflow:auto; max-height:calc(100vh - 270px); min-height:160px; }
+#pluginEventLog .evlVList { overflow:auto; max-height:max(200px, calc(100vh - 520px)); outline:none; }
 #pluginEventLog .evlVList table.evlLog th { top:0; }
 #pluginEventLog .evlDetails { border-top:1px solid var(--evl-line); }
 #pluginEventLog .evlDTabs { display:flex; align-items:center; border-bottom:1px solid var(--evl-line); background:var(--evl-alt); }
@@ -474,6 +484,9 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         var esc = EscapeHtml;
         var frows = st.fold ? ph.elFold(fr.rows) : fr.rows.map(function(ev) { return { ev: ev, count: 1, times: [ev.time] }; });
+        st._matching = frows.length;
+        if (st.view == 'live' && frows.length > st.show) frows = frows.slice(0, st.show); // "Show N" = N displayed rows
+        st._visible = frows.length;
         var sortTh = function(key, label, w) {
             var s = (st.sort.key == key) ? (' class=sorted') : '';
             var ar = (st.sort.key == key) ? (st.sort.dir == -1 ? ' &#9660;' : ' &#9650;') : '';
@@ -527,7 +540,7 @@ body.night #pluginEventLog {
             } else { h += '<div class=evlEmpty>Select an event to see its details.</div>'; }
             h += '</div></div></div>';
         } else {
-            h += '<div style="overflow:auto"><table class=evlLog><thead><tr>' +
+            h += '<div class=evlScroll><table class=evlLog><thead><tr>' +
                  sortTh('level', 'Level', 96) + sortTh('time', 'Time', 150) + sortTh('log', 'Log', 105) + sortTh('source', 'Source', 215) + sortTh('id', 'Event ID', 70) + sortTh('message', 'Message') +
                  '</tr></thead><tbody>';
             frows.forEach(function(r) { h += rowHtml(r, 'ledger'); });
@@ -577,7 +590,7 @@ body.night #pluginEventLog {
         if (st.view == 'live') {
             if (st.paused) h += '<span class=warn>&#10074;&#10074; Paused' + (st.pending.length ? ' &middot; ' + st.pending.length + ' new buffered' : '') + '</span>';
             else h += '<span class=live>&#9679; Live &middot; auto-refresh every 30 s</span>';
-            h += '<span>Showing ' + st._shown + ' of ' + st._total + ' loaded' + (st._total - st._shown > 0 ? ' &middot; ' + (st._total - st._shown) + ' hidden by filters' : '') + '</span>';
+            h += '<span>Showing ' + (st._visible || 0) + ' of ' + (st._matching || 0) + (st.fold ? ' folded rows' : ' rows') + ' &middot; ' + st._total + ' events loaded' + (st._total - st._shown > 0 ? ' &middot; ' + (st._total - st._shown) + ' hidden by filters' : '') + '</span>';
             if (st.live.last) h += '<span>Last update <span class=evlMono>' + st.live.last.toLocaleTimeString() + '</span></span>';
         } else {
             h += '<span>History</span>';
@@ -609,6 +622,7 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         st.fold = !st.fold; putstore('evl_fold', st.fold ? '1' : '0');
         var b = Q('evlFoldBtn'); if (b) b.classList.toggle('on', st.fold);
+        if (st.view == 'live' && st.fold) ph.elRequestLive(null);
         ph.elUpdate();
         return false;
     };
@@ -774,7 +788,8 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         try {
             if (ph.livelog != null && ph.livelog.State == 3) {
-                var cmd = { action: 'plugin', plugin: 'eventlog', pluginaction: 'getlivelogs', num: st.show };
+                // when folding repeats, fetch a larger batch so that N distinct rows can be shown
+                var cmd = { action: 'plugin', plugin: 'eventlog', pluginaction: 'getlivelogs', num: st.fold ? Math.min(1000, st.show * 4) : st.show };
                 if (since != null) cmd.since = since;
                 ph.livelog.sendText(cmd);
             }
@@ -1001,6 +1016,17 @@ body.night #pluginEventLog {
         });
     };
 
+    // Repair UTF-8 text that the agent decoded as Latin-1 (the PowerShell output file is UTF-8).
+    obj.fixText = function(v) {
+        if (typeof v != 'string' || !/[\u00C2-\u00F4][\u0080-\u00BF]/.test(v)) return v;
+        try { return Buffer.from(v, 'latin1').toString('utf8'); } catch (e) { return v; }
+    };
+    obj.fixEvents = function(events) {
+        var list = Array.isArray(events) ? events : [events];
+        list.forEach(function(e) { if (e && typeof e == 'object') { e.Message = obj.fixText(e.Message); e.ProviderName = obj.fixText(e.ProviderName); e.LogName = obj.fixText(e.LogName); } });
+        return events;
+    };
+
     // send a message to a connected agent, if possible. Returns true when sent.
     obj.sendToAgent = function(webserver, nodeid, message) {
         try {
@@ -1069,7 +1095,7 @@ body.night #pluginEventLog {
         }
         case 'gatherlogs': { // submit logs to server db
             try {
-                obj.meshServer.pluginHandler.eventlog_db.addEventsFor(myparent.dbNodeKey, JSON.parse(command.data));
+                obj.meshServer.pluginHandler.eventlog_db.addEventsFor(myparent.dbNodeKey, obj.fixEvents(JSON.parse(command.data)));
                 obj.meshServer.pluginHandler.eventlog_db.getLastEventFor(myparent.dbNodeKey, function (rec) {
                     // send a message to the endpoint verifying receipt
                     if (rec == null || rec[0] == null) return;

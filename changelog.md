@@ -29,6 +29,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Event messages were inserted as HTML; they are now escaped
 - Server-side rights check on history / collect requests
 ### Changed
+- Live view: "Show N" now means N displayed rows (after filtering/folding); a larger batch is fetched from the device when folding is on
+- Table scrolls inside its own container so the status line stays visible
+- Umlauts/UTF-8 text that the agent decoded as Latin-1 is repaired on the server and in the browser
 - Events gain a numeric `tc` (event time in ms) field with an index; existing rows are migrated on first start (db version 3)
 
 ## [0.0.24] - 2021-09-19
