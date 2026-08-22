@@ -15,7 +15,7 @@ Initially conceived as a proof of concept plugin for the [MeshCentral2](https://
 Restart your MeshCentral server after making this change.
 
  To install, simply add the plugin configuration URL when prompted:
- `https://raw.githubusercontent.com/ryanblenis/MeshCentral-EventLog/master/config.json`
+ `https://raw.githubusercontent.com/v3DJG6GL/MeshCentral-EventLog/master/config.json`
 
 Once installed, you'll need to update your agent cores in order to use the live / history features.
 
