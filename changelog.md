@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Known Issues]
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
+## [0.1.1] - 2026-08-23
+### Fixed
+- Plugin database never initialized when `promise`/`nedb` are absent (Docker image, MeshCentral ≥ 1.1) — root cause of the empty History tab
+- UTF-8 text decoded as Latin-1 by the agent is repaired on server and browser
+### Changed
+- Live "Show N" = N displayed rows (after filter/fold); table scrolls in its own container
+- Plugin URLs point at this fork so in-app updates work
+
 ## [0.1.0] - 2026-08-23
 ### Added
 - Device tab rewritten: full-width table that follows MeshCentral's light/night theme, sortable columns, expandable rows with the full message
@@ -17,7 +25,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - CSV export of the filtered rows
 - History retention configurable (days) in the Default config set
 ### Fixed
-- Plugin database never initialized on installs where the `promise` / `nedb` packages are not present (e.g. the Docker image, MeshCentral ≥ 1.1 which ships `@seald-io/nedb`): `server_startup` failed with `Cannot find module 'promise'`, leaving History permanently empty. Dependencies are now resolved through MeshCentral's own module tree and `promise` is no longer required.
 - Only ~900 px of the window was used; message column was truncated
 - Dark (night) mode was ignored
 - Non-ASCII characters (e.g. umlauts) were stripped from event messages by the agent
@@ -29,9 +36,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Event messages were inserted as HTML; they are now escaped
 - Server-side rights check on history / collect requests
 ### Changed
-- Live view: "Show N" now means N displayed rows (after filtering/folding); a larger batch is fetched from the device when folding is on
-- Table scrolls inside its own container so the status line stays visible
-- Umlauts/UTF-8 text that the agent decoded as Latin-1 is repaired on the server and in the browser
 - Events gain a numeric `tc` (event time in ms) field with an index; existing rows are migrated on first start (db version 3)
 
 ## [0.0.24] - 2021-09-19
