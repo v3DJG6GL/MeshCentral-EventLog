@@ -1,7 +1,7 @@
-/** 
+/**
 * @description MeshCentral event log plugin
 * @author Ryan Blenis
-* @copyright 
+* @copyright
 * @license Apache-2.0
 */
 
@@ -9,13 +9,16 @@
 
 module.exports.eventlog = function (parent) {
     var obj = {};
-    
+
     obj.parent = parent;
     obj.meshServer = parent.parent;
     obj.db = null;
-    
-    // This should be updated to contain functions that need to be brought to the
-    //   front end for processing. (If they need to be accessed in the GUI, they should be here)
+
+    // Functions that need to be brought to the front end for processing.
+    // (If they need to be accessed in the GUI, they should be here.)
+    // NOTE: these are serialized with .toString() and run in the browser.
+    //       They must be self-contained and reference each other only via
+    //       pluginHandler.eventlog.<fnName>.
     obj.exports = [
       'registerPluginTab',
       'on_device_page',
@@ -23,329 +26,914 @@ module.exports.eventlog = function (parent) {
       'onRemoteEventLogStateChange',
       'createRemoteEventLog',
       'onDeviceRefreshEnd',
-      'showLog',
-      'loadLogs',
-      'eventLogTab',
       'onLoadHistory',
-      'loadEventLogMain',
-      'filterLog',
+      'onCollectNow',
       '_pluginPermissions',
-      'loadButtons'
+      // new UI
+      'elState',
+      'elLevelInfo',
+      'elHash',
+      'elNormalize',
+      'elFmtTime',
+      'elParseIds',
+      'elMatch',
+      'elFiltered',
+      'elFold',
+      'elInjectStyles',
+      'elEnsureShell',
+      'elRenderShell',
+      'elUpdate',
+      'elRenderChips',
+      'elRenderFacets',
+      'elRenderBody',
+      'elEmptyText',
+      'elRenderDetailHtml',
+      'elRenderStatus',
+      'elSetView',
+      'elSetLayout',
+      'elToggleFold',
+      'elSetShow',
+      'elSetRange',
+      'elSelLog',
+      'elSelSource',
+      'elToggleLevel',
+      'elToggleFacet',
+      'elFacetsMore',
+      'elIdInput',
+      'elTextInput',
+      'elClearFilter',
+      'elResetFilters',
+      'elSetSort',
+      'elRowClick',
+      'elSetDTab',
+      'elCopy',
+      'elToggleRaw',
+      'elFilterBy',
+      'elKeyNav',
+      'elRequestLive',
+      'elAutoTick',
+      'elRefresh',
+      'elTogglePause',
+      'elLoadHistory',
+      'elLoadMore',
+      'elCollectNow',
+      'elExportCsv'
     ];
-    
+
     obj._pluginPermissions = function() {
         return {
             "deviceLiveTab": "Event Log: Live Tab",
             "deviceHistoryTab": "Event Log: History Tab"
         };
     };
-    
+
     obj.server_startup = function() {
-        // obj.parent.parent.debug('plugin:eventlog', 'Starting eventlog plugin with server');
-        //console.log(Object.keys(obj.meshServer.pluginHandler));
-        // hack a persistent db here
         obj.meshServer.pluginHandler.eventlog_db = require (__dirname + '/db.js').CreateDB(obj.meshServer);
         obj.db = obj.meshServer.pluginHandler.eventlog_db;
     };
-    
+
     obj.consoleaction = function() {
-        // due to this code running on the client side, this hook is actually contained 
+        // due to this code running on the client side, this hook is actually contained
         //   in the ./modules_meshcore/eventlog.js (note kept here for informational purposes)
     };
-    
+
     obj.handleAdminReq = function(req, res, user) {
         require(__dirname + '/admin.js').admin(obj).req(req, res, user);
     }
-    
+
+    // ------------------------------------------------------------------
+    //  Front end (browser) code below. Serialized into the page.
+    // ------------------------------------------------------------------
+
     // called to notify the web server that there is a new tab in town
     obj.registerPluginTab = function() {
-      if (currentNode.osdesc.toLowerCase().indexOf('windows') === -1) return { tabId: null, tabTitle: null };
-      
+      if ((typeof currentNode == 'undefined') || (currentNode == null) || (typeof currentNode.osdesc != 'string') || (currentNode.osdesc.toLowerCase().indexOf('windows') === -1)) return { tabId: null, tabTitle: null };
       return {
         tabTitle: "Event Log",
         tabId: "pluginEventLog"
       };
     };
-    
+
     // called to get the content for that tabs data
     obj.on_device_page = function() {
       return '<div id=pluginEventLog></div>';
     };
-    
-    obj.filterLog = function(el) {
-        var x = Q('pluginEventLog').querySelectorAll(".eventLogRow");
-        if (x.length) {
-            //reorder by time
-            var times  = new Array();
-            for (const i in Object.values(x)) {
-                times.push([i, x[i].getAttribute('data-time')]);
-            }
-            times.sort(function(a, b) { if (a[1] === b[1]) { return 0; } else { return (a[1] < b[1]) ? -1 : 1; }});
-            for (const i in Object.values(times)) {
-                x[times[i][0]].parentNode.prepend(x[times[i][0]]);
-            }
-            for (const i in Object.values(x)) {
-                if (x[i].textContent.toLowerCase().indexOf(el.value.toLowerCase()) === -1) {
-                    x[i].classList.add('eventLogFilterHide');
-                    x[i].parentNode.appendChild(x[i]);
-                } else {
-                    x[i].classList.remove('eventLogFilterHide');
-                    x[i].parentNode.appendChild(x[i]);
-                }
-            }
+
+    // ---- state ----
+    obj.elState = function() {
+        var ph = pluginHandler.eventlog;
+        if (ph.st == null) {
+            ph.byKey = {};
+            ph.st = {
+                view: 'live',
+                layout: getstore('evl_layout', 'ledger'),           // 'ledger' | 'viewer'
+                fold: (getstore('evl_fold', '1') == '1'),
+                show: Number(getstore('evl_show', '100')),
+                range: getstore('evl_range', '24h'),
+                filters: { levels: null, logs: null, sources: null, ids: '', text: '' },
+                sort: { key: 'time', dir: -1 },
+                selected: null, expanded: {}, dtab: 'general', raw: {},
+                srcMore: false,
+                paused: false, pending: [],
+                live: { events: [], last: null },
+                hist: { events: [], total: 0, stored: 0, lastCollected: null, skip: 0, loaded: false, loading: false, enabled: true, retentionDays: null }
+            };
         }
-        x = Q('pluginEventLog').querySelectorAll(".eventLogFilterHide, .eventLogHide");
-        if (x.length) {
-            for (const i in Object.values(x)) {
-                x[i].parentNode.appendChild(x[i]);
-            }
-        }
+        return ph.st;
     };
-    
-    obj.showLog = function(logOption) {
-        var parent = logOption.parentElement;
-        var children = parent.querySelectorAll("button");
-        for (const i in Object.values(children)) {
-              children[i].className = '';
-        }
-        logOption.className = 'eventLogTabActive';
-        var which = logOption.innerHTML;
-        var x = parent.parentElement.querySelectorAll(".eventLogRow");
-        
-        if (x.length)
-        for (const i in Object.values(x)) {
-            if (!x[i].classList.contains('logType'+which)) {
-                x[i].classList.add('eventLogHide');
-            } else {
-                x[i].classList.remove('eventLogHide');
-                x[i].parentNode.appendChild(x[i]);
-            }
-        }
+
+    obj.elLevelInfo = function() {
+        return [
+            { n: 1, name: 'Critical', cls: 'crit' },
+            { n: 2, name: 'Error',    cls: 'err'  },
+            { n: 3, name: 'Warning',  cls: 'warn' },
+            { n: 4, name: 'Info',     cls: 'info' },
+            { n: 5, name: 'Verbose',  cls: 'verb' },
+            { n: 0, name: 'LogAlways',cls: 'verb' }
+        ];
     };
-    
-    obj.eventLogTab = function(tabOption, contentId) {
-        var parent = tabOption.parentElement;
-        var children = parent.querySelectorAll("button");
-        for (const i in Object.values(children)) {
-              children[i].className = '';
-        }
-        tabOption.className = 'eventLogTabActive';
-        var which = tabOption.innerHTML;
-        var x = Q('pluginEventLog').querySelectorAll(".eventLogPage");
-        
-        if (x.length)
-        for (const i in Object.values(x)) {
-              x[i].style.display = 'none';
-        }
-        QS(contentId).display = '';
+
+    obj.elHash = function(s) {
+        var h = 5381; s = String(s);
+        for (var i = 0; i < s.length; i++) { h = ((h << 5) + h + s.charCodeAt(i)) & 0x7FFFFFFF; }
+        return h.toString(36);
     };
-    
-    obj.loadLogs = function(data, container) {
-      if (Array.isArray(data)) {
-          var tmp = { data: []}
-          for (var i in data) {
-              tmp.data.push(data[i]);
-          }
-          data = tmp;
-      }
-      var etsi = ['LogAlways', 'Critical', 'Error', 'Warning', 'Info', 'Verbose'];
-      for (var i in data) {
-        var skip = false;
-        for (const e of data[i]) {
-          var div = document.createElement('div');
-          div.classList.add('eventLogRow');
-          div.classList.add('logType'+e.LogName);
-          const eo = {
-            'Level': e.Level,
-            'TimeCreated': e.TimeCreated,
-            'ProviderName': e.ProviderName,
-            'Message': e.Message,
-            'Id': e.Id
-          }
-          for (let [k, v] of Object.entries(eo)) {
-            skip = false;
-            switch (k) {
-              case 'nodeid':
-              case '_id':
-              case 'time':
-              case 'LogName': {
-                  skip = true;
-              break;
-              }
-              case 'TimeCreated': {
-                if (Array.isArray(v)) {
-                  v = v[0];
-                }
-                v = v.match(/\d+/g);
-                div.setAttribute('data-time', v);
-                v = new Date(Number(v)).toLocaleDateString() +' '+ new Date(Number(v)).toLocaleTimeString();
-              break;
-              }
-              case 'Level': {
-                v = etsi[v];
-                break;
-              }
-              case 'LevelDisplayName': {
-                  if (v == 'null' || v == null) {
-                      v = 'Error';
-                  }
-              break;
-              }
-              default: { break; }
-            }
-            if (!skip) {
-               var span = document.createElement('span');
-               span.classList.add('eventlogc'+k);
-               span.setAttribute('title', v);
-               span.innerHTML = v;
-               div.appendChild(span);
-            }
-          }
-          Q(container).appendChild(div);
-        }
-      }
+
+    obj.elNormalize = function(raw) {
+        try {
+            if (raw == null || typeof raw != 'object') return null;
+            var t = (raw.tc != null) ? raw.tc : raw.TimeCreated;
+            if (Array.isArray(t)) t = t[0];
+            if (typeof t == 'string') { var m = t.match(/\d+/); t = m ? m[0] : 0; }
+            t = Number(t); if (isNaN(t)) t = 0;
+            var lvl = Number(raw.Level); if (isNaN(lvl)) lvl = 0;
+            var lvls = pluginHandler.eventlog.elLevelInfo();
+            var li = null;
+            for (var i in lvls) { if (lvls[i].n == lvl) li = lvls[i]; }
+            if (li == null) li = { n: lvl, name: 'Level ' + lvl, cls: 'verb' };
+            var ev = {
+                level: lvl, levelName: li.name, levelCls: li.cls,
+                time: t,
+                log: (raw.LogName == null) ? '' : String(raw.LogName),
+                source: (raw.ProviderName == null) ? '' : String(raw.ProviderName),
+                id: (raw.Id == null) ? '' : String(raw.Id),
+                message: (raw.Message == null) ? '' : String(raw.Message)
+            };
+            ev.sig = pluginHandler.eventlog.elHash(ev.level + '|' + ev.log + '|' + ev.source + '|' + ev.id + '|' + ev.message);
+            ev.key = pluginHandler.eventlog.elHash(ev.sig + '|' + ev.time);
+            return ev;
+        } catch (e) { return null; }
     };
-    
-    obj.loadButtons = function(config) {
-        if (config.historyEnabled === true) {
-          config.historyLogs.split(',').forEach((l) => {
-            let tpl = `<button class="" onclick="return pluginHandler.eventlog.showLog(this);">${l}</button>`;
-            Q('eventLogHistNav').insertAdjacentHTML('beforeend', tpl);
-          });
-        }
-        config.liveLogs.split(',').forEach((l) => {
-          let tpl = `<button class="" onclick="return pluginHandler.eventlog.showLog(this);">${l}</button>`;
-          Q('eventLogLogNav').insertAdjacentHTML('beforeend', tpl);
+
+    obj.elFmtTime = function(ms, timeOnly) {
+        if (!ms) return '-';
+        var d = new Date(Number(ms));
+        if (timeOnly) return d.toLocaleTimeString();
+        return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+    };
+
+    obj.elParseIds = function(str) {
+        var out = [];
+        String(str || '').split(',').forEach(function(part) {
+            part = part.trim(); if (part == '') return;
+            var m = part.match(/^(\d+)\s*-\s*(\d+)$/);
+            if (m) { out.push([Number(m[1]), Number(m[2])]); }
+            else if (part.match(/^\d+$/)) { out.push([Number(part), Number(part)]); }
         });
+        return out;
     };
-    
+
+    obj.elMatch = function(ev, ignore) {
+        var st = pluginHandler.eventlog.elState(), f = st.filters;
+        if (ignore != 'level'  && f.levels  != null && !f.levels[ev.level])   return false;
+        if (ignore != 'log'    && f.logs    != null && !f.logs[ev.log])       return false;
+        if (ignore != 'source' && f.sources != null && !f.sources[ev.source]) return false;
+        if (st._idRanges && st._idRanges.length) {
+            var idn = Number(ev.id), ok = false;
+            for (var i in st._idRanges) { if (idn >= st._idRanges[i][0] && idn <= st._idRanges[i][1]) { ok = true; break; } }
+            if (!ok) return false;
+        }
+        if (st._cutoff && ev.time && ev.time < st._cutoff) return false;
+        if (st._text) {
+            var hay = (ev.message + ' ' + ev.source + ' ' + ev.log + ' ' + ev.id).toLowerCase();
+            if (hay.indexOf(st._text) === -1) return false;
+        }
+        return true;
+    };
+
+    obj.elFiltered = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st._idRanges = ph.elParseIds(st.filters.ids);
+        st._text = String(st.filters.text || '').trim().toLowerCase();
+        var ranges = { '1h': 3600e3, '24h': 86400e3, '7d': 7 * 86400e3, '30d': 30 * 86400e3 };
+        st._cutoff = ranges[st.range] ? (Date.now() - ranges[st.range]) : 0;
+        var evs = (st.view == 'live') ? st.live.events : st.hist.events;
+        var rows = [], counts = { level: {}, log: {}, source: {} };
+        for (var i in evs) {
+            var ev = evs[i];
+            if (ph.elMatch(ev, 'level'))  { counts.level[ev.level] = (counts.level[ev.level] || 0) + 1; }
+            if (ph.elMatch(ev, 'log'))    { counts.log[ev.log] = (counts.log[ev.log] || 0) + 1; }
+            if (ph.elMatch(ev, 'source')) { counts.source[ev.source] = (counts.source[ev.source] || 0) + 1; }
+            if (ph.elMatch(ev, null)) rows.push(ev);
+        }
+        var k = st.sort.key, dir = st.sort.dir;
+        rows.sort(function(a, b) {
+            var x = a[k], y = b[k];
+            if (k == 'id') { x = Number(x); y = Number(y); }
+            if (x < y) return -1 * dir;
+            if (x > y) return 1 * dir;
+            return (a.time < b.time) ? 1 : -1; // stable-ish secondary: newest first
+        });
+        st._total = evs.length;
+        st._shown = rows.length;
+        return { rows: rows, counts: counts };
+    };
+
+    obj.elFold = function(rows) {
+        var out = [], map = {};
+        for (var i in rows) {
+            var ev = rows[i];
+            if (map[ev.sig] == null) {
+                map[ev.sig] = { ev: ev, count: 0, times: [] };
+                out.push(map[ev.sig]);
+            }
+            map[ev.sig].count++;
+            if (map[ev.sig].times.length < 24) map[ev.sig].times.push(ev.time);
+        }
+        return out;
+    };
+
+    // ---- rendering ----
+    obj.elInjectStyles = function() {
+        if (document.getElementById('evlStyles')) return;
+        var css = `
+#pluginEventLog {
+  --evl-ink:#1c1c1c; --evl-muted:#5a6360; --evl-line:#c9c9c9; --evl-line2:#e6e6e6; --evl-bg:#fff;
+  --evl-alt:#f4f6f5; --evl-hover:#e9f0f1; --evl-sel:#dbe9eb; --evl-chip:#eef1f0; --evl-input:#fff;
+  --evl-acc:#1F6F78; --evl-acc-ink:#fff; --evl-ok:#1e8a4c;
+  --evl-crit:#8E1B1B; --evl-err:#C9352B; --evl-warn:#B86F00; --evl-info:#2E6DBF; --evl-verb:#7F8A86;
+  color: var(--evl-ink);
+}
+body.night #pluginEventLog {
+  --evl-ink:#bbbbbb; --evl-muted:#8b9591; --evl-line:#333; --evl-line2:#222; --evl-bg:#000;
+  --evl-alt:#0d1110; --evl-hover:#18201f; --evl-sel:#18302f; --evl-chip:#1a1f1e; --evl-input:#111;
+  --evl-acc:#5fb3bb; --evl-acc-ink:#000; --evl-ok:#3dbf7a;
+  --evl-crit:#ff7b73; --evl-err:#ff8a7e; --evl-warn:#f0b848; --evl-info:#8bb8ff; --evl-verb:#8b9591;
+}
+#pluginEventLog .evlMono { font-family: Consolas, "DejaVu Sans Mono", monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
+#pluginEventLog .evlBar { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:2px 0 6px; }
+#pluginEventLog .evlSeg { display:inline-flex; border:1px solid var(--evl-line); border-radius:3px; overflow:hidden; }
+#pluginEventLog .evlSeg button { border:0; background:var(--evl-input); color:var(--evl-muted); padding:4px 11px; cursor:pointer; font:inherit; }
+#pluginEventLog .evlSeg button.on { background:var(--evl-acc); color:var(--evl-acc-ink); font-weight:bold; }
+#pluginEventLog .evlSeg button:focus-visible, #pluginEventLog .evlBtn:focus-visible { outline:2px solid var(--evl-acc); outline-offset:-2px; }
+#pluginEventLog input.evlIn, #pluginEventLog select.evlSel { border:1px solid var(--evl-line); background:var(--evl-input); color:var(--evl-ink); border-radius:3px; padding:4px 6px; font:inherit; max-width:240px; }
+#pluginEventLog input.evlIn::placeholder { color:var(--evl-muted); }
+#pluginEventLog .evlGrow { flex:1; min-width:140px; }
+#pluginEventLog .evlBtn { border:1px solid var(--evl-line); background:var(--evl-input); color:var(--evl-ink); border-radius:3px; padding:4px 9px; cursor:pointer; font:inherit; }
+#pluginEventLog .evlBtn.on { background:var(--evl-acc); color:var(--evl-acc-ink); border-color:var(--evl-acc); }
+#pluginEventLog .evlBtn.mini { padding:1px 7px; font-size:12px; }
+#pluginEventLog .evlLbl { color:var(--evl-muted); }
+#pluginEventLog .evlChips { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:0 0 6px; }
+#pluginEventLog .evlChip { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--evl-line); border-radius:12px; padding:2px 10px 2px 8px; background:var(--evl-chip); color:var(--evl-ink); cursor:pointer; font-size:12px; }
+#pluginEventLog .evlChip .sw { width:8px; height:8px; border-radius:50%; display:inline-block; }
+#pluginEventLog .evlChip .n { color:var(--evl-muted); font-variant-numeric:tabular-nums; }
+#pluginEventLog .evlChip.off { opacity:.45; text-decoration:line-through; }
+#pluginEventLog .evlChip.filt { border-color:var(--evl-acc); background:transparent; }
+#pluginEventLog .evlChip .x { color:var(--evl-muted); margin-left:2px; }
+#pluginEventLog table.evlLog { width:100%; border-collapse:collapse; table-layout:fixed; }
+#pluginEventLog table.evlLog th { text-align:left; font-weight:bold; color:var(--evl-muted); font-size:12px; padding:5px 8px; border-bottom:1px solid var(--evl-line); white-space:nowrap; cursor:pointer; position:sticky; top:0; background:var(--evl-bg); z-index:1; }
+#pluginEventLog table.evlLog th.sorted { color:var(--evl-ink); }
+#pluginEventLog table.evlLog td { padding:4px 8px; border-bottom:1px solid var(--evl-line2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; vertical-align:top; }
+#pluginEventLog table.evlLog tbody tr { cursor:pointer; }
+#pluginEventLog table.evlLog tbody tr:nth-child(even):not(.evlExpand) td { background:var(--evl-alt); }
+#pluginEventLog table.evlLog tbody tr:hover:not(.evlExpand) td { background:var(--evl-hover); }
+#pluginEventLog table.evlLog tr.evlSelRow td { background:var(--evl-sel) !important; }
+#pluginEventLog .evlLv { display:inline-flex; align-items:center; gap:6px; font-weight:bold; }
+#pluginEventLog .evlLv i { width:9px; height:9px; border-radius:50%; display:inline-block; flex:none; }
+#pluginEventLog .evlLv.crit { color:var(--evl-crit); } #pluginEventLog .evlLv.crit i { background:var(--evl-crit); }
+#pluginEventLog .evlLv.err  { color:var(--evl-err);  } #pluginEventLog .evlLv.err i  { background:var(--evl-err); }
+#pluginEventLog .evlLv.warn { color:var(--evl-warn); } #pluginEventLog .evlLv.warn i { background:var(--evl-warn); }
+#pluginEventLog .evlLv.info { color:var(--evl-info); } #pluginEventLog .evlLv.info i { background:var(--evl-info); }
+#pluginEventLog .evlLv.verb { color:var(--evl-verb); } #pluginEventLog .evlLv.verb i { background:var(--evl-verb); }
+#pluginEventLog .evlRep { display:inline-block; border:1px solid var(--evl-line); border-radius:10px; padding:0 7px; font-size:11px; color:var(--evl-muted); background:var(--evl-chip); margin-right:6px; }
+#pluginEventLog .evlRep b { color:var(--evl-ink); }
+#pluginEventLog tr.evlExpand td { white-space:normal; background:var(--evl-sel) !important; padding:10px 12px 12px 32px; cursor:default; }
+#pluginEventLog .evlMsgFull { white-space:pre-wrap; max-width:110ch; line-height:1.45; }
+#pluginEventLog .evlMeta { display:flex; gap:20px; color:var(--evl-muted); margin-top:8px; flex-wrap:wrap; }
+#pluginEventLog .evlMeta b { color:var(--evl-ink); }
+#pluginEventLog .evlActs { margin-top:9px; display:flex; gap:7px; flex-wrap:wrap; }
+#pluginEventLog pre.evlRaw { background:var(--evl-chip); border:1px solid var(--evl-line2); padding:8px; overflow:auto; max-height:240px; margin:8px 0 0; font-size:11px; color:var(--evl-ink); white-space:pre-wrap; word-break:break-word; }
+#pluginEventLog .evlStatus { display:flex; gap:16px; color:var(--evl-muted); font-size:12px; padding:7px 2px; align-items:center; flex-wrap:wrap; border-top:1px solid var(--evl-line2); margin-top:-1px; }
+#pluginEventLog .evlStatus .live { color:var(--evl-ok); }
+#pluginEventLog .evlStatus .warn { color:var(--evl-warn); }
+#pluginEventLog .evlViewer { display:grid; grid-template-columns:215px 1fr; border:1px solid var(--evl-line); border-radius:3px; overflow:hidden; }
+#pluginEventLog .evlFacets { border-right:1px solid var(--evl-line); padding:9px 11px; background:var(--evl-alt); min-width:0; }
+#pluginEventLog .evlFacets h4 { margin:11px 0 5px; font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--evl-muted); }
+#pluginEventLog .evlFacets h4:first-child { margin-top:0; }
+#pluginEventLog .evlFacet { display:flex; align-items:center; gap:7px; padding:2px 0; cursor:pointer; }
+#pluginEventLog .evlFacet .cb { width:12px; height:12px; border:1px solid var(--evl-line); border-radius:2px; background:var(--evl-input); flex:none; display:inline-grid; place-items:center; font-size:9px; color:var(--evl-acc-ink); line-height:1; }
+#pluginEventLog .evlFacet .cb.on { background:var(--evl-acc); border-color:var(--evl-acc); }
+#pluginEventLog .evlFacet .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#pluginEventLog .evlFacet .n { margin-left:auto; color:var(--evl-muted); font-variant-numeric:tabular-nums; font-size:12px; }
+#pluginEventLog .evlMore { color:var(--evl-acc); font-size:12px; cursor:pointer; display:inline-block; margin-top:3px; }
+#pluginEventLog .evlVList { overflow:auto; max-height:300px; outline:none; }
+#pluginEventLog .evlVList table.evlLog th { top:0; }
+#pluginEventLog .evlDetails { border-top:1px solid var(--evl-line); }
+#pluginEventLog .evlDTabs { display:flex; align-items:center; border-bottom:1px solid var(--evl-line); background:var(--evl-alt); }
+#pluginEventLog .evlDTabs button { border:0; background:none; color:var(--evl-muted); padding:6px 14px; cursor:pointer; font:inherit; }
+#pluginEventLog .evlDTabs button.on { color:var(--evl-ink); font-weight:bold; border-bottom:2px solid var(--evl-acc); margin-bottom:-1px; }
+#pluginEventLog .evlDTabs .sp { flex:1; }
+#pluginEventLog .evlDBody { display:grid; grid-template-columns:1fr 320px; gap:16px; padding:11px 13px; }
+#pluginEventLog .evlKv { display:grid; grid-template-columns:auto 1fr; gap:3px 13px; font-size:12px; align-content:start; margin:0; }
+#pluginEventLog .evlKv dt { color:var(--evl-muted); } #pluginEventLog .evlKv dd { margin:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#pluginEventLog .evlEmpty { padding:26px 10px; color:var(--evl-muted); text-align:center; }
+@media (max-width: 1000px) {
+  #pluginEventLog .evlViewer { grid-template-columns:1fr; }
+  #pluginEventLog .evlFacets { border-right:0; border-bottom:1px solid var(--evl-line); }
+  #pluginEventLog .evlDBody { grid-template-columns:1fr; }
+}
+`;
+        var s = document.createElement('style');
+        s.id = 'evlStyles';
+        s.appendChild(document.createTextNode(css));
+        document.head.appendChild(s);
+    };
+
+    obj.elEnsureShell = function() {
+        var ph = pluginHandler.eventlog;
+        ph.elInjectStyles();
+        if (!Q('pluginEventLog')) return false;
+        if (!Q('evlWrap')) {
+            QH('pluginEventLog', '<div id=evlWrap><div id=evlToolbar></div><div id=evlChips class=evlChips></div><div id=evlBody></div><div id=evlStatus class=evlStatus></div></div>');
+            ph.elRenderShell();
+        }
+        return true;
+    };
+
+    obj.elRenderShell = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        var esc = EscapeHtml;
+        var h = '<div class=evlBar>';
+        h += '<div class=evlSeg>' +
+             '<button id=evlVLive class="' + (st.view == 'live' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetView(\'live\')">&#9679; Live</button>' +
+             '<button id=evlVHist class="' + (st.view == 'history' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetView(\'history\')">History</button></div>';
+        if (st.layout == 'ledger') {
+            h += '<span class=evlLbl>Log</span> <select id=evlLogSel class=evlSel onchange="return pluginHandler.eventlog.elSelLog(this)"><option value="">All</option></select>';
+            h += '<span class=evlLbl>Source</span> <select id=evlSrcSel class=evlSel onchange="return pluginHandler.eventlog.elSelSource(this)"><option value="">All</option></select>';
+        }
+        h += '<input id=evlIdIn class=evlIn style=width:120px placeholder="IDs: 1112, 100-199" value="' + esc(st.filters.ids) + '" oninput="return pluginHandler.eventlog.elIdInput(this)">';
+        h += '<input id=evlTxtIn class="evlIn evlGrow" placeholder="Search message, source, ID&hellip;" value="' + esc(st.filters.text) + '" oninput="return pluginHandler.eventlog.elTextInput(this)">';
+        h += '<select id=evlRangeSel class=evlSel title="Time range" onchange="return pluginHandler.eventlog.elSetRange(this.value)">';
+        [['all','Any time'],['1h','Last hour'],['24h','Last 24 h'],['7d','Last 7 days'],['30d','Last 30 days']].forEach(function(o){ h += '<option value=' + o[0] + (st.range == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
+        h += '</select>';
+        h += '<span class=evlLbl>Show</span> <select id=evlShowSel class=evlSel title="Entries per log (Live) / per page (History)" onchange="return pluginHandler.eventlog.elSetShow(this.value)">';
+        [25,50,100,250,500].forEach(function(n){ h += '<option value=' + n + (st.show == n ? ' selected' : '') + '>' + n + '</option>'; });
+        h += '</select>';
+        h += '<button id=evlFoldBtn class="evlBtn ' + (st.fold ? 'on' : '') + '" title="Fold repeated events into one line" onclick="return pluginHandler.eventlog.elToggleFold()">&#8659; Fold repeats</button>';
+        h += '<button id=evlPauseBtn class=evlBtn title="Pause live updates" onclick="return pluginHandler.eventlog.elTogglePause()" ' + (st.view == 'history' ? 'style=display:none' : '') + '>' + (st.paused ? '&#9654;' : '&#10074;&#10074;') + '</button>';
+        h += '<button class=evlBtn title="Refresh" onclick="return pluginHandler.eventlog.elRefresh()">&#8635;</button>';
+        h += '<button class=evlBtn title="Export the filtered rows as CSV" onclick="return pluginHandler.eventlog.elExportCsv()">&#10515; CSV</button>';
+        h += '<div class=evlSeg title="Layout">' +
+             '<button class="' + (st.layout == 'ledger' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetLayout(\'ledger\')">Table</button>' +
+             '<button class="' + (st.layout == 'viewer' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetLayout(\'viewer\')">Viewer</button></div>';
+        h += '</div>';
+        QH('evlToolbar', h);
+        ph.elUpdate();
+    };
+
+    obj.elUpdate = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (!Q('evlWrap')) return;
+        var fr = ph.elFiltered();
+        ph.elRenderChips(fr);
+        ph.elRenderBody(fr);
+        ph.elRenderStatus();
+        // refresh the Log/Source dropdown options (ledger layout)
+        if (st.layout == 'ledger') {
+            var esc = EscapeHtml;
+            [['evlLogSel', 'log', st.filters.logs], ['evlSrcSel', 'source', st.filters.sources]].forEach(function(cfg) {
+                var sel = Q(cfg[0]); if (!sel) return;
+                var names = Object.keys(fr.counts[cfg[1]]).sort();
+                var cur = null;
+                if (cfg[2] != null) { var kk = Object.keys(cfg[2]); if (kk.length == 1) cur = kk[0]; else cur = '_multi'; }
+                var oh = '<option value="">All (' + names.length + ')</option>';
+                if (cur == '_multi') oh += '<option value="_multi" selected>(multiple)</option>';
+                names.forEach(function(n) { oh += '<option value="' + esc(n) + '"' + (cur == n ? ' selected' : '') + '>' + esc(n) + ' (' + fr.counts[cfg[1]][n] + ')</option>'; });
+                sel.innerHTML = oh;
+            });
+        }
+    };
+
+    obj.elRenderChips = function(fr) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        var esc = EscapeHtml, h = '';
+        h += '<span class=evlLbl>Level</span>';
+        ph.elLevelInfo().forEach(function(li) {
+            if (li.n == 0 && !fr.counts.level[0]) return; // hide LogAlways unless present
+            var off = (st.filters.levels != null && !st.filters.levels[li.n]);
+            h += '<span class="evlChip' + (off ? ' off' : '') + '" role=button tabindex=0 onclick="return pluginHandler.eventlog.elToggleLevel(' + li.n + ')" onkeypress="if(event.key==\'Enter\')pluginHandler.eventlog.elToggleLevel(' + li.n + ')">' +
+                 '<i class=sw style="background:var(--evl-' + li.cls + ')"></i>' + li.name + ' <span class=n>' + (fr.counts.level[li.n] || 0) + '</span></span>';
+        });
+        var filts = [];
+        if (st.filters.logs != null)    { var k1 = Object.keys(st.filters.logs);    filts.push(['logs',    'Log: '    + (k1.length == 1 ? esc(k1[0]) : k1.length + ' selected')]); }
+        if (st.filters.sources != null) { var k2 = Object.keys(st.filters.sources); filts.push(['sources', 'Source: ' + (k2.length == 1 ? esc(k2[0]) : k2.length + ' selected')]); }
+        if (String(st.filters.ids).trim()  != '') filts.push(['ids',  'ID: '     + esc(st.filters.ids)]);
+        if (String(st.filters.text).trim() != '') filts.push(['text', 'Search: ' + esc(st.filters.text)]);
+        if (filts.length) {
+            h += '<span class=evlLbl style=margin-left:12px>Active</span>';
+            filts.forEach(function(f) {
+                h += '<span class="evlChip filt" role=button tabindex=0 onclick="return pluginHandler.eventlog.elClearFilter(\'' + f[0] + '\')">' + f[1] + ' <span class=x>&#10005;</span></span>';
+            });
+            h += '<span class="evlChip" role=button tabindex=0 onclick="return pluginHandler.eventlog.elResetFilters()">Reset all</span>';
+        }
+        QH('evlChips', h);
+    };
+
+    obj.elRenderFacets = function(fr) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        var esc = EscapeHtml, h = '';
+        var facet = function(kind, name, count, on) {
+            return '<div class=evlFacet role=button tabindex=0 onclick="return pluginHandler.eventlog.elToggleFacet(\'' + kind + '\',\'' + esc(name).replace(/'/g, '&apos;') + '\')">' +
+                   '<span class="cb' + (on ? ' on' : '') + '">' + (on ? '&#10003;' : '') + '</span><span class=t title="' + esc(name) + '">' + esc(name) + '</span><span class=n>' + count + '</span></div>';
+        };
+        h += '<h4>Log</h4>';
+        Object.keys(fr.counts.log).sort().forEach(function(n) {
+            h += facet('logs', n, fr.counts.log[n], (st.filters.logs == null || st.filters.logs[n]));
+        });
+        h += '<h4>Source</h4>';
+        var srcs = Object.keys(fr.counts.source).sort(function(a, b) { return fr.counts.source[b] - fr.counts.source[a]; });
+        var lim = st.srcMore ? srcs.length : 10;
+        srcs.slice(0, lim).forEach(function(n) {
+            h += facet('sources', n, fr.counts.source[n], (st.filters.sources == null || st.filters.sources[n]));
+        });
+        if (srcs.length > 10) h += '<span class=evlMore role=button tabindex=0 onclick="return pluginHandler.eventlog.elFacetsMore()">' + (st.srcMore ? 'show fewer' : 'show ' + (srcs.length - 10) + ' more&hellip;') + '</span>';
+        return h;
+    };
+
+    obj.elRenderBody = function(fr) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        var esc = EscapeHtml;
+        var frows = st.fold ? ph.elFold(fr.rows) : fr.rows.map(function(ev) { return { ev: ev, count: 1, times: [ev.time] }; });
+        var sortTh = function(key, label, w) {
+            var s = (st.sort.key == key) ? (' class=sorted') : '';
+            var ar = (st.sort.key == key) ? (st.sort.dir == -1 ? ' &#9660;' : ' &#9650;') : '';
+            return '<th' + (w ? ' style=width:' + w + 'px' : '') + s + ' onclick="return pluginHandler.eventlog.elSetSort(\'' + key + '\')">' + label + ar + '</th>';
+        };
+        var rowHtml = function(r, mode) {
+            var ev = r.ev;
+            var selCls = (mode == 'viewer' && st.selected == ev.key) || (mode == 'ledger' && st.expanded[ev.key]) ? ' class=evlSelRow' : '';
+            var rep = (r.count > 1) ? '<span class=evlRep title="Identical event repeated"><b>&times;' + r.count + '</b></span>' : '';
+            var h = '<tr' + selCls + ' onclick="return pluginHandler.eventlog.elRowClick(\'' + ev.key + '\')">';
+            h += '<td style=width:96px><span class="evlLv ' + ev.levelCls + '"><i></i>' + esc(ev.levelName) + '</span></td>';
+            h += '<td style=width:150px class=evlMono>' + ph.elFmtTime(ev.time) + '</td>';
+            if (mode == 'ledger') h += '<td style=width:105px title="' + esc(ev.log) + '">' + esc(ev.log) + '</td>';
+            h += '<td style=width:215px title="' + esc(ev.source) + '">' + esc(ev.source) + '</td>';
+            h += '<td style="width:70px;text-align:right" class=evlMono>' + esc(ev.id) + '</td>';
+            h += '<td title="' + esc(ev.message).substring(0, 500) + '">' + rep + esc(ev.message) + '</td></tr>';
+            if (mode == 'ledger' && st.expanded[ev.key]) {
+                h += '<tr class=evlExpand onclick="event.stopPropagation()"><td colspan=6>' + ph.elRenderDetailHtml(r) + '</td></tr>';
+            }
+            return h;
+        };
+        var h = '';
+        if (st.layout == 'viewer') {
+            h += '<div class=evlViewer><div class=evlFacets id=evlFacets>' + ph.elRenderFacets(fr) + '</div>';
+            h += '<div><div class=evlVList id=evlVList tabindex=0 onkeydown="return pluginHandler.eventlog.elKeyNav(event)"><table class=evlLog><thead><tr>' +
+                 sortTh('level', 'Level', 96) + sortTh('time', 'Time', 150) + sortTh('source', 'Source', 215) + sortTh('id', 'ID', 70) + sortTh('message', 'Message') +
+                 '</tr></thead><tbody>';
+            var selRep = null;
+            frows.forEach(function(r) { h += rowHtml(r, 'viewer'); if (st.selected == r.ev.key) selRep = r; });
+            if (!frows.length) h += '<tr><td colspan=5><div class=evlEmpty>' + ph.elEmptyText() + '</div></td></tr>';
+            h += '</tbody></table></div>';
+            if (selRep == null && frows.length) { selRep = frows[0]; st.selected = selRep.ev.key; }
+            h += '<div class=evlDetails id=evlDetails>';
+            if (selRep) {
+                h += '<div class=evlDTabs>' +
+                     '<button class="' + (st.dtab == 'general' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetDTab(\'general\')">General</button>' +
+                     '<button class="' + (st.dtab == 'json' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetDTab(\'json\')">Details (JSON)</button><span class=sp></span>' +
+                     '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elCopy(\'' + selRep.ev.key + '\')">Copy</button>' +
+                     '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elFilterBy(\'source\',\'' + selRep.ev.key + '\')">Filter: this source</button>' +
+                     '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elFilterBy(\'id\',\'' + selRep.ev.key + '\')">Filter: ID ' + esc(selRep.ev.id) + '</button></div>';
+                if (st.dtab == 'json') {
+                    h += '<pre class=evlRaw style="margin:10px 13px">' + esc(JSON.stringify({ Level: selRep.ev.level, TimeCreated: new Date(selRep.ev.time).toISOString(), LogName: selRep.ev.log, ProviderName: selRep.ev.source, Id: selRep.ev.id, Message: selRep.ev.message }, null, 2)) + '</pre>';
+                } else {
+                    h += '<div class=evlDBody><div class=evlMsgFull>' + esc(selRep.ev.message) + '</div><dl class=evlKv>' +
+                         '<dt>Log</dt><dd>' + esc(selRep.ev.log) + '</dd><dt>Source</dt><dd title="' + esc(selRep.ev.source) + '">' + esc(selRep.ev.source) + '</dd>' +
+                         '<dt>Event ID</dt><dd class=evlMono>' + esc(selRep.ev.id) + '</dd><dt>Level</dt><dd>' + esc(selRep.ev.levelName) + ' (' + selRep.ev.level + ')</dd>' +
+                         '<dt>Recorded</dt><dd class=evlMono>' + ph.elFmtTime(selRep.ev.time) + '</dd>' +
+                         (selRep.count > 1 ? '<dt>Seen</dt><dd>' + selRep.count + '&times; &mdash; ' + selRep.times.slice(0, 6).map(function(t) { return ph.elFmtTime(t, true); }).join(', ') + (selRep.times.length > 6 ? '&hellip;' : '') + '</dd>' : '') +
+                         '</dl></div>';
+                }
+            } else { h += '<div class=evlEmpty>Select an event to see its details.</div>'; }
+            h += '</div></div></div>';
+        } else {
+            h += '<div style="overflow:auto"><table class=evlLog><thead><tr>' +
+                 sortTh('level', 'Level', 96) + sortTh('time', 'Time', 150) + sortTh('log', 'Log', 105) + sortTh('source', 'Source', 215) + sortTh('id', 'Event ID', 70) + sortTh('message', 'Message') +
+                 '</tr></thead><tbody>';
+            frows.forEach(function(r) { h += rowHtml(r, 'ledger'); });
+            if (!frows.length) h += '<tr><td colspan=6><div class=evlEmpty>' + ph.elEmptyText() + '</div></td></tr>';
+            h += '</tbody></table></div>';
+        }
+        QH('evlBody', h);
+    };
+
+    obj.elEmptyText = function() {
+        var st = pluginHandler.eventlog.elState();
+        if (st.view == 'history') {
+            if (st.hist.loading) return 'Loading history&hellip;';
+            if (st.hist.enabled === false) return 'History collection is disabled for this device. Enable it in the plugin administration (Config Sets).';
+            if (st.hist.stored == 0) return 'No events stored yet. The agent sends collected events about once a minute once its core is loaded &mdash; use &quot;Collect now&quot; below, or check back shortly.';
+            return 'No events match the current filters. Adjust the filters above or reset them.';
+        }
+        if (st._total == 0) return 'Waiting for events from the device&hellip;';
+        return 'No events match the current filters. Adjust the filters above or reset them.';
+    };
+
+    obj.elRenderDetailHtml = function(r) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        var esc = EscapeHtml, ev = r.ev;
+        var h = '<div class=evlMsgFull>' + esc(ev.message) + '</div>';
+        h += '<div class=evlMeta><span>Log <b>' + esc(ev.log) + '</b></span><span>Source <b>' + esc(ev.source) + '</b></span>' +
+             '<span>Event ID <b class=evlMono>' + esc(ev.id) + '</b></span><span>Level <b>' + esc(ev.levelName) + ' (' + ev.level + ')</b></span>' +
+             '<span>Recorded <b class=evlMono>' + ph.elFmtTime(ev.time) + '</b></span></div>';
+        if (r.count > 1) {
+            h += '<div class=evlMeta><span>Occurrences (' + r.count + ')</span><span class=evlMono>' + r.times.slice(0, 12).map(function(t) { return ph.elFmtTime(t, true); }).join(' &middot; ') + (r.times.length > 12 ? ' &hellip;' : '') + '</span></div>';
+        }
+        h += '<div class=evlActs>' +
+             '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elCopy(\'' + ev.key + '\')">Copy message</button>' +
+             '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elFilterBy(\'source\',\'' + ev.key + '\')">Filter: this source</button>' +
+             '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elFilterBy(\'id\',\'' + ev.key + '\')">Filter: ID ' + esc(ev.id) + '</button>' +
+             '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elToggleRaw(\'' + ev.key + '\')">' + (st.raw[ev.key] ? 'Hide' : 'Show') + ' raw JSON</button></div>';
+        if (st.raw[ev.key]) {
+            h += '<pre class=evlRaw>' + esc(JSON.stringify({ Level: ev.level, TimeCreated: new Date(ev.time).toISOString(), LogName: ev.log, ProviderName: ev.source, Id: ev.id, Message: ev.message }, null, 2)) + '</pre>';
+        }
+        return h;
+    };
+
+    obj.elRenderStatus = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (!Q('evlStatus')) return;
+        var h = '';
+        if (st.view == 'live') {
+            if (st.paused) h += '<span class=warn>&#10074;&#10074; Paused' + (st.pending.length ? ' &middot; ' + st.pending.length + ' new buffered' : '') + '</span>';
+            else h += '<span class=live>&#9679; Live &middot; auto-refresh every 30 s</span>';
+            h += '<span>Showing ' + st._shown + ' of ' + st._total + ' loaded' + (st._total - st._shown > 0 ? ' &middot; ' + (st._total - st._shown) + ' hidden by filters' : '') + '</span>';
+            if (st.live.last) h += '<span>Last update <span class=evlMono>' + st.live.last.toLocaleTimeString() + '</span></span>';
+        } else {
+            h += '<span>History</span>';
+            if (st.hist.loading) h += '<span>Loading&hellip;</span>';
+            h += '<span>Showing ' + st._shown + ' of ' + st.hist.total + ' in range &middot; ' + st.hist.stored + ' stored total' + (st.hist.retentionDays ? ' &middot; retention ' + st.hist.retentionDays + ' days' : '') + '</span>';
+            h += '<span>Last collected: <span class=evlMono>' + (st.hist.lastCollected ? ph.elFmtTime(st.hist.lastCollected) : 'never') + '</span></span>';
+            if (st.hist.events.length < st.hist.total) h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elLoadMore()">Load ' + Math.min(st.show, st.hist.total - st.hist.events.length) + ' more</button>';
+            h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elCollectNow()">Collect now</button>';
+            if (st.collectMsg) h += '<span>' + st.collectMsg + '</span>';
+        }
+        QH('evlStatus', h);
+    };
+
+    // ---- interactions ----
+    obj.elSetView = function(v) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.view = v;
+        if (v == 'history' && !st.hist.loaded && !st.hist.loading) ph.elLoadHistory(true);
+        ph.elRenderShell();
+        return false;
+    };
+    obj.elSetLayout = function(l) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.layout = l; putstore('evl_layout', l);
+        ph.elRenderShell();
+        return false;
+    };
+    obj.elToggleFold = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.fold = !st.fold; putstore('evl_fold', st.fold ? '1' : '0');
+        var b = Q('evlFoldBtn'); if (b) b.classList.toggle('on', st.fold);
+        ph.elUpdate();
+        return false;
+    };
+    obj.elSetShow = function(n) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.show = Number(n) || 100; putstore('evl_show', String(st.show));
+        if (st.view == 'live') ph.elRequestLive(null);
+        ph.elUpdate();
+        return false;
+    };
+    obj.elSetRange = function(r) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.range = r; putstore('evl_range', r);
+        if (st.view == 'history') ph.elLoadHistory(true); else ph.elUpdate();
+        return false;
+    };
+    obj.elSelLog = function(el) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (el.value == '_multi') return false;
+        if (el.value == '') st.filters.logs = null; else { st.filters.logs = {}; st.filters.logs[el.value] = 1; }
+        ph.elUpdate();
+        return false;
+    };
+    obj.elSelSource = function(el) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (el.value == '_multi') return false;
+        if (el.value == '') st.filters.sources = null; else { st.filters.sources = {}; st.filters.sources[el.value] = 1; }
+        ph.elUpdate();
+        return false;
+    };
+    obj.elToggleLevel = function(n) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (st.filters.levels == null) { st.filters.levels = {}; ph.elLevelInfo().forEach(function(li) { st.filters.levels[li.n] = 1; }); }
+        if (st.filters.levels[n]) delete st.filters.levels[n]; else st.filters.levels[n] = 1;
+        var all = true; ph.elLevelInfo().forEach(function(li) { if (!st.filters.levels[li.n]) all = false; });
+        if (all) st.filters.levels = null;
+        ph.elUpdate();
+        return false;
+    };
+    obj.elToggleFacet = function(kind, name) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        var fr = ph.elFiltered();
+        var universe = Object.keys(kind == 'logs' ? fr.counts.log : fr.counts.source);
+        if (st.filters[kind] == null) { st.filters[kind] = {}; universe.forEach(function(n) { st.filters[kind][n] = 1; }); }
+        if (st.filters[kind][name]) delete st.filters[kind][name]; else st.filters[kind][name] = 1;
+        var all = true; universe.forEach(function(n) { if (!st.filters[kind][n]) all = false; });
+        if (all) st.filters[kind] = null;
+        ph.elUpdate();
+        return false;
+    };
+    obj.elFacetsMore = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.srcMore = !st.srcMore; ph.elUpdate();
+        return false;
+    };
+    obj.elIdInput = function(el) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.filters.ids = el.value;
+        if (st._deb) clearTimeout(st._deb);
+        st._deb = setTimeout(function() { pluginHandler.eventlog.elUpdate(); }, 200);
+        return false;
+    };
+    obj.elTextInput = function(el) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.filters.text = el.value;
+        if (st._deb) clearTimeout(st._deb);
+        st._deb = setTimeout(function() { pluginHandler.eventlog.elUpdate(); }, 200);
+        return false;
+    };
+    obj.elClearFilter = function(kind) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (kind == 'ids' || kind == 'text') { st.filters[kind] = ''; var el = Q(kind == 'ids' ? 'evlIdIn' : 'evlTxtIn'); if (el) el.value = ''; }
+        else st.filters[kind] = null;
+        ph.elUpdate();
+        return false;
+    };
+    obj.elResetFilters = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.filters = { levels: null, logs: null, sources: null, ids: '', text: '' };
+        var e1 = Q('evlIdIn'); if (e1) e1.value = '';
+        var e2 = Q('evlTxtIn'); if (e2) e2.value = '';
+        ph.elUpdate();
+        return false;
+    };
+    obj.elSetSort = function(k) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (st.sort.key == k) st.sort.dir = -st.sort.dir;
+        else { st.sort.key = k; st.sort.dir = (k == 'time') ? -1 : 1; }
+        ph.elUpdate();
+        return false;
+    };
+    obj.elRowClick = function(key) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (st.layout == 'viewer') { st.selected = key; }
+        else { st.expanded[key] = !st.expanded[key]; }
+        ph.elUpdate();
+        return false;
+    };
+    obj.elSetDTab = function(t) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.dtab = t; ph.elUpdate();
+        return false;
+    };
+    obj.elCopy = function(key) {
+        var ph = pluginHandler.eventlog, ev = ph.byKey[key];
+        if (!ev) return false;
+        var txt = ev.levelName + '\t' + ph.elFmtTime(ev.time) + '\t' + ev.log + '\t' + ev.source + '\t' + ev.id + '\t' + ev.message;
+        try { navigator.clipboard.writeText(txt); } catch (e) {
+            var ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select();
+            try { document.execCommand('copy'); } catch (e2) { }
+            document.body.removeChild(ta);
+        }
+        return false;
+    };
+    obj.elToggleRaw = function(key) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.raw[key] = !st.raw[key]; ph.elUpdate();
+        return false;
+    };
+    obj.elFilterBy = function(what, key) {
+        var ph = pluginHandler.eventlog, st = ph.elState(), ev = ph.byKey[key];
+        if (!ev) return false;
+        if (what == 'source') { st.filters.sources = {}; st.filters.sources[ev.source] = 1; }
+        if (what == 'id') { st.filters.ids = String(ev.id); var el = Q('evlIdIn'); if (el) el.value = st.filters.ids; }
+        ph.elUpdate();
+        return false;
+    };
+    obj.elKeyNav = function(ev) {
+        if (ev.key != 'ArrowDown' && ev.key != 'ArrowUp') return true;
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        var fr = ph.elFiltered();
+        var frows = st.fold ? ph.elFold(fr.rows) : fr.rows.map(function(e) { return { ev: e }; });
+        var idx = -1;
+        frows.forEach(function(r, i) { if (r.ev.key == st.selected) idx = i; });
+        idx += (ev.key == 'ArrowDown') ? 1 : -1;
+        if (idx < 0) idx = 0; if (idx >= frows.length) idx = frows.length - 1;
+        if (frows[idx]) { st.selected = frows[idx].ev.key; ph.elUpdate(); var l = Q('evlVList'); if (l) l.focus(); }
+        ev.preventDefault();
+        return false;
+    };
+
+    obj.elExportCsv = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        var fr = ph.elFiltered();
+        var q = function(v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
+        var lines = ['Level,Time,Log,Source,EventId,Message'];
+        fr.rows.forEach(function(ev) {
+            lines.push([q(ev.levelName), q(new Date(ev.time).toISOString()), q(ev.log), q(ev.source), q(ev.id), q(ev.message)].join(','));
+        });
+        var name = 'eventlog-' + ((typeof currentNode != 'undefined' && currentNode) ? String(currentNode.name).replace(/[^\w.-]+/g, '_') : 'device') + '-' + st.view + '.csv';
+        try {
+            var blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(blob); a.download = name;
+            document.body.appendChild(a); a.click();
+            setTimeout(function() { URL.revokeObjectURL(a.href); document.body.removeChild(a); }, 1000);
+        } catch (e) { }
+        return false;
+    };
+
+    // ---- live data ----
+    obj.elRequestLive = function(since) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        try {
+            if (ph.livelog != null && ph.livelog.State == 3) {
+                var cmd = { action: 'plugin', plugin: 'eventlog', pluginaction: 'getlivelogs', num: st.show };
+                if (since != null) cmd.since = since;
+                ph.livelog.sendText(cmd);
+            }
+        } catch (e) { }
+        return false;
+    };
+    obj.elAutoTick = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (st.paused) return;
+        var newest = 0;
+        st.live.events.forEach(function(ev) { if (ev.time > newest) newest = ev.time; });
+        ph.elRequestLive(newest ? Math.floor(newest / 1000) : null);
+    };
+    obj.elRefresh = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (st.view == 'live') ph.elRequestLive(null);
+        else ph.elLoadHistory(true);
+        return false;
+    };
+    obj.elTogglePause = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.paused = !st.paused;
+        if (!st.paused && st.pending.length) {
+            st.pending.forEach(function(ev) { st.live.events.push(ev); });
+            st.pending = [];
+        }
+        var b = Q('evlPauseBtn');
+        if (b) { b.innerHTML = st.paused ? '&#9654;' : '&#10074;&#10074;'; b.title = st.paused ? 'Resume live updates' : 'Pause live updates'; }
+        ph.elUpdate();
+        return false;
+    };
+
+    // ---- history data ----
+    obj.elLoadHistory = function(reset) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (typeof currentNode == 'undefined' || currentNode == null) return false;
+        if (reset) { st.hist.skip = 0; }
+        st.hist.loading = true;
+        var ranges = { '1h': 3600e3, '24h': 86400e3, '7d': 7 * 86400e3, '30d': 30 * 86400e3 };
+        var since = ranges[st.range] ? (Date.now() - ranges[st.range]) : null;
+        meshserver.send({ action: 'plugin', plugin: 'eventlog', pluginaction: 'getNodeHistory', nodeid: currentNode._id, meshid: currentNode.meshid, limit: st.show, skip: st.hist.skip, since: since });
+        ph.elRenderStatus();
+        return false;
+    };
+    obj.elLoadMore = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.hist.skip = st.hist.events.length;
+        ph.elLoadHistory(false);
+        return false;
+    };
+    obj.elCollectNow = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (typeof currentNode == 'undefined' || currentNode == null) return false;
+        st.collectMsg = 'Requesting collection&hellip;';
+        meshserver.send({ action: 'plugin', plugin: 'eventlog', pluginaction: 'collectNow', nodeid: currentNode._id, meshid: currentNode.meshid });
+        ph.elRenderStatus();
+        return false;
+    };
+    obj.onCollectNow = function(server, message) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (message.ok) {
+            st.collectMsg = 'Collection requested &mdash; reloading shortly&hellip;';
+            setTimeout(function() { var s = pluginHandler.eventlog.elState(); if (s.view == 'history') pluginHandler.eventlog.elLoadHistory(true); }, 7000);
+            setTimeout(function() { var s = pluginHandler.eventlog.elState(); s.collectMsg = null; if (s.view == 'history') pluginHandler.eventlog.elLoadHistory(true); }, 20000);
+        } else {
+            st.collectMsg = 'Device is not connected &mdash; collection runs when the agent is back online.';
+        }
+        ph.elRenderStatus();
+    };
     obj.onLoadHistory = function(server, message) {
-        if (currentNode.osdesc.toLowerCase().indexOf('windows') === -1) return;
-        pluginHandler.eventlog.loadEventLogMain();
-        pluginHandler.eventlog.loadButtons(message.config);
-        pluginHandler.eventlog.loadLogs(message.events, 'eventLogHistory');
+        if (typeof currentNode == 'undefined' || currentNode == null || typeof currentNode.osdesc != 'string' || currentNode.osdesc.toLowerCase().indexOf('windows') === -1) return;
+        var ph = pluginHandler.eventlog;
+        if (!ph.elEnsureShell()) return;
+        var st = ph.elState();
+        st.hist.loading = false; st.hist.loaded = true;
+        if (message.config) {
+            st.hist.enabled = (message.config.historyEnabled !== false);
+            if (message.config.retentionDays) st.hist.retentionDays = message.config.retentionDays;
+        }
+        st.hist.total = (message.total != null) ? message.total : (message.events ? message.events.length : 0);
+        if (message.stored != null) st.hist.stored = message.stored;
+        if (message.lastCollected != null) {
+            var lc = message.lastCollected;
+            st.hist.lastCollected = (typeof lc == 'string' || typeof lc == 'object') ? new Date(lc).getTime() : Number(lc);
+        }
+        var evs = message.events || [];
+        if (!message.skip) st.hist.events = [];
+        for (var i in evs) {
+            var n = ph.elNormalize(evs[i]);
+            if (n == null) continue;
+            ph.byKey[n.key] = n;
+            var dup = false;
+            if (message.skip) { for (var j in st.hist.events) { if (st.hist.events[j].key == n.key) { dup = true; break; } } }
+            if (!dup) st.hist.events.push(n);
+        }
+        ph.elUpdate();
     };
-    
-    obj.loadEventLogMain = function() {
-      if (!Q('eventlogentry')) {
-            var cstr = `<div class=eventLogNavClass id=eventLogMainNav>
-            <button class=eventLogTabActive onclick="return pluginHandler.eventlog.eventLogTab(this, 'eventlogentry');">Live</button>
-            <button onclick="return pluginHandler.eventlog.eventLogTab(this, 'eventLogHistoryContainer');">History</button>
-            <span id=eventLogFilter>Filter: <input type="text" onkeyup="return pluginHandler.eventlog.filterLog(this)"></span>
-            </div><div id=eventLogHistoryContainer class=eventLogPage style="display:none;">
-            <div class=eventLogNavClass id=eventLogHistNav>
-              
-            </div><div style="clear: both;"></div><div id=eventLogHistory></div></div><div class=eventLogPage id=eventlogentry>
-                <style>
-                #pluginEventLog .eventLogRow > span {
-                  width: 150px;
-                  white-space: nowrap;
-                  overflow: hidden;
-                  text-overflow: ellipsis;
-                  float:left;
-                  padding: 2px;
-                  margin: 0;
-                  display: inline-block;
-                }
-                #pluginEventLog #eventLogFilter {
-                      padding: 10px 12px;
-                }
-                #pluginEventLog .eventLogRow {
-                      padding: 2px;
-                      display: inline-block;
-                }
-                #pluginEventLog .eventLogHide {
-                    display: none;
-                }
-                #pluginEventLog .eventLogFilterHide {
-                    display: none;
-                }
-                #pluginEventLog .eventLogRow:nth-child(odd) {
-                      background-color: #CCC;
-                }
-                #pluginEventLog .eventLogRow > span.eventlogcLevel {
-                    width: 100px;
-                }
-                #pluginEventLog .eventLogRow > span.eventlogcTimeCreated {
-                    width: 150px;
-                }
-                #pluginEventLog .eventLogRow > span.eventlogcProviderName {
-                    width: 200px;
-                }
-                #pluginEventLog .eventLogRow > span.eventlogcMessage {
-                    width: 400px;
-                }
-                #pluginEventLog .eventLogRow > span.eventlogcId {
-                    width: 50px;
-                }
-                #eventLogMainNav {
-                  overflow: hidden;
-                  border: 1px solid #ccc;
-                  background-color: #f1f1f1;
-                }
-                .eventLogNavClass button {
-                  background-color: inherit;
-                  float: left;
-                  border: none;
-                  outline: none;
-                  cursor: pointer;
-                  padding: 10px 12px;
-                  transition: 0.3s;
-                }
-                .eventLogNavClass button:hover {
-                  background-color: #ddd;
-                }
-                .eventLogNavClass button.eventLogTabActive {
-                  background-color: #ccc;
-                }
-                .eventLogPage {
-                  padding: 6px 12px;
-                  border: 1px solid #ccc;
-                  border-top: none;
-                }
-                </style>
-                <div class=eventLogNavClass id=eventLogLogNav>
-                </div>
-                <div style="clear: both;"></div>
-                <div id=eventLogLive></div>`;
-                QH('pluginEventLog', cstr);
-      }
-    };
-    
+
+    // ---- plumbing (tunnel to the agent) ----
+
     // called when a new plugin message is received on the front end
     obj.fe_on_message = function(server, message) {
+      var ph = pluginHandler.eventlog;
       var data = JSON.parse(message);
       if (data.type == 'close') {
-        pluginHandler.eventlog.livelog.Stop();
-        pluginHandler.eventlog.livelog = null;
+        if (ph.livelog) { ph.livelog.Stop(); ph.livelog = null; }
         return;
       }
-      pluginHandler.eventlog.loadEventLogMain();
-      pluginHandler.eventlog.loadLogs(data.data, 'eventLogLive');
+      if (!ph.elEnsureShell()) return;
+      var st = ph.elState();
+      var evs = data.data;
+      if (evs == null) return;
+      if (!Array.isArray(evs)) evs = [evs];
+      var tgt = st.paused ? st.pending : st.live.events;
+      var added = false;
+      for (var i in evs) {
+          var n = ph.elNormalize(evs[i]);
+          if (n == null || n.log == '' && n.source == '') continue;
+          if (ph.byKey[n.key]) {
+              // already known: skip if it is already in the live buffer
+              var known = false;
+              st.live.events.forEach(function(e) { if (e.key == n.key) known = true; });
+              st.pending.forEach(function(e) { if (e.key == n.key) known = true; });
+              if (known) continue;
+          }
+          ph.byKey[n.key] = n;
+          tgt.push(n); added = true;
+      }
+      // cap the live buffer
+      if (st.live.events.length > 2000) {
+          st.live.events.sort(function(a, b) { return b.time - a.time; });
+          st.live.events.length = 2000;
+      }
+      st.live.last = new Date();
+      if (st.paused && added) ph.elRenderStatus(); else ph.elUpdate();
     };
-    
+
     obj.onRemoteEventLogStateChange = function(xdata, state) {
-        var str = StatusStrs[state];
-        if (pluginHandler.eventlog.webRtcActive == true) { str += ', WebRTC'; }
+        var ph = pluginHandler.eventlog;
         switch (state) {
             case 0:
-                if (pluginHandler.eventlog.livelog != null) {
-                  pluginHandler.eventlog.livelog.Stop(); 
-                  pluginHandler.eventlog.livelog = null; 
-                  try { QH('pluginEventLog', ''); } catch(e) { }
+                if (ph.livelog != null) {
+                  ph.livelog.Stop();
+                  ph.livelog = null;
+                  try { QH('pluginEventLog', ''); } catch (e) { }
                 }
+                if (ph.autoTimer != null) { clearInterval(ph.autoTimer); ph.autoTimer = null; }
                 break;
             case 3:
-                if (pluginHandler.eventlog.livelog) {
-                  pluginHandler.eventlog.livelog.sendText({ action: 'plugin', plugin: 'eventlog', pluginaction: 'getlivelogs' });
-                }
+                ph.elEnsureShell();
+                ph.elRequestLive(null);
+                if (ph.autoTimer != null) { clearInterval(ph.autoTimer); }
+                ph.autoTimer = setInterval(function() { try { pluginHandler.eventlog.elAutoTick(); } catch (e) { } }, 30000);
                 break;
             default:
-                //console.log('unknown state change', state);
             break;
         }
     }
-    
+
     obj.createRemoteEventLog = function(onEventLogUpdate) {
         var myobj = { protocol: 7 }; // we're a plugin
         myobj.onEventLogUpdate = onEventLogUpdate;
@@ -353,67 +941,77 @@ module.exports.eventlog = function (parent) {
         myobj.ProcessData = function(data) { onEventLogUpdate(null, data); }
         return myobj;
     }
-    
+
     obj.onDeviceRefreshEnd = function(nodeid, panel, refresh, event) {
-      pluginHandler.registerPluginTab(pluginHandler.eventlog.registerPluginTab());
-      if (typeof pluginHandler.eventlog.livelog == 'undefined') { pluginHandler.eventlog.livelog = null; }
-      if (pluginHandler.eventlog.livelog != null) { pluginHandler.eventlog.livelog.Stop(); pluginHandler.eventlog.livelog = null; }
-      try { QH('pluginEventLog', ''); } catch(e) { } pluginHandler.eventlog.livelog = null;
-      if (!pluginHandler.eventlog.livelog) {
-          pluginHandler.eventlog.livelognode = currentNode;
-          // Setup a mesh agent files
-          if (pluginHandler.eventlog.livelognode.conn) {
-              pluginHandler.eventlog.livelog = CreateAgentRedirect(meshserver, pluginHandler.eventlog.createRemoteEventLog(pluginHandler.eventlog.fe_on_message), serverPublicNamePort, authCookie, authRelayCookie, domainUrl);
-              pluginHandler.eventlog.livelog.attemptWebRTC = attemptWebRTC;
-              pluginHandler.eventlog.livelog.onStateChanged = pluginHandler.eventlog.onRemoteEventLogStateChange;
-              pluginHandler.eventlog.livelog.onConsoleMessageChange = function () {
-                  if (pluginHandler.eventlog.livelog.consoleMessage) {
-                      console.log('console message available. ', pluginHandler.eventlog.livelog.consoleMessage)
-                  }
+      var ph = pluginHandler.eventlog;
+      pluginHandler.registerPluginTab(ph.registerPluginTab());
+      if (typeof ph.livelog == 'undefined') { ph.livelog = null; }
+      if (ph.livelog != null) { ph.livelog.Stop(); ph.livelog = null; }
+      if (ph.autoTimer != null) { clearInterval(ph.autoTimer); ph.autoTimer = null; }
+      try { QH('pluginEventLog', ''); } catch (e) { }
+      ph.livelog = null;
+      ph.st = null;      // reset UI state for the new node
+      ph.byKey = {};
+      if ((typeof currentNode == 'undefined') || (currentNode == null) || (typeof currentNode.osdesc != 'string') || (currentNode.osdesc.toLowerCase().indexOf('windows') === -1)) return;
+      ph.livelognode = currentNode;
+      if (ph.livelognode.conn) {
+          ph.livelog = CreateAgentRedirect(meshserver, ph.createRemoteEventLog(ph.fe_on_message), serverPublicNamePort, authCookie, authRelayCookie, domainUrl);
+          ph.livelog.attemptWebRTC = attemptWebRTC;
+          ph.livelog.onStateChanged = ph.onRemoteEventLogStateChange;
+          ph.livelog.onConsoleMessageChange = function () {
+              if (pluginHandler.eventlog.livelog && pluginHandler.eventlog.livelog.consoleMessage) {
+                  console.log('console message available. ', pluginHandler.eventlog.livelog.consoleMessage)
               }
-              pluginHandler.eventlog.livelog.Start(pluginHandler.eventlog.livelognode._id);
           }
-      } else {
-          //QH('Term', '');
-          pluginHandler.eventlog.livelog.Stop();
-          pluginHandler.eventlog.livelog = null;
+          ph.livelog.Start(ph.livelognode._id);
       }
-      // get node historical events
-      let meshid = null;
-      nodes.forEach(function(n, i) {
-          if (n._id == nodeid) meshid = n.meshid;
-      });
-      meshserver.send({ action: 'plugin', plugin: 'eventlog', pluginaction: 'getNodeHistory', nodeid: nodeid, meshid: meshid });
+      ph.elEnsureShell();
+      // request node historical events (first page)
+      ph.elLoadHistory(true);
     };
-    
+
+    // ------------------------------------------------------------------
+    //  Server side
+    // ------------------------------------------------------------------
+
     obj.hook_agentCoreIsStable = function(myparent, grandparent) {
-        //console.log(new Date().toLocaleString()+' PLUGIN: eventlog: Running hook_agentCoreIsStable', myparent.dbNodeKey);
         if (grandparent == null) { // detect old style call with single argument, backward compat, to be removed in the future.
             grandparent = myparent[1];
             myparent = myparent[0];
         }
-        myparent.send(JSON.stringify({ 
-            action: 'plugin', 
-            pluginaction: 'serviceCheck', 
+        myparent.send(JSON.stringify({
+            action: 'plugin',
+            pluginaction: 'serviceCheck',
             plugin: 'eventlog',
-            nodeid: myparent.dbNodeKey, 
+            nodeid: myparent.dbNodeKey,
             rights: true,
             sessionid: true
         }));
         obj.db.getConfigFor(myparent.dbNodeKey, myparent.dbMeshKey)
         .then((cfgBlob) => {
-            myparent.send(JSON.stringify({ 
-                action: 'plugin', 
-                pluginaction: 'setConfigBlob', 
+            myparent.send(JSON.stringify({
+                action: 'plugin',
+                pluginaction: 'setConfigBlob',
                 plugin: 'eventlog',
-                nodeid: myparent.dbNodeKey, 
+                nodeid: myparent.dbNodeKey,
                 rights: true,
                 sessionid: true,
                 cfg: cfgBlob
             }));
         });
     };
-    
+
+    // send a message to a connected agent, if possible. Returns true when sent.
+    obj.sendToAgent = function(webserver, nodeid, message) {
+        try {
+            if (webserver == null || webserver.wsagents == null) return false;
+            var agent = webserver.wsagents[nodeid];
+            if (agent == null) return false;
+            agent.send(JSON.stringify(message));
+            return true;
+        } catch (e) { return false; }
+    };
+
     // data was sent to server from the client. do something with it.
     obj.serveraction = function(command, myparent, grandparent) {
       var myobj = {};
@@ -425,11 +1023,11 @@ module.exports.eventlog = function (parent) {
           if (cnt == 0) {
               obj.db.getConfigFor(myparent.dbNodeKey, myparent.dbMeshKey)
               .then((cfgBlob) => {
-                myparent.send(JSON.stringify({ 
-                    action: 'plugin', 
-                    pluginaction: 'setConfigBlob', 
+                myparent.send(JSON.stringify({
+                    action: 'plugin',
+                    pluginaction: 'setConfigBlob',
                     plugin: 'eventlog',
-                    nodeid: myparent.dbNodeKey, 
+                    nodeid: myparent.dbNodeKey,
                     rights: true,
                     sessionid: true,
                     cfg: cfgBlob
@@ -438,7 +1036,18 @@ module.exports.eventlog = function (parent) {
           }
         });
       }
-      
+
+      // For user-initiated actions, make sure the user has rights to the node.
+      var userHasNodeRights = function() {
+          if (myparent.user == null) return true; // agent context, not a user session
+          try {
+              if (typeof grandparent.GetNodeRights == 'function') {
+                  return (grandparent.GetNodeRights(myparent.user, command.meshid, command.nodeid) != 0);
+              }
+          } catch (e) { }
+          return true; // older MeshCentral without GetNodeRights: keep previous behavior
+      };
+
       switch (command.pluginaction) {
         case 'sendlog': {
           command.method = 'fe_on_message';
@@ -447,9 +1056,6 @@ module.exports.eventlog = function (parent) {
               var splitsessionid = command.sessionid.split('/');
               // Check that we are in the same domain and the user has rights over this node.
               if ((splitsessionid[0] == 'user') && (splitsessionid[1] == myobj.parent.domain.id)) {
-                  // Check if this user has rights to get this message
-                  //if (mesh.links[user._id] == null || ((mesh.links[user._id].rights & 16) == 0)) return; // TODO!!!!!!!!!!!!!!!!!!!!!
-                  
                   // See if the session is connected. If so, go ahead and send this message to the target node
                   var ws = grandparent.wssessions2[command.sessionid];
                   if (ws != null) {
@@ -458,52 +1064,73 @@ module.exports.eventlog = function (parent) {
                       try { ws.send(JSON.stringify(command)); } catch (ex) { }
                   }
               }
-          } else {
-            
           }
-          
           break;
         }
         case 'gatherlogs': { // submit logs to server db
             try {
-                //console.log('Gathering logs for: '+myparent.dbNodeKey+' with data', command.data);
                 obj.meshServer.pluginHandler.eventlog_db.addEventsFor(myparent.dbNodeKey, JSON.parse(command.data));
                 obj.meshServer.pluginHandler.eventlog_db.getLastEventFor(myparent.dbNodeKey, function (rec) {
                     // send a message to the endpoint verifying receipt
-                    // temp: fake a console message until the below makes it into master project
-
-                    myparent.send(JSON.stringify({ 
-                        action: 'plugin', 
-                        pluginaction: 'setLVDOC', 
+                    if (rec == null || rec[0] == null) return;
+                    myparent.send(JSON.stringify({
+                        action: 'plugin',
+                        pluginaction: 'setLVDOC',
                         plugin: 'eventlog',
-                        nodeid: myparent.dbNodeKey, 
+                        nodeid: myparent.dbNodeKey,
                         rights: true,
                         sessionid: true,
-                        value: rec[0].TimeCreated[0]
+                        value: Array.isArray(rec[0].TimeCreated) ? rec[0].TimeCreated[0] : rec[0].TimeCreated
                     }));
-                
                 });
-              } catch (e) { console.log('Error gathering logs: ', e.stack); } 
-            //console.log(new Date().toLocaleString()+' PLUGIN: eventlog: Running gatherlogs')
+              } catch (e) { console.log('Error gathering logs: ', e.stack); }
+            break;
         }
         case 'getNodeHistory': {
             try {
+                if (!userHasNodeRights()) break;
+                // make sure the agent-side module is loaded so the periodic collector runs
+                obj.sendToAgent(grandparent, command.nodeid, { action: 'plugin', plugin: 'eventlog', pluginaction: 'serviceCheck', nodeid: command.nodeid, rights: true, sessionid: true });
+                var q = {
+                    limit: Math.min(Math.max(Number(command.limit) || 250, 1), 1000),
+                    skip: Math.max(Number(command.skip) || 0, 0),
+                    since: (command.since != null) ? Number(command.since) : null
+                };
                 obj.db.getConfigFor(command.nodeid, command.meshid)
                 .then((cfg) => {
-                  obj.db.getEventsFor(command.nodeid, cfg, function(events){
-                    if (myobj.parent.ws != null) {
-                        myobj.parent.ws.send(JSON.stringify({ action: 'plugin', plugin: 'eventlog', method: 'onLoadHistory', events: events, config: cfg }));
-                    }
+                  obj.db.getEventsFor(command.nodeid, cfg, q, function(events, total) {
+                    obj.db.getStatsFor(command.nodeid, function(stats) {
+                      if (myobj.parent.ws != null) {
+                          myobj.parent.ws.send(JSON.stringify({
+                              action: 'plugin', plugin: 'eventlog', method: 'onLoadHistory',
+                              events: events || [], total: total || 0, skip: q.skip,
+                              stored: (stats != null) ? stats.count : 0,
+                              lastCollected: (stats != null) ? stats.last : null,
+                              config: cfg
+                          }));
+                      }
+                    });
                   });
                 });
             } catch (e) { console.log('PLUGIN: eventlog: getNodeHistory error: ', e); }
           break;
+        }
+        case 'collectNow': {
+            try {
+                if (!userHasNodeRights()) break;
+                var ok = obj.sendToAgent(grandparent, command.nodeid, { action: 'plugin', plugin: 'eventlog', pluginaction: 'collectnow', nodeid: command.nodeid, rights: true, sessionid: true });
+                if (myobj.parent.ws != null) {
+                    myobj.parent.ws.send(JSON.stringify({ action: 'plugin', plugin: 'eventlog', method: 'onCollectNow', ok: ok }));
+                }
+            } catch (e) { console.log('PLUGIN: eventlog: collectNow error: ', e); }
+            break;
         }
         case 'adminSaveConfig': {
             let opts = {...command.opts, ...{}};
             var selected = null;
             if (command.id == '_default') {
                 obj.db.updateDefaultConfig(opts)
+                .then(() => { if (opts.retentionDays != null && typeof obj.db.setRetention == 'function') obj.db.setRetention(opts.retentionDays); })
                 .catch((e) => console.log('EVENTLOG: Something went wrong saving the config'));
             } else {
                 obj.db.updateConfig(command.id, opts)
@@ -521,7 +1148,6 @@ module.exports.eventlog = function (parent) {
             break;
         }
         case 'adminDeleteConfig': {
-            let id = command.id;
             obj.db.deleteConfigSet(command.id)
             .then((d) => {
               var x = { action: "plugin", plugin: "eventlog", method: "adminConfigDeleted", id: command.id };
@@ -549,6 +1175,6 @@ module.exports.eventlog = function (parent) {
         }
       }
     }
-    
+
     return obj;
 };

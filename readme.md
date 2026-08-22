@@ -1,8 +1,8 @@
 
 # MeshCentral-EventLog
 
-*Current Version: 0.0.24
-Released: 2021-09-19*
+*Current Version: 0.1.0
+Released: 2026-08-23*
 
 Initially conceived as a proof of concept plugin for the [MeshCentral2](https://github.com/Ylianst/MeshCentral) Project to introduce extensibility into the project without requiring the MeshCentral2 project to incorporate everyone's requested changes into the main project, yet allow it to be accomplished by others. In creating this plugin, we're introducing the appropriate hooks into MeshCentral2 to allow extensibility to anyone who can write a plugin, while trying to modify the core project as little as possible.
 
@@ -28,7 +28,13 @@ As a proof of concept, several methods were employed to become familiar with the
 You can now create configuration sets and assign them to nodes or meshes. Need to collect events from a new log file other than Application/System? Just add it and assign!
 
 #### Endpoint - Plugin tab
-When viewing a remote endpoint, a new "Event Log" tab now appears under the Plugins tab. A live view currently pulls the latest 100 Errors/Warnings from both the Application/System logs. A "History" tab displays the last 20 days of collected event logs. Agents periodically send event log data to the server to be stored.
+When viewing a remote endpoint, a new "Event Log" tab appears under the Plugins tab. It follows MeshCentral's light and night themes and uses the full width of the window.
+
+- **Live** pulls the latest N entries (25–500, selectable on the tab; the admin config set provides the default) of the configured logs and entry types straight from the device, refreshes automatically every 30 s and can be paused.
+- **History** shows the events the agent has collected and sent to the server (about once a minute), with a time range, paged loading, the time of the last collection and a "Collect now" button. Retention is configurable in the Default config set.
+- **Filters**: level chips with counts, Log, Source (application/service name), Event ID lists and ranges (`1112, 100-199`), time range and free-text search. Click a column header to sort.
+- **Layouts**: *Table* (dense, expandable rows) or *Viewer* (facet sidebar with counts, list and a details pane with the full message and raw JSON). *Fold repeats* collapses identical events into one line with an ×N badge.
+- **Export** the filtered rows as CSV.
 
 #### Endpoint - Console tab
 You can see the application logs directly from the console, using the command:

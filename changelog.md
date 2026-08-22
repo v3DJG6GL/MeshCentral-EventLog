@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Known Issues]
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
+## [0.1.0] - 2026-08-23
+### Added
+- Device tab rewritten: full-width table that follows MeshCentral's light/night theme, sortable columns, expandable rows with the full message
+- Filters: level chips with counts, Log and Source selection, Event ID (lists and ranges such as `1112, 100-199`), time range, free-text search; "Filter by this source / ID" shortcuts
+- Two layouts, switchable on the tab: **Table** (default) and **Viewer** (facet sidebar with counts, list, details pane with General / JSON tabs, arrow-key navigation)
+- "Fold repeats": identical events collapse into one line with an ×N badge and the list of occurrences
+- Live view: configurable entries per log (25–500, remembered per user; the admin value is the default), pause/resume, manual refresh, auto-refresh every 30 s that only fetches new events
+- History view: time range, paged loading ("Load more"), status line (events stored, last collection time, retention), "Collect now" button
+- CSV export of the filtered rows
+- History retention configurable (days) in the Default config set
+### Fixed
+- Only ~900 px of the window was used; message column was truncated
+- Dark (night) mode was ignored
+- Non-ASCII characters (e.g. umlauts) were stripped from event messages by the agent
+- Live view filtered on the history entry types instead of the live entry types
+- `gatherlogs` fell through into `getNodeHistory`; history could stay empty until the agent reconnected (the server now nudges the agent module to load when the tab is opened)
+- PowerShell < 3 detection did not actually stop the collection timer
+- Temporary output files of long-running collections could be deleted by a concurrent live request
+- Version 1→2 migration could set `Level = -1` on events without `LevelDisplayName`
+- Event messages were inserted as HTML; they are now escaped
+- Server-side rights check on history / collect requests
+### Changed
+- Events gain a numeric `tc` (event time in ms) field with an index; existing rows are migrated on first start (db version 3)
+
 ## [0.0.24] - 2021-09-19
 ### Fixed
 - Compatibility with MeshCentral > 0.9.7

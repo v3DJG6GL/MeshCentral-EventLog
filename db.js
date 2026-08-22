@@ -11,8 +11,30 @@ var Datastore = null;
 
 module.exports.CreateDB = function(meshserver) {
     var obj = {};
-    obj.dbVersion = 2;
-    const expireLogEntrySeconds = (60 * 60 * 24 * 30); // 30 days
+    obj.dbVersion = 3;
+    const expireLogEntrySeconds = (60 * 60 * 24 * 30); // 30 days (default, see retentionDays in the default config set)
+    // numeric event time (ms since epoch) out of the PowerShell "/Date(ms)/" string or the stored digit array
+    var tcOf = function(tcv) {
+        if (Array.isArray(tcv)) tcv = tcv[0];
+        var m = String(tcv).match(/\d+/);
+        return m ? Number(m[0]) : 0;
+    };
+    var buildQuery = function(nodeid, opts, params) {
+        var proj = { nodeid: nodeid };
+        if (opts.historyLogs) proj.LogName = { $in: String(opts.historyLogs).split(',') };
+        if (opts.historyEntryTypes) proj.Level = { $in: opts.historyEntryTypes.map((n) => Number(n)) };
+        if (params.since) proj.tc = { $gte: Number(params.since) };
+        return proj;
+    };
+    var normParams = function(params) {
+        params = params || {};
+        return { limit: Math.min(Math.max(Number(params.limit) || 250, 1), 1000), skip: Math.max(Number(params.skip) || 0, 0), since: params.since || null };
+    };
+    obj.applyRetention = function() {
+        obj.getAllConfigSets().then(function(sets) {
+            (sets || []).forEach(function(cs) { if (cs.default === true && cs.retentionDays) obj.setRetention(cs.retentionDays); });
+        }).catch(function() { });
+    };
     if (meshserver.args.mongodb) { // use MongDB
       require('mongodb').MongoClient.connect(meshserver.args.mongodb, { useNewUrlParser: true, useUnifiedTopology: true }, function (err, client) {
           if (err != null) { console.log("Unable to connect to database: " + err); process.exit(); return; }
@@ -27,22 +49,28 @@ module.exports.CreateDB = function(meshserver) {
               // Check if we need to reset indexes
               var indexesByName = {}, indexCount = 0;
               for (var i in indexes) { indexesByName[indexes[i].name] = indexes[i]; indexCount++; }
-              if ((indexCount != 4) || (indexesByName['NodeID1'] == null) || (indexesByName['TimeCreated1'] == null) || (indexesByName['ExpireTime1'] == null)) {
+              if ((indexCount != 5) || (indexesByName['NodeID1'] == null) || (indexesByName['TimeCreated1'] == null) || (indexesByName['ExpireTime1'] == null) || (indexesByName['Tc1'] == null)) {
                   // Reset all indexes
                   console.log('Resetting plugin (eventlog) indexes...');
                   obj.eventsFile.dropIndexes(function (err) {
                       obj.eventsFile.createIndex({ nodeid: 1 }, { name: 'NodeID1' });
                       obj.eventsFile.createIndex({ TimeCreated: 1 }, { name: 'TimeCreated1' });
+                      obj.eventsFile.createIndex({ nodeid: 1, tc: -1 }, { name: 'Tc1' });
                       obj.eventsFile.createIndex({ 'time': 1}, { expireAfterSeconds: expireLogEntrySeconds, name: 'ExpireTime1' });
-                  });
-              } else if (indexesByName['ExpireTime1'].expireAfterSeconds != expireLogEntrySeconds) {
-                  // Reset the timeout index
-                  console.log('Resetting plugin (eventlog) expire index...');
-                  obj.eventsFile.dropIndex("ExpireTime1", function (err) {
-                      obj.eventsFile.createIndex({ "time": 1 }, { expireAfterSeconds: expireLogEntrySeconds, name: 'ExpireTime1' });
                   });
               }
           });
+          obj.setRetention = function(days) {
+              var secs = 60 * 60 * 24 * (Number(days) || 30);
+              if (obj.retentionSeconds == secs) return;
+              obj.retentionSeconds = secs;
+              db.command({ collMod: 'plugin_eventlog', index: { name: 'ExpireTime1', expireAfterSeconds: secs } })
+              .catch(function () {
+                  return obj.eventsFile.dropIndex('ExpireTime1').catch(function () { })
+                  .then(function () { return obj.eventsFile.createIndex({ time: 1 }, { expireAfterSeconds: secs, name: 'ExpireTime1' }); });
+              })
+              .catch(function (e) { console.log('EVENTLOG: could not update retention index: ' + e); });
+          };
           
           obj.settingsFile = db.collection('plugin_eventlog_settings');
           
@@ -51,31 +79,38 @@ module.exports.CreateDB = function(meshserver) {
               for (const [i, e] of Object.entries(events)) {
                   e.time = new Date();
                   e.nodeid = nodeid;
-                  e.TimeCreated = e.TimeCreated.match(/\d+/g);
+                  e.TimeCreated = String(e.TimeCreated).match(/\d+/g);
+                  e.tc = tcOf(e.TimeCreated);
                   obj.eventsFile.insertOne(e);
               }
           };
           
-          obj.getEventsFor = function(nodeid, opts, callback) {
-              let proj = { nodeid: nodeid };
-              if (opts.historyEnabled === false) {
-                callback(null);
-                return;
-              }
-              if (opts.historyLogs) {
-                proj.LogName = { $in: opts.historyLogs.split(',') };
-              }
-              if (opts.historyEntryTypes) {
-                proj.Level = { $in: opts.historyEntryTypes.map((n) => Number(n)) };
-              }
-              obj.eventsFile.find(proj).sort({ TimeCreated: -1 }).toArray(function (err, events) {
-                  callback(events);
-              });
+          obj.getEventsFor = function(nodeid, opts, params, callback) {
+              if (typeof params == 'function') { callback = params; params = null; }
+              opts = opts || {}; params = normParams(params);
+              if (opts.historyEnabled === false) { callback(null, 0); return; }
+              var proj = buildQuery(nodeid, opts, params);
+              obj.eventsFile.countDocuments(proj)
+              .then(function (total) {
+                  return obj.eventsFile.find(proj).sort({ tc: -1 }).skip(params.skip).limit(params.limit).toArray()
+                  .then(function (events) { callback(events, total); });
+              })
+              .catch(function (e) { console.log('EVENTLOG: getEventsFor error: ' + e); callback([], 0); });
+          };
+          obj.getStatsFor = function(nodeid, callback) {
+              var stats = { count: 0, last: null };
+              obj.eventsFile.countDocuments({ nodeid: nodeid })
+              .then(function (count) {
+                  stats.count = count || 0;
+                  return obj.eventsFile.find({ nodeid: nodeid }).sort({ time: -1 }).limit(1).project({ time: 1 }).toArray();
+              })
+              .then(function (d) { if (d && d[0]) stats.last = d[0].time; callback(stats); })
+              .catch(function () { callback(stats); });
           };
           obj.getLastEventFor = function(nodeid, callback) {
-              obj.eventsFile.find({ nodeid: nodeid }).sort({ TimeCreated: -1 }).limit(1).toArray(function (err, events) {
-                  callback(events);
-              });
+              obj.eventsFile.find({ nodeid: nodeid }).sort({ tc: -1 }).limit(1).toArray()
+              .then(function (events) { callback(events); })
+              .catch(function () { callback([]); });
           };
           obj.updateDefaultConfig = function(args) {
               args.type = 'configSet';
@@ -166,7 +201,8 @@ module.exports.CreateDB = function(meshserver) {
                         liveEntryTypes: [2,3],
                         historyEnabled: true,
                         historyLogs: 'Application,System',
-                        historyEntryTypes: [2,3]
+                        historyEntryTypes: [2,3],
+                        retentionDays: 30
                       });
                   }
               });
@@ -189,7 +225,7 @@ module.exports.CreateDB = function(meshserver) {
                   var etsi = ['LogAlways', 'Critical', 'Error', 'Warning', 'Info', 'Verbose'];
                   obj.eventsFile.find().sort({ TimeCreated: -1 }).toArray(function (err, events) {
                       for (let [i, e] of Object.entries(events)) {
-                          if (e.LevelDisplayName != '') {
+                          if (typeof e.LevelDisplayName == 'string' && e.LevelDisplayName != '' && etsi.indexOf(e.LevelDisplayName) !== -1) {
                               e.Level = etsi.indexOf(e.LevelDisplayName);
                               delete e.LevelDisplayName;
                               obj.eventsFile.updateOne({_id: e._id}, {$set: e, $unset: {LevelDisplayName: ""} });
@@ -199,8 +235,17 @@ module.exports.CreateDB = function(meshserver) {
                   
                   obj.updateDBVersion(2);
               }
+              if (current_version < 3) { // add numeric event time (tc) used for sorting / range queries
+                  obj.eventsFile.find({ tc: { $exists: false } }).toArray(function (err, events) {
+                      for (let [i, e] of Object.entries(events || [])) {
+                          obj.eventsFile.updateOne({ _id: e._id }, { $set: { tc: tcOf(e.TimeCreated) } });
+                      }
+                  });
+                  obj.updateDBVersion(3);
+              }
           });
           obj.checkForDefault();
+          obj.applyRetention();
     });  
     } else { // use NeDb
         Datastore = require('nedb');
@@ -209,6 +254,7 @@ module.exports.CreateDB = function(meshserver) {
             obj.eventsFile.persistence.setAutocompactionInterval(40000);
             obj.eventsFile.ensureIndex({ fieldName: 'nodeid' });
             obj.eventsFile.ensureIndex({ fieldName: 'TimeCreated' });
+            obj.eventsFile.ensureIndex({ fieldName: 'tc' });
             obj.eventsFile.ensureIndex({ fieldName: 'time', expireAfterSeconds: expireLogEntrySeconds });
         }
         if (obj.settingsFile == null) {
@@ -221,29 +267,40 @@ module.exports.CreateDB = function(meshserver) {
             for (const [i, e] of Object.entries(events)) {
                 e.time = new Date();
                 e.nodeid = nodeid;
-                e.TimeCreated = e.TimeCreated.match(/\d+/g);
+                e.TimeCreated = String(e.TimeCreated).match(/\d+/g);
+                e.tc = tcOf(e.TimeCreated);
                 obj.eventsFile.insert(e);
             }
         };
-        obj.getEventsFor = function(nodeid, opts, callback) {
-            let proj = { nodeid: nodeid };
-            if (opts.historyEnabled === false) {
-              callback(null);
-              return;
-            }
-            if (opts.historyLogs) {
-              proj.LogName = { $in: opts.historyLogs.split(',') };
-            }
-            if (opts.historyEntryTypes) {
-              proj.Level = { $in: opts.historyEntryTypes.map((n) => Number(n)) };
-            }
-            obj.eventsFile.find(proj).sort({ TimeCreated: -1 }).exec(function (err, events) {
-                callback(events);
+        obj.getEventsFor = function(nodeid, opts, params, callback) {
+            if (typeof params == 'function') { callback = params; params = null; }
+            opts = opts || {}; params = normParams(params);
+            if (opts.historyEnabled === false) { callback(null, 0); return; }
+            var proj = buildQuery(nodeid, opts, params);
+            obj.eventsFile.count(proj, function (err, total) {
+                obj.eventsFile.find(proj).sort({ tc: -1 }).skip(params.skip).limit(params.limit).exec(function (err, events) {
+                    callback(events || [], total || 0);
+                });
+            });
+        };
+        obj.getStatsFor = function(nodeid, callback) {
+            obj.eventsFile.count({ nodeid: nodeid }, function (err, count) {
+                obj.eventsFile.find({ nodeid: nodeid }, { time: 1 }).sort({ time: -1 }).limit(1).exec(function (err, d) {
+                    callback({ count: count || 0, last: (d && d[0]) ? d[0].time : null });
+                });
             });
         };
         obj.getLastEventFor = function(nodeid, callback) {
-            obj.eventsFile.find({ nodeid: nodeid }).sort({ TimeCreated: -1 }).limit(1).exec(function (err, events) {
-                callback(events);
+            obj.eventsFile.find({ nodeid: nodeid }).sort({ tc: -1 }).limit(1).exec(function (err, events) {
+                callback(events || []);
+            });
+        };
+        obj.setRetention = function(days) {
+            var secs = 60 * 60 * 24 * (Number(days) || 30);
+            if (obj.retentionSeconds == secs) return;
+            obj.retentionSeconds = secs;
+            obj.eventsFile.removeIndex('time', function () {
+                obj.eventsFile.ensureIndex({ fieldName: 'time', expireAfterSeconds: secs });
             });
         };
         obj.updateDefaultConfig = function(args) {
@@ -358,7 +415,8 @@ module.exports.CreateDB = function(meshserver) {
                     liveEntryTypes: [2,3],
                     historyEnabled: true,
                     historyLogs: 'Application,System',
-                    historyEntryTypes: [2,3]
+                    historyEntryTypes: [2,3],
+                    retentionDays: 30
                   });
               }
           });
@@ -387,7 +445,7 @@ module.exports.CreateDB = function(meshserver) {
               var etsi = ['LogAlways', 'Critical', 'Error', 'Warning', 'Info', 'Verbose'];
               obj.eventsFile.find().sort({ TimeCreated: -1 }).exec(function (err, events) {
                   for (let [i, e] of Object.entries(events)) {
-                      if (e.LevelDisplayName != '') {
+                      if (typeof e.LevelDisplayName == 'string' && e.LevelDisplayName != '' && etsi.indexOf(e.LevelDisplayName) !== -1) {
                           e.Level = etsi.indexOf(e.LevelDisplayName);
                           delete e.LevelDisplayName;
                           obj.eventsFile.update({_id: e._id}, {$set: e, $unset: {LevelDisplayName: ""} });
@@ -397,9 +455,18 @@ module.exports.CreateDB = function(meshserver) {
               
               obj.updateDBVersion(2);
           }
+          if (current_version < 3) { // add numeric event time (tc) used for sorting / range queries
+              obj.eventsFile.find({ tc: { $exists: false } }).exec(function (err, events) {
+                  for (let [i, e] of Object.entries(events || [])) {
+                      obj.eventsFile.update({ _id: e._id }, { $set: { tc: tcOf(e.TimeCreated) } });
+                  }
+              });
+              obj.updateDBVersion(3);
+          }
       });
       
       obj.checkForDefault();
+      obj.applyRetention();
     }
     
     return obj;

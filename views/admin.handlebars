@@ -30,7 +30,8 @@
           liveEntryTypes: [2,3],
           historyEnabled: true,
           historyLogs: 'Application,System',
-          historyEntryTypes: [2,3]
+          historyEntryTypes: [2,3],
+          retentionDays: 30
         });
         let cfdd = document.querySelector('#elconfigSet');
         let newopt = `<option value="_new">New Config</option>`;
@@ -55,7 +56,8 @@
               liveEntryTypes: [2,3],
               historyEnabled: true,
               historyLogs: 'Application,System',
-              historyEntryTypes: [2,3]
+              historyEntryTypes: [2,3],
+              retentionDays: 30
             };
           }
         } else { // get options from config
@@ -73,6 +75,7 @@
             case 'liveLogs':
             case 'historyLogs':
             case 'liveNum':
+            case 'retentionDays':
             case 'name':
               Q('el'+k).value = v;
             break;
@@ -103,7 +106,8 @@
           liveEntryTypes: Array.from(document.querySelectorAll('#elliveEntryTypes option:checked')).map(el => el.value),
           historyEnabled: (Q('elhistoryEnabled').checked) ? true : false,
           historyLogs: Q('elhistoryLogs').value,
-          historyEntryTypes: Array.from(document.querySelectorAll('#elhistoryEntryTypes option:checked')).map(el => el.value)
+          historyEntryTypes: Array.from(document.querySelectorAll('#elhistoryEntryTypes option:checked')).map(el => el.value),
+          retentionDays: Math.max(1, Number(Q('elretentionDays').value) || 30)
         };
         
         if (configId == '') { // save defaults
@@ -372,7 +376,7 @@
             <tr><td>Name</td><td><input type="text" id="elname" name="elName" value="" class="elLongTxt"></td></tr>
             <tr><td colspan="2" style="font-weight: bold; text-align:center;">Live Config</td></tr>
             <tr><td>Logs (comma delimeted)</td><td><input type="text" id="elliveLogs" name="liveLogs" class="elLongTxt"></td></tr>
-            <tr><td>How many entries from each log to display</td><td><input type="text" id="elliveNum" name="liveNum"></td></tr>
+            <tr><td>Default entries per log in the Live view<br><small>Users can pick 25&ndash;500 on the device tab; this is the initial value.</small></td><td><input type="text" id="elliveNum" name="liveNum"></td></tr>
             <tr><td>Entry Types</td><td>
               <select id="elliveEntryTypes" name="liveEntryTypes[]" multiple class="elMSel">
                 <option value="0">LogAlways</option>
@@ -396,6 +400,7 @@
                 <option value="5">Verbose</option>
               </select><td>
             </tr>
+            <tr><td>Retention (days)<br><small>How long collected events are kept. Server-wide; taken from the Default set.</small></td><td><input type="text" id="elretentionDays" name="retentionDays" value="30"></td></tr>
           <tr><td>&nbsp;</td><td><span id="elConfigBtns"><button onclick="return saveConfig();">Save</button> <button onclick="return deleteConfig();">Delete</button></span></td></tr>
           </table>
           <input type="hidden" name="configId" id="elid" value="" />

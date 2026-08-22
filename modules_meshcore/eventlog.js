@@ -62,13 +62,13 @@ var pushTmpFile = function(fn) {
     db.Put('pluginEventLog_tmpfns', fns);
     dbg('Pushed tmp ' + fn)
 };
-var popTmpFile = function(fn) { // remove tmp file and other (possibly orphaned) files older than 10 sec
+var popTmpFile = function(fn) { // remove tmp file and other (possibly orphaned) files older than 120 sec
     var now = Math.floor(new Date() / 1000);
     var fns = getTmpFileNames();
     var newFns = [];
     fns.forEach(function(t) {
         dbg('t is ' + JSON.stringify(t))
-        if ( t.name == fn || ((now - t.time) > 10)) {
+        if ( t.name == fn || ((now - t.time) > 120)) {
             try { require('fs').unlinkSync(t.name); } catch(e) { }
             dbg('popped tmp ' + fn)
         } else {
@@ -132,7 +132,7 @@ var runPwshCollector = function(func, passedParams) {
             o.stdout = require('fs').readFileSync(fileName, 'utf8').toString();
             if (o.stdout) {
                 o.stdout = o.stdout.trim();
-                o.stdout = o.stdout.replace(/[^\x20-\x7E]/g, ''); 
+                o.stdout = o.stdout.replace(/^\uFEFF/, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ''); 
                 func(o);
             }
             popTmpFile(fileName);
@@ -163,7 +163,7 @@ var runPwshTest = function(func) {
             o.stdout = require('fs').readFileSync(fileName, 'utf8').toString();
             if (o.stdout) {
                 o.stdout = o.stdout.trim();
-                o.stdout = o.stdout.replace(/[^\x20-\x7E]/g, ''); 
+                o.stdout = o.stdout.replace(/^\uFEFF/, '').replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ''); 
                 func(o);
             }
             popTmpFile(fileName);
@@ -190,15 +190,18 @@ var capturePeriodicEventLog = function() {
       dbg('Periodic runner not running (non-win32)');
       return false;
     }
-    dbg('Periodic runner starting');
-    var db = require('SimpleDataStore').Shared();
-    // this is where we collect logs, either to a file to be Xferred later, or now, whichev.
-    var lvdoc = db.Get('pluginEventLog_lvdoc');
-    var cfg = getEventLogConfig();
-    var fromLogs = cfg.historyLogs;
-    var entryTypes = cfg.historyEntryTypes;
-    if (cfg.historyEnabled !== true) return;
-    runPwshCollector(gatherlogsCallback, {fromLog: fromLogs, num: 200, sinceTime: lvdoc, entryTypeNum: entryTypes });
+    try {
+        dbg('Periodic runner starting');
+        var db = require('SimpleDataStore').Shared();
+        // this is where we collect logs, either to a file to be Xferred later, or now, whichev.
+        var lvdoc = db.Get('pluginEventLog_lvdoc');
+        if (lvdoc == '' || lvdoc == null || isNaN(Number(lvdoc))) lvdoc = null;
+        var cfg = getEventLogConfig();
+        var fromLogs = cfg.historyLogs;
+        var entryTypes = cfg.historyEntryTypes;
+        if (cfg.historyEnabled !== true) return;
+        runPwshCollector(gatherlogsCallback, {fromLog: fromLogs, num: 200, sinceTime: lvdoc, entryTypeNum: entryTypes });
+    } catch (e) { dbg('Periodic runner error: ' + e); }
 };
 
 if (periodicEventLogTimer == null) { periodicEventLogTimer = setInterval(capturePeriodicEventLog, 1*60*1000); } // 1 minute(s)
@@ -283,12 +286,25 @@ function consoleaction(args, rights, sessionid, parent) {
         case 'getlivelogs': {
             var db = require('SimpleDataStore').Shared();
             var cfg = getEventLogConfig();
-            var logList = cfg.liveLogs.split(',');
+            var logList = String(cfg.liveLogs).split(',');
+            var num = Number(args.num);
+            if (isNaN(num) || num <= 0) num = Number(cfg.liveNum) || 100;
+            if (num > 1000) num = 1000;
+            var entryTypes = cfg.liveEntryTypes || cfg.historyEntryTypes;
+            var sinceTime = null;
+            if (args.since != null && !isNaN(Number(args.since))) {
+                // args.since is UTC seconds; the collector builds its StartTime from local 1970-01-01, so shift by the local offset
+                sinceTime = Number(args.since) - (new Date().getTimezoneOffset() * 60) + 1;
+            }
             try { 
               for (var i in logList) {
-                runPwshCollector(getlogCallback, {'fromLog': logList[i], 'num': Number(cfg.liveNum), 'entryTypeNum': cfg.historyEntryTypes, 'convertToJson': true});
+                runPwshCollector(getlogCallback, {'fromLog': logList[i], 'num': num, 'entryTypeNum': entryTypes, 'convertToJson': true, 'sinceTime': sinceTime});
               }
             } catch(e) { dbg('getlivelogs error '+e); }
+            break;
+        }
+        case 'collectnow': { // run the periodic history collection right away (requested from the device page)
+            try { capturePeriodicEventLog(); } catch (e) { dbg('collectnow error ' + e); }
             break;
         }
         case 'setLVDOC': { // set last verified date of collection (e.g. last successful log collection) from the server
@@ -325,6 +341,7 @@ function consoleaction(args, rights, sessionid, parent) {
                 var version = parseInt(output.stdout);
                 if (version <= 2) {
                     dbg('Plugin EventLog disabled on endpoint. Powershell version not capable');
+                    if (periodicEventLogTimer != null) { try { clearInterval(periodicEventLogTimer); } catch (e) { } }
                     periodicEventLogTimer = null;
                 } else {
                     dbg('Powershell version is >= 3. Continuing as planned.');
