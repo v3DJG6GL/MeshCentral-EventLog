@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - CSV export of the filtered rows
 - History retention configurable (days) in the Default config set
 ### Fixed
+- Plugin database never initialized on installs where the `promise` / `nedb` packages are not present (e.g. the Docker image, MeshCentral ≥ 1.1 which ships `@seald-io/nedb`): `server_startup` failed with `Cannot find module 'promise'`, leaving History permanently empty. Dependencies are now resolved through MeshCentral's own module tree and `promise` is no longer required.
 - Only ~900 px of the window was used; message column was truncated
 - Dark (night) mode was ignored
 - Non-ASCII characters (e.g. umlauts) were stripped from event messages by the agent

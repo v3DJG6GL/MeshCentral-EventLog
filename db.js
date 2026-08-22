@@ -6,8 +6,18 @@
 */
 
 "use strict";
-require('promise');
 var Datastore = null;
+
+// Resolve a module from the plugin folder first, then from MeshCentral's own node_modules
+// (plugins live in meshcentral-data/plugins, which is not always below MeshCentral's node_modules).
+function loadModule(names) {
+    var lastErr = null;
+    for (var i in names) {
+        try { return require(names[i]); } catch (e) { lastErr = e; }
+        try { if (require.main && typeof require.main.require == 'function') return require.main.require(names[i]); } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error('Module not found: ' + names.join(', '));
+}
 
 module.exports.CreateDB = function(meshserver) {
     var obj = {};
@@ -36,7 +46,7 @@ module.exports.CreateDB = function(meshserver) {
         }).catch(function() { });
     };
     if (meshserver.args.mongodb) { // use MongDB
-      require('mongodb').MongoClient.connect(meshserver.args.mongodb, { useNewUrlParser: true, useUnifiedTopology: true }, function (err, client) {
+      loadModule(['mongodb']).MongoClient.connect(meshserver.args.mongodb, { useNewUrlParser: true, useUnifiedTopology: true }, function (err, client) {
           if (err != null) { console.log("Unable to connect to database: " + err); process.exit(); return; }
           Datastore = client;
           
@@ -122,22 +132,16 @@ module.exports.CreateDB = function(meshserver) {
               args.type = "configSet";
               args.uid = Math.random().toString(32).replace('0.', '');
               if (id == '_new') return obj.settingsFile.insertOne(args);
-              if (typeof require('mongodb').ObjectID == 'function') {
-                  id = require('mongodb').ObjectID(id);
-              } else {
-                  id = require('mongodb').ObjectId(id);
-              }
+              var mdb = loadModule(['mongodb']);
+              id = (typeof mdb.ObjectID == 'function') ? mdb.ObjectID(id) : new mdb.ObjectId(id);
               return obj.settingsFile.updateOne({_id: id}, { $set: args }, {upsert: true});
           };
           obj.getAllConfigSets = function() {
               return obj.settingsFile.find({type: "configSet"}).project({type: 0}).toArray();
           };
           obj.deleteConfigSet = function(id) {
-              if (typeof require('mongodb').ObjectID == 'function') {
-                  id = require('mongodb').ObjectID(id);
-              } else {
-                  id = require('mongodb').ObjectId(id);
-              }
+              var mdb = loadModule(['mongodb']);
+              id = (typeof mdb.ObjectID == 'function') ? mdb.ObjectID(id) : new mdb.ObjectId(id);
               return obj.settingsFile.deleteOne({_id: id});
           };
           obj.assignConfig = function(configId, sel) {
@@ -248,7 +252,7 @@ module.exports.CreateDB = function(meshserver) {
           obj.applyRetention();
     });  
     } else { // use NeDb
-        Datastore = require('nedb');
+        Datastore = loadModule(['@seald-io/nedb', '@yetzt/nedb', 'nedb']); // same fallback order as MeshCentral itself
         if (obj.eventsFile == null) {
             obj.eventsFile = new Datastore({ filename: meshserver.getConfigFilePath('plugin-eventlog-events.db'), autoload: true });
             obj.eventsFile.persistence.setAutocompactionInterval(40000);
