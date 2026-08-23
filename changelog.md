@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Known Issues]
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
+## [0.1.2] - 2026-08-23
+### Added
+- Resizable columns in both layouts: drag the header edge (live width readout), double-click to fit to content; widths are remembered per layout
+- Resizable table height (rail under the table) and Viewer list/details split (rail between them); double-click resets
+- Row density control (Rows: Compact / Normal / Wrap); Wrap shows long messages on several lines
+- "Reset column widths / height" link in the status line
+### Fixed
+- "WebSocket is closed before the connection is established" in the browser console: the live tunnel was stopped and restarted on every device refresh (tab switch, node update, connection change). It is now kept while the same device stays selected, and the tab's filters/data survive refreshes too
+- Status line says "Agent not connected" instead of showing a blank tab when the agent goes offline
+### Changed
+- Default column widths are measured from the real font and date format, so Level and Time are no longer truncated
+- "Show" offers 10 and 15 rows as well
+
 ## [0.1.1] - 2026-08-23
 ### Fixed
 - Plugin database never initialized when `promise`/`nedb` are absent (Docker image, MeshCentral ≥ 1.1) — root cause of the empty History tab

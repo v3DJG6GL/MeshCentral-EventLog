@@ -78,7 +78,19 @@ module.exports.eventlog = function (parent) {
       'elLoadHistory',
       'elLoadMore',
       'elCollectNow',
-      'elExportCsv'
+      'elExportCsv',
+      // sizing / density (v0.1.2)
+      'elLoadJson',
+      'elSetRows',
+      'elColDefault',
+      'elColW',
+      'elSaveCols',
+      'elSetColW',
+      'elRzDown',
+      'elRzFit',
+      'elGripDown',
+      'elGripReset',
+      'elResetSizes'
     ];
 
     obj._pluginPermissions = function() {
@@ -131,6 +143,9 @@ module.exports.eventlog = function (parent) {
                 fold: (getstore('evl_fold', '1') == '1'),
                 show: Number(getstore('evl_show', '100')),
                 range: getstore('evl_range', '24h'),
+                rows: getstore('evl_rows', 'normal'),                // 'dense' | 'normal' | 'wrap'
+                cols: { ledger: ph.elLoadJson('evl_cols_ledger'), viewer: ph.elLoadJson('evl_cols_viewer') },   // user column widths (px) per layout
+                heights: { ledger: Number(getstore('evl_h_ledger', '0')) || 0, viewer: Number(getstore('evl_h_viewer', '0')) || 0 }, // user table height (px) per layout, 0 = automatic
                 filters: { levels: null, logs: null, sources: null, ids: '', text: '' },
                 sort: { key: 'time', dir: -1 },
                 selected: null, expanded: {}, dtab: 'general', raw: {},
@@ -141,6 +156,11 @@ module.exports.eventlog = function (parent) {
             };
         }
         return ph.st;
+    };
+
+    obj.elLoadJson = function(name) {
+        try { var v = getstore(name, ''); if (v) { var o = JSON.parse(v); if (o && typeof o == 'object') return o; } } catch (e) { }
+        return {};
     };
 
     obj.elLevelInfo = function() {
@@ -310,8 +330,27 @@ body.night #pluginEventLog {
 #pluginEventLog .evlChip.filt { border-color:var(--evl-acc); background:transparent; }
 #pluginEventLog .evlChip .x { color:var(--evl-muted); margin-left:2px; }
 #pluginEventLog table.evlLog { width:100%; border-collapse:collapse; table-layout:fixed; }
-#pluginEventLog table.evlLog th { text-align:left; font-weight:bold; color:var(--evl-muted); font-size:12px; padding:5px 8px; border-bottom:1px solid var(--evl-line); white-space:nowrap; cursor:pointer; position:sticky; top:0; background:var(--evl-bg); z-index:1; }
+#pluginEventLog table.evlLog th { text-align:left; font-weight:bold; color:var(--evl-muted); font-size:12px; padding:5px 8px; border-bottom:1px solid var(--evl-line); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; position:sticky; top:0; background:var(--evl-bg); z-index:1; }
+#pluginEventLog .evlRz { position:absolute; top:0; right:0; width:8px; height:100%; cursor:col-resize; z-index:2; user-select:none; touch-action:none; }
+#pluginEventLog .evlRz::after { content:""; position:absolute; top:25%; bottom:25%; right:3px; width:1px; background:var(--evl-line); }
+#pluginEventLog .evlRz:hover::after, #pluginEventLog .evlRz.active::after { top:0; bottom:0; width:2px; right:2px; background:var(--evl-acc); }
+#pluginEventLog .evlGuide { position:absolute; width:0; border-left:1px dashed var(--evl-acc); pointer-events:none; z-index:3; }
+#pluginEventLog .evlGuide span { position:absolute; top:6px; left:6px; background:var(--evl-acc); color:var(--evl-acc-ink); font-size:11px; padding:1px 6px; border-radius:3px; white-space:nowrap; font-family:Consolas,"DejaVu Sans Mono",monospace; }
+#pluginEventLog .evlResizing, #pluginEventLog .evlResizing * { cursor:col-resize !important; user-select:none; }
+#pluginEventLog .evlResizing table.evlLog tbody tr:hover:not(.evlExpand) td { background:inherit; }
+#pluginEventLog .evlGrip, #pluginEventLog .evlSplit { height:9px; cursor:row-resize; background:var(--evl-alt); border-top:1px solid var(--evl-line2); position:relative; touch-action:none; user-select:none; }
+#pluginEventLog .evlSplit { height:7px; border-top:1px solid var(--evl-line); border-bottom:1px solid var(--evl-line); }
+#pluginEventLog .evlGrip::after, #pluginEventLog .evlSplit::after { content:""; position:absolute; left:50%; top:3px; width:34px; height:1px; margin-left:-17px; background:var(--evl-line); box-shadow:0 2px 0 var(--evl-line); }
+#pluginEventLog .evlSplit::after { top:2px; }
+#pluginEventLog .evlGrip:hover, #pluginEventLog .evlGrip.active, #pluginEventLog .evlSplit:hover, #pluginEventLog .evlSplit.active { background:var(--evl-sel); }
+#pluginEventLog .evlGrip:hover::after, #pluginEventLog .evlGrip.active::after, #pluginEventLog .evlSplit:hover::after, #pluginEventLog .evlSplit.active::after { background:var(--evl-acc); box-shadow:0 2px 0 var(--evl-acc); }
+#pluginEventLog .evlDense table.evlLog tr:not(.evlExpand) td { padding:1px 8px; font-size:12px; }
+#pluginEventLog .evlDense table.evlLog th { padding:3px 8px; }
+#pluginEventLog .evlWrap table.evlLog tr:not(.evlExpand) td { white-space:normal; word-break:break-word; }
+#pluginEventLog .evlWrap table.evlLog tr:not(.evlExpand) td.evlCLv, #pluginEventLog .evlWrap table.evlLog tr:not(.evlExpand) td.evlCTm, #pluginEventLog .evlWrap table.evlLog tr:not(.evlExpand) td.evlCId { white-space:nowrap; }
+#pluginEventLog .evlLink { color:var(--evl-acc); cursor:pointer; text-decoration:underline dotted; }
 #pluginEventLog table.evlLog th.sorted { color:var(--evl-ink); }
+#pluginEventLog table.evlLog td.evlCId { text-align:right; }
 #pluginEventLog table.evlLog td { padding:4px 8px; border-bottom:1px solid var(--evl-line2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; vertical-align:top; }
 #pluginEventLog table.evlLog tbody tr { cursor:pointer; }
 #pluginEventLog table.evlLog tbody tr:nth-child(even):not(.evlExpand) td { background:var(--evl-alt); }
@@ -345,8 +384,8 @@ body.night #pluginEventLog {
 #pluginEventLog .evlFacet .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #pluginEventLog .evlFacet .n { margin-left:auto; color:var(--evl-muted); font-variant-numeric:tabular-nums; font-size:12px; }
 #pluginEventLog .evlMore { color:var(--evl-acc); font-size:12px; cursor:pointer; display:inline-block; margin-top:3px; }
-#pluginEventLog .evlScroll { overflow:auto; max-height:calc(100vh - 270px); min-height:160px; }
-#pluginEventLog .evlVList { overflow:auto; max-height:max(200px, calc(100vh - 520px)); outline:none; }
+#pluginEventLog .evlScroll { overflow:auto; max-height:calc(100vh - 270px); min-height:160px; position:relative; }
+#pluginEventLog .evlVList { overflow:auto; max-height:max(200px, calc(100vh - 520px)); outline:none; position:relative; }
 #pluginEventLog .evlVList table.evlLog th { top:0; }
 #pluginEventLog .evlDetails { border-top:1px solid var(--evl-line); }
 #pluginEventLog .evlDTabs { display:flex; align-items:center; border-bottom:1px solid var(--evl-line); background:var(--evl-alt); }
@@ -397,7 +436,10 @@ body.night #pluginEventLog {
         [['all','Any time'],['1h','Last hour'],['24h','Last 24 h'],['7d','Last 7 days'],['30d','Last 30 days']].forEach(function(o){ h += '<option value=' + o[0] + (st.range == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
         h += '</select>';
         h += '<span class=evlLbl>Show</span> <select id=evlShowSel class=evlSel title="Entries per log (Live) / per page (History)" onchange="return pluginHandler.eventlog.elSetShow(this.value)">';
-        [25,50,100,250,500].forEach(function(n){ h += '<option value=' + n + (st.show == n ? ' selected' : '') + '>' + n + '</option>'; });
+        [10,15,25,50,100,250,500].forEach(function(n){ h += '<option value=' + n + (st.show == n ? ' selected' : '') + '>' + n + '</option>'; });
+        h += '</select>';
+        h += '<span class=evlLbl>Rows</span> <select id=evlRowsSel class=evlSel title="Row density: Compact (tight), Normal, Wrap (message text wraps onto several lines)" onchange="return pluginHandler.eventlog.elSetRows(this.value)">';
+        [['dense','Compact'],['normal','Normal'],['wrap','Wrap']].forEach(function(o){ h += '<option value=' + o[0] + (st.rows == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
         h += '</select>';
         h += '<button id=evlFoldBtn class="evlBtn ' + (st.fold ? 'on' : '') + '" title="Fold repeated events into one line" onclick="return pluginHandler.eventlog.elToggleFold()">&#8659; Fold repeats</button>';
         h += '<button id=evlPauseBtn class=evlBtn title="Pause live updates" onclick="return pluginHandler.eventlog.elTogglePause()" ' + (st.view == 'history' ? 'style=display:none' : '') + '>' + (st.paused ? '&#9654;' : '&#10074;&#10074;') + '</button>';
@@ -487,22 +529,26 @@ body.night #pluginEventLog {
         st._matching = frows.length;
         if (st.view == 'live' && frows.length > st.show) frows = frows.slice(0, st.show); // "Show N" = N displayed rows
         st._visible = frows.length;
-        var sortTh = function(key, label, w) {
+        var sortTh = function(key, label) {
             var s = (st.sort.key == key) ? (' class=sorted') : '';
             var ar = (st.sort.key == key) ? (st.sort.dir == -1 ? ' &#9660;' : ' &#9650;') : '';
-            return '<th' + (w ? ' style=width:' + w + 'px' : '') + s + ' onclick="return pluginHandler.eventlog.elSetSort(\'' + key + '\')">' + label + ar + '</th>';
+            var w = ph.elColW(key);
+            var rz = (key != 'message') ? '<span class=evlRz title="Drag to resize &middot; double-click to fit" onpointerdown="return pluginHandler.eventlog.elRzDown(event,\'' + key + '\')" ondblclick="return pluginHandler.eventlog.elRzFit(event,\'' + key + '\')" onclick="event.stopPropagation();return false"></span>' : '';
+            return '<th' + (w ? ' style=width:' + w + 'px' : '') + s + ' onclick="return pluginHandler.eventlog.elSetSort(\'' + key + '\')">' + label + ar + rz + '</th>';
         };
+        var dens = (st.rows == 'dense') ? ' evlDense' : (st.rows == 'wrap') ? ' evlWrap' : '';
+        var hstyle = st.heights[st.layout] ? ' style="height:' + st.heights[st.layout] + 'px;max-height:none;min-height:0"' : '';
         var rowHtml = function(r, mode) {
             var ev = r.ev;
             var selCls = (mode == 'viewer' && st.selected == ev.key) || (mode == 'ledger' && st.expanded[ev.key]) ? ' class=evlSelRow' : '';
             var rep = (r.count > 1) ? '<span class=evlRep title="Identical event repeated"><b>&times;' + r.count + '</b></span>' : '';
             var h = '<tr' + selCls + ' onclick="return pluginHandler.eventlog.elRowClick(\'' + ev.key + '\')">';
-            h += '<td style=width:96px><span class="evlLv ' + ev.levelCls + '"><i></i>' + esc(ev.levelName) + '</span></td>';
-            h += '<td style=width:150px class=evlMono>' + ph.elFmtTime(ev.time) + '</td>';
-            if (mode == 'ledger') h += '<td style=width:105px title="' + esc(ev.log) + '">' + esc(ev.log) + '</td>';
-            h += '<td style=width:215px title="' + esc(ev.source) + '">' + esc(ev.source) + '</td>';
-            h += '<td style="width:70px;text-align:right" class=evlMono>' + esc(ev.id) + '</td>';
-            h += '<td title="' + esc(ev.message).substring(0, 500) + '">' + rep + esc(ev.message) + '</td></tr>';
+            h += '<td class=evlCLv><span class="evlLv ' + ev.levelCls + '"><i></i>' + esc(ev.levelName) + '</span></td>';
+            h += '<td class="evlCTm evlMono">' + ph.elFmtTime(ev.time) + '</td>';
+            if (mode == 'ledger') h += '<td class=evlCLog title="' + esc(ev.log) + '">' + esc(ev.log) + '</td>';
+            h += '<td class=evlCSrc title="' + esc(ev.source) + '">' + esc(ev.source) + '</td>';
+            h += '<td class="evlCId evlMono">' + esc(ev.id) + '</td>';
+            h += '<td class=evlCMsg title="' + esc(ev.message).substring(0, 500) + '">' + rep + esc(ev.message) + '</td></tr>';
             if (mode == 'ledger' && st.expanded[ev.key]) {
                 h += '<tr class=evlExpand onclick="event.stopPropagation()"><td colspan=6>' + ph.elRenderDetailHtml(r) + '</td></tr>';
             }
@@ -511,13 +557,14 @@ body.night #pluginEventLog {
         var h = '';
         if (st.layout == 'viewer') {
             h += '<div class=evlViewer><div class=evlFacets id=evlFacets>' + ph.elRenderFacets(fr) + '</div>';
-            h += '<div><div class=evlVList id=evlVList tabindex=0 onkeydown="return pluginHandler.eventlog.elKeyNav(event)"><table class=evlLog><thead><tr>' +
-                 sortTh('level', 'Level', 96) + sortTh('time', 'Time', 150) + sortTh('source', 'Source', 215) + sortTh('id', 'ID', 70) + sortTh('message', 'Message') +
+            h += '<div><div class="evlVList' + dens + '" id=evlVList tabindex=0' + hstyle + ' onkeydown="return pluginHandler.eventlog.elKeyNav(event)"><table class=evlLog><thead><tr>' +
+                 sortTh('level', 'Level') + sortTh('time', 'Time') + sortTh('source', 'Source') + sortTh('id', 'ID') + sortTh('message', 'Message') +
                  '</tr></thead><tbody>';
             var selRep = null;
             frows.forEach(function(r) { h += rowHtml(r, 'viewer'); if (st.selected == r.ev.key) selRep = r; });
             if (!frows.length) h += '<tr><td colspan=5><div class=evlEmpty>' + ph.elEmptyText() + '</div></td></tr>';
             h += '</tbody></table></div>';
+            h += '<div class=evlSplit title="Drag to change the list height &middot; double-click to reset" onpointerdown="return pluginHandler.eventlog.elGripDown(event,\'evlVList\')" ondblclick="return pluginHandler.eventlog.elGripReset()"></div>';
             if (selRep == null && frows.length) { selRep = frows[0]; st.selected = selRep.ev.key; }
             h += '<div class=evlDetails id=evlDetails>';
             if (selRep) {
@@ -540,12 +587,13 @@ body.night #pluginEventLog {
             } else { h += '<div class=evlEmpty>Select an event to see its details.</div>'; }
             h += '</div></div></div>';
         } else {
-            h += '<div class=evlScroll><table class=evlLog><thead><tr>' +
-                 sortTh('level', 'Level', 96) + sortTh('time', 'Time', 150) + sortTh('log', 'Log', 105) + sortTh('source', 'Source', 215) + sortTh('id', 'Event ID', 70) + sortTh('message', 'Message') +
+            h += '<div class="evlScroll' + dens + '" id=evlScroll' + hstyle + '><table class=evlLog><thead><tr>' +
+                 sortTh('level', 'Level') + sortTh('time', 'Time') + sortTh('log', 'Log') + sortTh('source', 'Source') + sortTh('id', 'Event ID') + sortTh('message', 'Message') +
                  '</tr></thead><tbody>';
             frows.forEach(function(r) { h += rowHtml(r, 'ledger'); });
             if (!frows.length) h += '<tr><td colspan=6><div class=evlEmpty>' + ph.elEmptyText() + '</div></td></tr>';
             h += '</tbody></table></div>';
+            h += '<div class=evlGrip title="Drag to change the table height &middot; double-click to reset" onpointerdown="return pluginHandler.eventlog.elGripDown(event,\'evlScroll\')" ondblclick="return pluginHandler.eventlog.elGripReset()"></div>';
         }
         QH('evlBody', h);
     };
@@ -588,7 +636,8 @@ body.night #pluginEventLog {
         if (!Q('evlStatus')) return;
         var h = '';
         if (st.view == 'live') {
-            if (st.paused) h += '<span class=warn>&#10074;&#10074; Paused' + (st.pending.length ? ' &middot; ' + st.pending.length + ' new buffered' : '') + '</span>';
+            if (ph.livelog == null) h += '<span class=warn>&#9679; Agent not connected &mdash; live view resumes when it reconnects</span>';
+            else if (st.paused) h += '<span class=warn>&#10074;&#10074; Paused' + (st.pending.length ? ' &middot; ' + st.pending.length + ' new buffered' : '') + '</span>';
             else h += '<span class=live>&#9679; Live &middot; auto-refresh every 30 s</span>';
             h += '<span>Showing ' + (st._visible || 0) + ' of ' + (st._matching || 0) + (st.fold ? ' folded rows' : ' rows') + ' &middot; ' + st._total + ' events loaded' + (st._total - st._shown > 0 ? ' &middot; ' + (st._total - st._shown) + ' hidden by filters' : '') + '</span>';
             if (st.live.last) h += '<span>Last update <span class=evlMono>' + st.live.last.toLocaleTimeString() + '</span></span>';
@@ -601,6 +650,8 @@ body.night #pluginEventLog {
             h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elCollectNow()">Collect now</button>';
             if (st.collectMsg) h += '<span>' + st.collectMsg + '</span>';
         }
+        var hasCols = Object.keys(st.cols[st.layout] || {}).length > 0, hasH = !!st.heights[st.layout];
+        if (hasCols || hasH) h += '<span class=evlLink title="Back to the automatic column widths and table height" onclick="return pluginHandler.eventlog.elResetSizes()">Reset ' + (hasCols && hasH ? 'column widths &amp; height' : hasCols ? 'column widths' : 'height') + '</span>';
         QH('evlStatus', h);
     };
 
@@ -707,8 +758,123 @@ body.night #pluginEventLog {
         ph.elUpdate();
         return false;
     };
+    obj.elSetRows = function(v) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.rows = v; putstore('evl_rows', v);
+        ph.elUpdate();
+        return false;
+    };
+
+    // ---- column widths / heights ----
+    // Default column widths: measured from the real fonts (level names and the locale's time format vary), cached.
+    obj.elColDefault = function(key) {
+        var ph = pluginHandler.eventlog;
+        var fixed = { level: 110, time: 175, log: 110, source: 230, id: 80 };
+        if (!ph._autoW) {
+            var host = Q('pluginEventLog'); if (!host) return fixed[key];
+            var m = document.createElement('div'); m.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;left:-9999px;top:0;';
+            host.appendChild(m);
+            var meas = function(html) { m.innerHTML = html; return m.firstChild ? m.firstChild.getBoundingClientRect().width : 0; };
+            var lv = 0; ph.elLevelInfo().forEach(function(li) { lv = Math.max(lv, meas('<span class="evlLv ' + li.cls + '"><i></i>' + li.name + '</span>')); });
+            var tm = meas('<span class=evlMono>' + ph.elFmtTime(new Date(2026, 11, 28, 22, 58, 58).getTime()) + '</span>');
+            var id = meas('<span class=evlMono>88888</span>');
+            host.removeChild(m);
+            if (!(lv > 0 && tm > 0)) return fixed[key];   // tab not visible yet: use the fallbacks, measure again next render
+            ph._autoW = { level: Math.ceil(lv) + 20, time: Math.ceil(tm) + 20, id: Math.max(fixed.id, Math.ceil(id) + 20) };
+        }
+        return ph._autoW[key] || fixed[key];
+    };
+    obj.elColW = function(key) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (key == 'message') return 0;
+        var u = st.cols[st.layout] && st.cols[st.layout][key];
+        return (u > 0) ? u : ph.elColDefault(key);
+    };
+    obj.elSaveCols = function() {
+        var st = pluginHandler.eventlog.elState();
+        putstore('evl_cols_' + st.layout, JSON.stringify(st.cols[st.layout] || {}));
+    };
+    obj.elSetColW = function(key, w) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (!st.cols[st.layout]) st.cols[st.layout] = {};
+        st.cols[st.layout][key] = w;
+        ph.elSaveCols();
+    };
+    obj.elRzDown = function(ev, key) {
+        var ph = pluginHandler.eventlog;
+        var hd = ev.currentTarget || ev.target, th = hd.parentNode, sc = th.closest('.evlScroll, .evlVList');
+        if (!th || !sc) return false;
+        ev.preventDefault(); ev.stopPropagation();
+        try { hd.setPointerCapture(ev.pointerId); } catch (e) { }
+        hd.classList.add('active'); sc.classList.add('evlResizing');
+        var guide = document.createElement('div'); guide.className = 'evlGuide'; guide.innerHTML = '<span></span>'; sc.appendChild(guide);
+        var x0 = ev.clientX, w0 = th.getBoundingClientRect().width, w = 0;
+        var mv = function(e) {
+            w = Math.max(40, Math.round(w0 + e.clientX - x0));
+            th.style.width = w + 'px';
+            var r = sc.getBoundingClientRect(), t = th.getBoundingClientRect();
+            guide.style.left = (t.right - r.left + sc.scrollLeft) + 'px'; guide.style.top = sc.scrollTop + 'px'; guide.style.height = sc.clientHeight + 'px';
+            guide.firstChild.textContent = w + ' px';
+        };
+        var up = function() {
+            hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); hd.removeEventListener('pointercancel', up);
+            hd.classList.remove('active'); sc.classList.remove('evlResizing');
+            if (guide.parentNode) guide.parentNode.removeChild(guide);
+            ph._rzUntil = Date.now() + 400;   // swallow the click that follows the drag (would sort the column)
+            if (w) { ph.elSetColW(key, w); ph.elRenderStatus(); }
+        };
+        hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up); hd.addEventListener('pointercancel', up);
+        return false;
+    };
+    // double-click on a handle: fit the column to its widest cell (capped at 60% of the table)
+    obj.elRzFit = function(ev, key) {
+        var ph = pluginHandler.eventlog;
+        var hd = ev.currentTarget || ev.target, th = hd.parentNode, sc = th.closest('.evlScroll, .evlVList'), tbl = th.closest('table');
+        ev.preventDefault(); ev.stopPropagation();
+        if (!th || !sc || !tbl) return false;
+        var idx = th.cellIndex, w = th.scrollWidth + 2;
+        var rows = tbl.tBodies[0] ? tbl.tBodies[0].rows : [];
+        for (var i = 0; i < rows.length; i++) { if (rows[i].className.indexOf('evlExpand') >= 0) continue; var c = rows[i].cells[idx]; if (c) w = Math.max(w, c.scrollWidth + 2); }
+        w = Math.max(40, Math.min(w, Math.round(sc.clientWidth * 0.6)));
+        th.style.width = w + 'px';
+        ph._rzUntil = Date.now() + 400;
+        ph.elSetColW(key, w); ph.elRenderStatus();
+        return false;
+    };
+    obj.elGripDown = function(ev, targetId) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        var g = ev.currentTarget || ev.target, t = Q(targetId);
+        if (!t) return false;
+        ev.preventDefault();
+        try { g.setPointerCapture(ev.pointerId); } catch (e) { }
+        g.classList.add('active');
+        var y0 = ev.clientY, h0 = t.getBoundingClientRect().height, hh = 0;
+        var mv = function(e) { hh = Math.max(90, Math.round(h0 + e.clientY - y0)); t.style.height = hh + 'px'; t.style.maxHeight = 'none'; t.style.minHeight = '0'; };
+        var up = function() {
+            g.removeEventListener('pointermove', mv); g.removeEventListener('pointerup', up); g.removeEventListener('pointercancel', up);
+            g.classList.remove('active');
+            if (hh) { st.heights[st.layout] = hh; putstore('evl_h_' + st.layout, String(hh)); ph.elRenderStatus(); }
+        };
+        g.addEventListener('pointermove', mv); g.addEventListener('pointerup', up); g.addEventListener('pointercancel', up);
+        return false;
+    };
+    obj.elGripReset = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.heights[st.layout] = 0; putstore('evl_h_' + st.layout, '0');
+        ph.elUpdate();
+        return false;
+    };
+    obj.elResetSizes = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.cols[st.layout] = {}; putstore('evl_cols_' + st.layout, '');
+        st.heights[st.layout] = 0; putstore('evl_h_' + st.layout, '0');
+        ph.elUpdate();
+        return false;
+    };
+
     obj.elSetSort = function(k) {
         var ph = pluginHandler.eventlog, st = ph.elState();
+        if (ph._rzUntil && Date.now() < ph._rzUntil) return false;   // click right after a resize drag
         if (st.sort.key == k) st.sort.dir = -st.sort.dir;
         else { st.sort.key = k; st.sort.dir = (k == 'time') ? -1 : 1; }
         ph.elUpdate();
@@ -934,8 +1100,8 @@ body.night #pluginEventLog {
                 if (ph.livelog != null) {
                   ph.livelog.Stop();
                   ph.livelog = null;
-                  try { QH('pluginEventLog', ''); } catch (e) { }
                 }
+                ph.elRenderStatus();
                 if (ph.autoTimer != null) { clearInterval(ph.autoTimer); ph.autoTimer = null; }
                 break;
             case 3:
@@ -961,15 +1127,22 @@ body.night #pluginEventLog {
       var ph = pluginHandler.eventlog;
       pluginHandler.registerPluginTab(ph.registerPluginTab());
       if (typeof ph.livelog == 'undefined') { ph.livelog = null; }
-      if (ph.livelog != null) { ph.livelog.Stop(); ph.livelog = null; }
-      if (ph.autoTimer != null) { clearInterval(ph.autoTimer); ph.autoTimer = null; }
-      try { QH('pluginEventLog', ''); } catch (e) { }
-      ph.livelog = null;
-      ph.st = null;      // reset UI state for the new node
-      ph.byKey = {};
-      if ((typeof currentNode == 'undefined') || (currentNode == null) || (typeof currentNode.osdesc != 'string') || (currentNode.osdesc.toLowerCase().indexOf('windows') === -1)) return;
+      if (typeof ph.livelognode == 'undefined') { ph.livelognode = null; }
+      var isWin = (typeof currentNode != 'undefined') && (currentNode != null) && (typeof currentNode.osdesc == 'string') && (currentNode.osdesc.toLowerCase().indexOf('windows') !== -1);
+      var sameNode = isWin && (ph.livelognode != null) && (ph.livelognode._id == currentNode._id);
+      // MeshCentral calls this hook on every gotoDevice() -- tab switches, node updates, connection state changes.
+      // Only tear down the tunnel and the UI state when the node actually changed; otherwise keep the live
+      // connection (stopping a still-connecting websocket logs an error) and keep the user's filters/data.
+      if (!sameNode) {
+          if (ph.livelog != null) { ph.livelog.Stop(); ph.livelog = null; }
+          if (ph.autoTimer != null) { clearInterval(ph.autoTimer); ph.autoTimer = null; }
+          ph.livelognode = null;
+          ph.st = null;      // reset UI state for the new node
+          ph.byKey = {};
+      }
+      if (!isWin) return;
       ph.livelognode = currentNode;
-      if (ph.livelognode.conn) {
+      if (ph.livelognode.conn && ph.livelog == null) {
           ph.livelog = CreateAgentRedirect(meshserver, ph.createRemoteEventLog(ph.fe_on_message), serverPublicNamePort, authCookie, authRelayCookie, domainUrl);
           ph.livelog.attemptWebRTC = attemptWebRTC;
           ph.livelog.onStateChanged = ph.onRemoteEventLogStateChange;
@@ -979,10 +1152,13 @@ body.night #pluginEventLog {
               }
           }
           ph.livelog.Start(ph.livelognode._id);
+      } else if (!ph.livelognode.conn && ph.livelog != null) {
+          ph.livelog.Stop(); ph.livelog = null;   // agent went offline
+          if (ph.autoTimer != null) { clearInterval(ph.autoTimer); ph.autoTimer = null; }
       }
+      // the plugin tab DOM is rebuilt by MeshCentral on every refresh: re-create the shell (renders from state)
       ph.elEnsureShell();
-      // request node historical events (first page)
-      ph.elLoadHistory(true);
+      if (!sameNode) ph.elLoadHistory(true);    // request node historical events (first page)
     };
 
     // ------------------------------------------------------------------

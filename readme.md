@@ -30,10 +30,11 @@ You can now create configuration sets and assign them to nodes or meshes. Need t
 #### Endpoint - Plugin tab
 When viewing a remote endpoint, a new "Event Log" tab appears under the Plugins tab. It follows MeshCentral's light and night themes and uses the full width of the window.
 
-- **Live** pulls the latest N entries (25–500, selectable on the tab; the admin config set provides the default) of the configured logs and entry types straight from the device, refreshes automatically every 30 s and can be paused.
+- **Live** pulls the latest N entries (10–500, selectable on the tab; the admin config set provides the default) of the configured logs and entry types straight from the device, refreshes automatically every 30 s and can be paused.
 - **History** shows the events the agent has collected and sent to the server (about once a minute), with a time range, paged loading, the time of the last collection and a "Collect now" button. Retention is configurable in the Default config set.
 - **Filters**: level chips with counts, Log, Source (application/service name), Event ID lists and ranges (`1112, 100-199`), time range and free-text search. Click a column header to sort.
 - **Layouts**: *Table* (dense, expandable rows) or *Viewer* (facet sidebar with counts, list and a details pane with the full message and raw JSON). *Fold repeats* collapses identical events into one line with an ×N badge.
+- **Sizing**: drag a column header's right edge to resize it (double-click fits the column to its content), drag the rail under the table (Table) or between list and details (Viewer) to change the height, and pick a row density (*Rows*: Compact / Normal / Wrap — Wrap shows long messages on several lines). All of it is remembered per browser; a *Reset* link in the status line restores the defaults.
 - **Export** the filtered rows as CSV.
 
 #### Endpoint - Console tab
