@@ -90,7 +90,11 @@ module.exports.eventlog = function (parent) {
       'elRzFit',
       'elGripDown',
       'elGripReset',
-      'elResetSizes'
+      'elResetSizes',
+      'elVSplitDown',
+      'elVSplitReset',
+      'elRowFor',
+      'elDetailsText'
     ];
 
     obj._pluginPermissions = function() {
@@ -145,6 +149,7 @@ module.exports.eventlog = function (parent) {
                 range: getstore('evl_range', '24h'),
                 rows: getstore('evl_rows', 'normal'),                // 'dense' | 'normal' | 'wrap'
                 cols: { ledger: ph.elLoadJson('evl_cols_ledger'), viewer: ph.elLoadJson('evl_cols_viewer') },   // user column widths (px) per layout
+                sideW: Number(getstore('evl_side', '0')) || 0,          // Viewer sidebar width (px), 0 = automatic
                 heights: { ledger: Number(getstore('evl_h_ledger', '0')) || 0, viewer: Number(getstore('evl_h_viewer', '0')) || 0 }, // user table height (px) per layout, 0 = automatic
                 filters: { levels: null, logs: null, sources: null, ids: '', text: '' },
                 sort: { key: 'time', dir: -1 },
@@ -299,28 +304,39 @@ module.exports.eventlog = function (parent) {
 #pluginEventLog {
   --evl-ink:#1c1c1c; --evl-muted:#5a6360; --evl-line:#c9c9c9; --evl-line2:#e6e6e6; --evl-bg:#fff;
   --evl-alt:#f4f6f5; --evl-hover:#e9f0f1; --evl-sel:#dbe9eb; --evl-chip:#eef1f0; --evl-input:#fff;
-  --evl-acc:#1F6F78; --evl-acc-ink:#fff; --evl-ok:#1e8a4c;
+  --evl-acc:#1F6F78; --evl-acc-ink:#fff; --evl-ok:#1e8a4c; --evl-bline:#c9c9c9;
   --evl-crit:#8E1B1B; --evl-err:#C9352B; --evl-warn:#B86F00; --evl-info:#2E6DBF; --evl-verb:#7F8A86;
   color: var(--evl-ink);
 }
 body.night #pluginEventLog {
   --evl-ink:#bbbbbb; --evl-muted:#8b9591; --evl-line:#333; --evl-line2:#222; --evl-bg:#000;
   --evl-alt:#0d1110; --evl-hover:#18201f; --evl-sel:#18302f; --evl-chip:#1a1f1e; --evl-input:#111;
-  --evl-acc:#5fb3bb; --evl-acc-ink:#000; --evl-ok:#3dbf7a;
+  --evl-acc:#5fb3bb; --evl-acc-ink:#000; --evl-ok:#3dbf7a; --evl-bline:#4a5250;
   --evl-crit:#ff7b73; --evl-err:#ff8a7e; --evl-warn:#f0b848; --evl-info:#8bb8ff; --evl-verb:#8b9591;
 }
 #pluginEventLog .evlMono { font-family: Consolas, "DejaVu Sans Mono", monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
 #pluginEventLog .evlBar { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:2px 0 6px; }
-#pluginEventLog .evlSeg { display:inline-flex; border:1px solid var(--evl-line); border-radius:3px; overflow:hidden; }
+#pluginEventLog .evlSeg { display:inline-flex; border:1px solid var(--evl-bline); border-radius:3px; overflow:hidden; }
 #pluginEventLog .evlSeg button { border:0; background:var(--evl-input); color:var(--evl-muted); padding:4px 11px; cursor:pointer; font:inherit; }
 #pluginEventLog .evlSeg button.on { background:var(--evl-acc); color:var(--evl-acc-ink); font-weight:bold; }
 #pluginEventLog .evlSeg button:focus-visible, #pluginEventLog .evlBtn:focus-visible { outline:2px solid var(--evl-acc); outline-offset:-2px; }
 #pluginEventLog input.evlIn, #pluginEventLog select.evlSel { border:1px solid var(--evl-line); background:var(--evl-input); color:var(--evl-ink); border-radius:3px; padding:4px 6px; font:inherit; max-width:240px; }
 #pluginEventLog input.evlIn::placeholder { color:var(--evl-muted); }
 #pluginEventLog .evlGrow { flex:1; min-width:140px; }
-#pluginEventLog .evlBtn { border:1px solid var(--evl-line); background:var(--evl-input); color:var(--evl-ink); border-radius:3px; padding:4px 9px; cursor:pointer; font:inherit; }
+#pluginEventLog .evlBtn { border:1px solid var(--evl-bline); background:var(--evl-input); color:var(--evl-ink); border-radius:3px; padding:4px 9px; cursor:pointer; font:inherit; }
 #pluginEventLog .evlBtn.on { background:var(--evl-acc); color:var(--evl-acc-ink); border-color:var(--evl-acc); }
 #pluginEventLog .evlBtn.mini { padding:1px 7px; font-size:12px; }
+#pluginEventLog .evlBtn:hover { background:var(--evl-hover); border-color:var(--evl-acc); }
+#pluginEventLog .evlBtn:active { background:var(--evl-sel); transform:translateY(1px); }
+#pluginEventLog .evlBtn.on:hover { border-color:var(--evl-acc); filter:brightness(1.08); }
+#pluginEventLog .evlBtn.ok { color:var(--evl-ok); border-color:var(--evl-ok); }
+#pluginEventLog .evlSeg button:hover:not(.on) { background:var(--evl-hover); color:var(--evl-ink); }
+#pluginEventLog .evlSeg button:active:not(.on) { background:var(--evl-sel); }
+#pluginEventLog .evlChip:hover { border-color:var(--evl-acc); }
+#pluginEventLog .evlFacet:hover .t { color:var(--evl-acc); }
+#pluginEventLog .evlDTabs button:hover:not(.on) { color:var(--evl-ink); }
+#pluginEventLog .evlLink:hover { text-decoration-style:solid; }
+#pluginEventLog table.evlLog th:hover { color:var(--evl-ink); }
 #pluginEventLog .evlLbl { color:var(--evl-muted); }
 #pluginEventLog .evlChips { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:0 0 6px; }
 #pluginEventLog .evlChip { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--evl-line); border-radius:12px; padding:2px 10px 2px 8px; background:var(--evl-chip); color:var(--evl-ink); cursor:pointer; font-size:12px; }
@@ -374,8 +390,12 @@ body.night #pluginEventLog {
 #pluginEventLog .evlStatus { display:flex; gap:16px; color:var(--evl-muted); font-size:12px; padding:7px 2px; align-items:center; flex-wrap:wrap; border-top:1px solid var(--evl-line2); margin-top:-1px; }
 #pluginEventLog .evlStatus .live { color:var(--evl-ok); }
 #pluginEventLog .evlStatus .warn { color:var(--evl-warn); }
-#pluginEventLog .evlViewer { display:grid; grid-template-columns:215px 1fr; border:1px solid var(--evl-line); border-radius:3px; overflow:hidden; }
-#pluginEventLog .evlFacets { border-right:1px solid var(--evl-line); padding:9px 11px; background:var(--evl-alt); min-width:0; }
+#pluginEventLog .evlViewer { display:grid; grid-template-columns:var(--evl-side, 215px) 7px minmax(0, 1fr); border:1px solid var(--evl-line); border-radius:3px; overflow:hidden; }
+#pluginEventLog .evlFacets { padding:9px 11px; background:var(--evl-alt); min-width:0; overflow:hidden; }
+#pluginEventLog .evlVSplit { cursor:col-resize; background:var(--evl-alt); border-right:1px solid var(--evl-line); position:relative; touch-action:none; user-select:none; }
+#pluginEventLog .evlVSplit::after { content:""; position:absolute; top:50%; left:2px; height:34px; width:1px; margin-top:-17px; background:var(--evl-line); box-shadow:2px 0 0 var(--evl-line); }
+#pluginEventLog .evlVSplit:hover, #pluginEventLog .evlVSplit.active { background:var(--evl-sel); }
+#pluginEventLog .evlVSplit:hover::after, #pluginEventLog .evlVSplit.active::after { background:var(--evl-acc); box-shadow:2px 0 0 var(--evl-acc); }
 #pluginEventLog .evlFacets h4 { margin:11px 0 5px; font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--evl-muted); }
 #pluginEventLog .evlFacets h4:first-child { margin-top:0; }
 #pluginEventLog .evlFacet { display:flex; align-items:center; gap:7px; padding:2px 0; cursor:pointer; }
@@ -398,7 +418,8 @@ body.night #pluginEventLog {
 #pluginEventLog .evlEmpty { padding:26px 10px; color:var(--evl-muted); text-align:center; }
 @media (max-width: 1000px) {
   #pluginEventLog .evlViewer { grid-template-columns:1fr; }
-  #pluginEventLog .evlFacets { border-right:0; border-bottom:1px solid var(--evl-line); }
+  #pluginEventLog .evlVSplit { display:none; }
+  #pluginEventLog .evlFacets { border-bottom:1px solid var(--evl-line); }
   #pluginEventLog .evlDBody { grid-template-columns:1fr; }
 }
 `;
@@ -556,7 +577,8 @@ body.night #pluginEventLog {
         };
         var h = '';
         if (st.layout == 'viewer') {
-            h += '<div class=evlViewer><div class=evlFacets id=evlFacets>' + ph.elRenderFacets(fr) + '</div>';
+            h += '<div class=evlViewer id=evlViewer' + (st.sideW ? ' style="--evl-side:' + st.sideW + 'px"' : '') + '><div class=evlFacets id=evlFacets>' + ph.elRenderFacets(fr) + '</div>';
+            h += '<div class=evlVSplit title="Drag to change the sidebar width &middot; double-click to reset" onpointerdown="return pluginHandler.eventlog.elVSplitDown(event)" ondblclick="return pluginHandler.eventlog.elVSplitReset()"></div>';
             h += '<div><div class="evlVList' + dens + '" id=evlVList tabindex=0' + hstyle + ' onkeydown="return pluginHandler.eventlog.elKeyNav(event)"><table class=evlLog><thead><tr>' +
                  sortTh('level', 'Level') + sortTh('time', 'Time') + sortTh('source', 'Source') + sortTh('id', 'ID') + sortTh('message', 'Message') +
                  '</tr></thead><tbody>';
@@ -571,7 +593,7 @@ body.night #pluginEventLog {
                 h += '<div class=evlDTabs>' +
                      '<button class="' + (st.dtab == 'general' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetDTab(\'general\')">General</button>' +
                      '<button class="' + (st.dtab == 'json' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetDTab(\'json\')">Details (JSON)</button><span class=sp></span>' +
-                     '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elCopy(\'' + selRep.ev.key + '\')">Copy</button>' +
+                     '<button class="evlBtn mini" style=margin:4px title="' + (st.dtab == 'json' ? 'Copy the JSON shown below' : 'Copy this event as text (log, source, date, ID, level, message)') + '" onclick="return pluginHandler.eventlog.elCopy(\'' + selRep.ev.key + '\',\'' + (st.dtab == 'json' ? 'json' : 'details') + '\',this)">Copy</button>' +
                      '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elFilterBy(\'source\',\'' + selRep.ev.key + '\')">Filter: this source</button>' +
                      '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elFilterBy(\'id\',\'' + selRep.ev.key + '\')">Filter: ID ' + esc(selRep.ev.id) + '</button></div>';
                 if (st.dtab == 'json') {
@@ -621,7 +643,8 @@ body.night #pluginEventLog {
             h += '<div class=evlMeta><span>Occurrences (' + r.count + ')</span><span class=evlMono>' + r.times.slice(0, 12).map(function(t) { return ph.elFmtTime(t, true); }).join(' &middot; ') + (r.times.length > 12 ? ' &hellip;' : '') + '</span></div>';
         }
         h += '<div class=evlActs>' +
-             '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elCopy(\'' + ev.key + '\')">Copy message</button>' +
+             '<button class="evlBtn mini" title="Copy this event as text (log, source, date, ID, level, message)" onclick="return pluginHandler.eventlog.elCopy(\'' + ev.key + '\',\'details\',this)">Copy details</button>' +
+             '<button class="evlBtn mini" title="Copy only the message text" onclick="return pluginHandler.eventlog.elCopy(\'' + ev.key + '\',\'message\',this)">Copy message</button>' +
              '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elFilterBy(\'source\',\'' + ev.key + '\')">Filter: this source</button>' +
              '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elFilterBy(\'id\',\'' + ev.key + '\')">Filter: ID ' + esc(ev.id) + '</button>' +
              '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elToggleRaw(\'' + ev.key + '\')">' + (st.raw[ev.key] ? 'Hide' : 'Show') + ' raw JSON</button></div>';
@@ -650,8 +673,11 @@ body.night #pluginEventLog {
             h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elCollectNow()">Collect now</button>';
             if (st.collectMsg) h += '<span>' + st.collectMsg + '</span>';
         }
-        var hasCols = Object.keys(st.cols[st.layout] || {}).length > 0, hasH = !!st.heights[st.layout];
-        if (hasCols || hasH) h += '<span class=evlLink title="Back to the automatic column widths and table height" onclick="return pluginHandler.eventlog.elResetSizes()">Reset ' + (hasCols && hasH ? 'column widths &amp; height' : hasCols ? 'column widths' : 'height') + '</span>';
+        var parts = [];
+        if (Object.keys(st.cols[st.layout] || {}).length > 0) parts.push('column widths');
+        if (st.heights[st.layout]) parts.push('height');
+        if (st.layout == 'viewer' && st.sideW) parts.push('sidebar width');
+        if (parts.length) h += '<span class=evlLink title="Back to the automatic sizes" onclick="return pluginHandler.eventlog.elResetSizes()">Reset ' + (parts.length > 2 ? 'sizes' : parts.join(' &amp; ')) + '</span>';
         QH('evlStatus', h);
     };
 
@@ -868,6 +894,30 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         st.cols[st.layout] = {}; putstore('evl_cols_' + st.layout, '');
         st.heights[st.layout] = 0; putstore('evl_h_' + st.layout, '0');
+        if (st.layout == 'viewer') { st.sideW = 0; putstore('evl_side', '0'); }
+        ph.elUpdate();
+        return false;
+    };
+    obj.elVSplitDown = function(ev) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        var g = ev.currentTarget || ev.target, v = Q('evlViewer'), side = Q('evlFacets');
+        if (!v || !side) return false;
+        ev.preventDefault();
+        try { g.setPointerCapture(ev.pointerId); } catch (e) { }
+        g.classList.add('active');
+        var x0 = ev.clientX, w0 = side.getBoundingClientRect().width, ww = 0, max = Math.max(160, Math.round(v.getBoundingClientRect().width * 0.5));
+        var mv = function(e) { ww = Math.min(max, Math.max(120, Math.round(w0 + e.clientX - x0))); v.style.setProperty('--evl-side', ww + 'px'); };
+        var up = function() {
+            g.removeEventListener('pointermove', mv); g.removeEventListener('pointerup', up); g.removeEventListener('pointercancel', up);
+            g.classList.remove('active');
+            if (ww) { st.sideW = ww; putstore('evl_side', String(ww)); ph.elRenderStatus(); }
+        };
+        g.addEventListener('pointermove', mv); g.addEventListener('pointerup', up); g.addEventListener('pointercancel', up);
+        return false;
+    };
+    obj.elVSplitReset = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.sideW = 0; putstore('evl_side', '0');
         ph.elUpdate();
         return false;
     };
@@ -892,14 +942,41 @@ body.night #pluginEventLog {
         st.dtab = t; ph.elUpdate();
         return false;
     };
-    obj.elCopy = function(key) {
+    // the (possibly folded) row currently displayed for an event key
+    obj.elRowFor = function(key) {
+        var ph = pluginHandler.eventlog, st = ph.elState(), ev = ph.byKey[key];
+        if (!ev) return null;
+        if (st.fold) { var rows = ph.elFold(ph.elFiltered().rows); for (var i = 0; i < rows.length; i++) { if (rows[i].ev.key == key) return rows[i]; } }
+        return { ev: ev, count: 1, times: [ev.time] };
+    };
+    // plain-text rendition of an event, in the layout of Windows Event Viewer's "Copy Details as Text"
+    obj.elDetailsText = function(key) {
+        var ph = pluginHandler.eventlog, r = ph.elRowFor(key);
+        if (!r) return '';
+        var ev = r.ev, pad = function(l) { return (l + '              ').substring(0, 15); };
+        var t = pad('Log Name:') + ev.log + '\n' + pad('Source:') + ev.source + '\n' + pad('Date:') + ph.elFmtTime(ev.time) + '\n' +
+                pad('Event ID:') + ev.id + '\n' + pad('Level:') + ev.levelName + ' (' + ev.level + ')' + '\n';
+        if (r.count > 1) t += pad('Occurrences:') + r.count + ' (' + r.times.slice(0, 12).map(function(x) { return ph.elFmtTime(x); }).join(', ') + (r.times.length > 12 ? ', ...' : '') + ')\n';
+        t += 'Description:\n' + ev.message;
+        return t;
+    };
+    // what = 'details' (default) | 'json' | 'message'; btn (optional) flashes "Copied" for a moment
+    obj.elCopy = function(key, what, btn) {
         var ph = pluginHandler.eventlog, ev = ph.byKey[key];
         if (!ev) return false;
-        var txt = ev.levelName + '\t' + ph.elFmtTime(ev.time) + '\t' + ev.log + '\t' + ev.source + '\t' + ev.id + '\t' + ev.message;
-        try { navigator.clipboard.writeText(txt); } catch (e) {
-            var ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select();
+        var txt;
+        if (what == 'json') txt = JSON.stringify({ Level: ev.level, TimeCreated: new Date(ev.time).toISOString(), LogName: ev.log, ProviderName: ev.source, Id: ev.id, Message: ev.message }, null, 2);
+        else if (what == 'message') txt = ev.message;
+        else txt = ph.elDetailsText(key);
+        var fallback = function() {
+            var ta = document.createElement('textarea'); ta.value = txt; ta.style.cssText = 'position:fixed;left:-9999px;top:0'; document.body.appendChild(ta); ta.select();
             try { document.execCommand('copy'); } catch (e2) { }
             document.body.removeChild(ta);
+        };
+        try { if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).catch(fallback); else fallback(); } catch (e) { fallback(); }
+        if (btn && btn.tagName) {
+            var old = btn.innerHTML; btn.innerHTML = 'Copied &#10003;'; btn.classList.add('ok');
+            setTimeout(function() { try { btn.innerHTML = old; btn.classList.remove('ok'); } catch (e) { } }, 1200);
         }
         return false;
     };

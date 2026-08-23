@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Known Issues]
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
+## [0.1.3] - 2026-08-23
+### Added
+- Viewer: draggable sidebar width (rail between the facets and the list); "Reset sizes" covers it
+- Buttons, chips, facets and tabs show hover/pressed states; Copy flashes "Copied"
+### Fixed
+- Copy now copies what the pane shows: on General, the event as text in Windows Event Viewer's "Copy Details as Text" layout (Log Name, Source, Date, Event ID, Level, Occurrences, Description); on Details (JSON), the JSON. Table rows offer "Copy details" and "Copy message"
+
 ## [0.1.2] - 2026-08-23
 ### Added
 - Resizable columns in both layouts: drag the header edge (live width readout), double-click to fit to content; widths are remembered per layout

@@ -34,7 +34,7 @@ When viewing a remote endpoint, a new "Event Log" tab appears under the Plugins 
 - **History** shows the events the agent has collected and sent to the server (about once a minute), with a time range, paged loading, the time of the last collection and a "Collect now" button. Retention is configurable in the Default config set.
 - **Filters**: level chips with counts, Log, Source (application/service name), Event ID lists and ranges (`1112, 100-199`), time range and free-text search. Click a column header to sort.
 - **Layouts**: *Table* (dense, expandable rows) or *Viewer* (facet sidebar with counts, list and a details pane with the full message and raw JSON). *Fold repeats* collapses identical events into one line with an ×N badge.
-- **Sizing**: drag a column header's right edge to resize it (double-click fits the column to its content), drag the rail under the table (Table) or between list and details (Viewer) to change the height, and pick a row density (*Rows*: Compact / Normal / Wrap — Wrap shows long messages on several lines). All of it is remembered per browser; a *Reset* link in the status line restores the defaults.
+- **Sizing**: drag a column header's right edge to resize it (double-click fits the column to its content), drag the rail under the table (Table) or between list and details (Viewer) to change the height, drag the rail next to the Viewer sidebar to change its width, and pick a row density (*Rows*: Compact / Normal / Wrap — Wrap shows long messages on several lines). All of it is remembered per browser; a *Reset* link in the status line restores the defaults.
 - **Export** the filtered rows as CSV.
 
 #### Endpoint - Console tab
