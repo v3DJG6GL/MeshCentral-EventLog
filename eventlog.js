@@ -101,7 +101,8 @@ module.exports.eventlog = function (parent) {
       'elPriName',
       'elLbl',
       'elRawOf',
-      'elSelCat'
+      'elSelCat',
+      'elHistAutoFill'
     ];
 
     obj._pluginPermissions = function() {
@@ -728,7 +729,7 @@ body.night #pluginEventLog {
         } else {
             h += '<span>History</span>';
             if (st.hist.loading) h += '<span>Loading&hellip;</span>';
-            h += '<span>Showing ' + st._shown + ' of ' + st.hist.total + ' in range &middot; ' + st.hist.stored + ' stored total' + (st.hist.retentionDays ? ' &middot; retention ' + st.hist.retentionDays + ' days' : '') + '</span>';
+            h += '<span>Showing ' + (st.fold ? ((st._visible || 0) + ' folded rows (' + st._shown + ' events)') : st._shown) + ' of ' + st.hist.total + ' in range &middot; ' + st.hist.stored + ' stored total' + (st.hist.retentionDays ? ' &middot; retention ' + st.hist.retentionDays + ' days' : '') + '</span>';
             h += '<span>Last collected: <span class=evlMono>' + (st.hist.lastCollected ? ph.elFmtTime(st.hist.lastCollected) : 'never') + '</span></span>';
             if (st.hist.events.length < st.hist.total) h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elLoadMore()">Load ' + Math.min(st.show, st.hist.total - st.hist.events.length) + ' more</button>';
             h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elCollectNow()">Collect now</button>';
@@ -766,6 +767,7 @@ body.night #pluginEventLog {
         var b = Q('evlFoldBtn'); if (b) b.classList.toggle('on', st.fold);
         if (st.view == 'live' && st.fold) ph.elRequestLive(null);
         ph.elUpdate();
+        if (st.view == 'history' && st.fold) ph.elHistAutoFill();
         return false;
     };
     obj.elSetShow = function(n) {
@@ -1158,6 +1160,18 @@ body.night #pluginEventLog {
         ph.elRenderStatus();
         return false;
     };
+    // With "Fold repeats" on, a page of N raw events can collapse into far fewer rows.
+    // Keep fetching further pages until ~N folded rows are visible (bounded at 5000 loaded events).
+    obj.elHistAutoFill = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (st.view != 'history' || !st.fold || st.hist.loading) return false;
+        if (st.hist.events.length >= st.hist.total || st.hist.events.length >= 5000) return false;
+        var folded = ph.elFold(ph.elFiltered().rows).length;
+        if (folded >= st.show) return false;
+        st.hist.skip = st.hist.events.length;
+        ph.elLoadHistory(false);
+        return true;
+    };
     obj.elLoadMore = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
         st.hist.skip = st.hist.events.length;
@@ -1202,6 +1216,7 @@ body.night #pluginEventLog {
         }
         var evs = message.events || [];
         if (!message.skip) st.hist.events = [];
+        var prevCount = st.hist.events.length;
         for (var i in evs) {
             var n = ph.elNormalize(evs[i]);
             if (n == null) continue;
@@ -1211,6 +1226,8 @@ body.night #pluginEventLog {
             if (!dup) st.hist.events.push(n);
         }
         ph.elUpdate();
+        // only continue auto-filling folded pages while responses actually add events (loop guard)
+        if (st.hist.events.length > prevCount) ph.elHistAutoFill();
     };
 
     // ---- plumbing (tunnel to the agent) ----

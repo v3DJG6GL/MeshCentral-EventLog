@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Known Issues]
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
+## [0.1.8] - 2026-08-28
+### Fixed
+- History + "Fold repeats": a page of 500 events could collapse into a handful of rows. History now keeps loading further pages automatically until about "Show" folded rows are visible (bounded at 5000 loaded events); toggling Fold on triggers the same top-up
+- History status line now says "Showing X folded rows (Y events) of Z in range" when folding, instead of counting raw events only
+
 ## [0.1.7] - 2026-08-28
 ### Fixed
 - Plugin admin page could show another plugin's admin UI (blank "Quick commands" page): MeshCentral points the shared Express views directory at the plugin of the current request, and our async render could pick up a concurrent plugin's identically-named admin.handlebars. The page is now rendered directly from this plugin's own template
