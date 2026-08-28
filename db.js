@@ -31,14 +31,53 @@ module.exports.CreateDB = function(meshserver) {
     };
     var buildQuery = function(nodeid, opts, params) {
         var proj = { nodeid: nodeid };
-        if (opts.historyLogs) proj.LogName = { $in: String(opts.historyLogs).split(',') };
-        if (opts.historyEntryTypes) proj.Level = { $in: opts.historyEntryTypes.map((n) => Number(n)) };
+        // user filters (params.*) take precedence over the config set's collection filters (opts.*)
+        var logs = params.logs || (opts.historyLogs ? String(opts.historyLogs).split(',') : null);
+        if (logs) proj.LogName = { $in: logs };
+        var levels = params.levels || opts.historyEntryTypes;
+        if (levels) proj.Level = { $in: levels.map((n) => Number(n)) };
+        if (params.sources) proj.ProviderName = { $in: params.sources };
         if (params.since) proj.tc = { $gte: Number(params.since) };
+        var ands = [];
+        if (params.text) {
+            var re = new RegExp(String(params.text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+            ands.push({ $or: [ { Message: { $regex: re } }, { ProviderName: { $regex: re } }, { LogName: { $regex: re } } ] });
+        }
+        if (params.ids) { // "1112, 100-199": Id is a number on Windows but a string (PID) on Linux, so match both types.
+            var ors = [], singles = [];
+            var pushBoth = function(n) { singles.push(n); singles.push(String(n)); };
+            String(params.ids).split(',').forEach(function(part) {
+                part = part.trim(); if (part == '') return;
+                var m = part.match(/^(\d+)\s*-\s*(\d+)$/);
+                if (m) {
+                    var a = Number(m[1]), b = Number(m[2]);
+                    if (b >= a && (b - a) <= 1000) { for (var v = a; v <= b; v++) pushBoth(v); } // expanded so string Ids match too
+                    else ors.push({ Id: { $gte: a, $lte: b } }); // very wide range: numeric only
+                } else if (/^\d+$/.test(part)) { pushBoth(Number(part)); }
+            });
+            if (singles.length) ors.push({ Id: { $in: singles } });
+            if (ors.length) ands.push({ $or: ors });
+        }
+        if (ands.length) proj.$and = ands;
         return proj;
+    };
+    var cleanStrList = function(v, maxItems) { // sanitize a client-supplied filter list
+        if (!Array.isArray(v)) return null;
+        var out = v.filter(function(x) { return typeof x == 'string' && x.length < 256; }).slice(0, maxItems || 50);
+        return out.length ? out : null;
     };
     var normParams = function(params) {
         params = params || {};
-        return { limit: Math.min(Math.max(Number(params.limit) || 250, 1), 1000), skip: Math.max(Number(params.skip) || 0, 0), since: params.since || null };
+        return {
+            limit: Math.min(Math.max(Number(params.limit) || 250, 1), 1000),
+            skip: Math.max(Number(params.skip) || 0, 0),
+            since: params.since || null,
+            levels: (function() { if (!Array.isArray(params.levels)) return null; var l = params.levels.slice(0, 10).map(Number).filter((n) => !isNaN(n)); return l.length ? l : null; })(),
+            logs: cleanStrList(params.logs, 50),
+            sources: cleanStrList(params.sources, 100),
+            text: (typeof params.text == 'string' && params.text.trim() != '') ? params.text.trim().substring(0, 256) : null,
+            ids: (typeof params.ids == 'string' && params.ids.trim() != '') ? params.ids.trim().substring(0, 256) : null
+        };
     };
     obj.applyRetention = function() {
         obj.getAllConfigSets().then(function(sets) {
@@ -122,6 +161,25 @@ module.exports.CreateDB = function(meshserver) {
               obj.eventsFile.find({ nodeid: nodeid }).sort({ tc: -1 }).limit(1).toArray()
               .then(function (events) { callback(events); })
               .catch(function () { callback([]); });
+          };
+          // range-wide facet counts (per level / category / source) for the history sidebar
+          obj.getFacetsFor = function(nodeid, since, callback) {
+              var match = { nodeid: nodeid };
+              if (since) match.tc = { $gte: Number(since) };
+              obj.eventsFile.aggregate([
+                  { $match: match },
+                  { $facet: {
+                      level: [ { $group: { _id: '$Level', n: { $sum: 1 } } } ],
+                      log: [ { $group: { _id: '$LogName', n: { $sum: 1 } } } ],
+                      source: [ { $group: { _id: '$ProviderName', n: { $sum: 1 } } }, { $sort: { n: -1 } }, { $limit: 200 } ]
+                  } }
+              ]).toArray()
+              .then(function (d) {
+                  var out = { level: {}, log: {}, source: {} };
+                  if (d && d[0]) { ['level','log','source'].forEach(function(k) { (d[0][k] || []).forEach(function(r) { if (r._id != null && r._id !== '') out[k][r._id] = r.n; }); }); }
+                  callback(out);
+              })
+              .catch(function () { callback(null); });
           };
           obj.updateDefaultConfig = function(args) {
               args.type = 'configSet';
@@ -313,6 +371,22 @@ module.exports.CreateDB = function(meshserver) {
         obj.getLastEventFor = function(nodeid, callback) {
             obj.eventsFile.find({ nodeid: nodeid }).sort({ tc: -1 }).limit(1).exec(function (err, events) {
                 callback(events || []);
+            });
+        };
+        // range-wide facet counts (per level / category / source) for the history sidebar
+        obj.getFacetsFor = function(nodeid, since, callback) {
+            var match = { nodeid: nodeid };
+            if (since) match.tc = { $gte: Number(since) };
+            obj.eventsFile.find(match, { Level: 1, LogName: 1, ProviderName: 1 }).exec(function (err, docs) {
+                if (err || docs == null) { callback(null); return; }
+                var out = { level: {}, log: {}, source: {} };
+                for (var i = 0; i < docs.length; i++) {
+                    var d = docs[i];
+                    if (d.Level != null) out.level[d.Level] = (out.level[d.Level] || 0) + 1;
+                    if (d.LogName != null && d.LogName !== '') out.log[d.LogName] = (out.log[d.LogName] || 0) + 1;
+                    if (d.ProviderName != null && d.ProviderName !== '') out.source[d.ProviderName] = (out.source[d.ProviderName] || 0) + 1;
+                }
+                callback(out);
             });
         };
         obj.setRetention = function(days) {

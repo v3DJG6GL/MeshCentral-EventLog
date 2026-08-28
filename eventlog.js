@@ -102,7 +102,9 @@ module.exports.eventlog = function (parent) {
       'elLbl',
       'elRawOf',
       'elSelCat',
-      'elHistAutoFill'
+      'elHistAutoFill',
+      'elHistRefilter',
+      'elCounts'
     ];
 
     obj._pluginPermissions = function() {
@@ -206,7 +208,7 @@ module.exports.eventlog = function (parent) {
                 srcMore: false,
                 paused: false, pending: [],
                 live: { events: [], last: null },
-                hist: { events: [], total: 0, stored: 0, lastCollected: null, skip: 0, loaded: false, loading: false, enabled: true, retentionDays: null }
+                hist: { events: [], total: 0, stored: 0, lastCollected: null, skip: 0, loaded: false, loading: false, enabled: true, retentionDays: null, facets: null }
             };
         }
         return ph.st;
@@ -542,14 +544,15 @@ body.night #pluginEventLog {
         // refresh the Log/Source dropdown options (ledger layout)
         if (st.layout == 'ledger') {
             var esc = EscapeHtml;
+            var counts = ph.elCounts(fr);
             [['evlLogSel', 'log', st.filters.logs], ['evlSrcSel', 'source', st.filters.sources]].forEach(function(cfg) {
                 var sel = Q(cfg[0]); if (!sel) return;
-                var names = Object.keys(fr.counts[cfg[1]]).sort();
+                var names = Object.keys(counts[cfg[1]]).sort();
                 var cur = null;
                 if (cfg[2] != null) { var kk = Object.keys(cfg[2]); if (kk.length == 1) cur = kk[0]; else cur = '_multi'; }
                 var oh = '<option value="">All (' + names.length + ')</option>';
                 if (cur == '_multi') oh += '<option value="_multi" selected>(multiple)</option>';
-                names.forEach(function(n) { oh += '<option value="' + esc(n) + '"' + (cur == n ? ' selected' : '') + '>' + esc(n) + ' (' + fr.counts[cfg[1]][n] + ')</option>'; });
+                names.forEach(function(n) { oh += '<option value="' + esc(n) + '"' + (cur == n ? ' selected' : '') + '>' + esc(n) + ' (' + counts[cfg[1]][n] + ')</option>'; });
                 sel.innerHTML = oh;
             });
         }
@@ -558,12 +561,13 @@ body.night #pluginEventLog {
     obj.elRenderChips = function(fr) {
         var ph = pluginHandler.eventlog, st = ph.elState();
         var esc = EscapeHtml, h = '';
+        var counts = ph.elCounts(fr);
         h += '<span class=evlLbl>Level</span>';
         ph.elLevelInfo().forEach(function(li) {
-            if (li.n == 0 && !fr.counts.level[0]) return; // hide LogAlways unless present
+            if (li.n == 0 && !counts.level[0]) return; // hide LogAlways unless present
             var off = (st.filters.levels != null && !st.filters.levels[li.n]);
             h += '<span class="evlChip' + (off ? ' off' : '') + '" role=button tabindex=0 onclick="return pluginHandler.eventlog.elToggleLevel(' + li.n + ')" onkeypress="if(event.key==\'Enter\')pluginHandler.eventlog.elToggleLevel(' + li.n + ')">' +
-                 '<i class=sw style="background:var(--evl-' + li.cls + ')"></i>' + li.name + ' <span class=n>' + (fr.counts.level[li.n] || 0) + '</span></span>';
+                 '<i class=sw style="background:var(--evl-' + li.cls + ')"></i>' + li.name + ' <span class=n>' + (counts.level[li.n] || 0) + '</span></span>';
         });
         var filts = [];
         if (st.filters.logs != null)    { var k1 = Object.keys(st.filters.logs);    filts.push(['logs',    'Log: '    + (k1.length == 1 ? esc(k1[0]) : k1.length + ' selected')]); }
@@ -587,15 +591,16 @@ body.night #pluginEventLog {
             return '<div class=evlFacet role=button tabindex=0 onclick="return pluginHandler.eventlog.elToggleFacet(\'' + kind + '\',\'' + esc(name).replace(/'/g, '&apos;') + '\')">' +
                    '<span class="cb' + (on ? ' on' : '') + '">' + (on ? '&#10003;' : '') + '</span><span class=t title="' + esc(name) + '">' + esc(name) + '</span><span class=n>' + count + '</span></div>';
         };
+        var counts = ph.elCounts(fr);
         h += '<h4>' + ph.elLbl('log') + '</h4>';
-        Object.keys(fr.counts.log).sort().forEach(function(n) {
-            h += facet('logs', n, fr.counts.log[n], (st.filters.logs == null || st.filters.logs[n]));
+        Object.keys(counts.log).sort().forEach(function(n) {
+            h += facet('logs', n, counts.log[n], (st.filters.logs == null || st.filters.logs[n]));
         });
         h += '<h4>Source</h4>';
-        var srcs = Object.keys(fr.counts.source).sort(function(a, b) { return fr.counts.source[b] - fr.counts.source[a]; });
+        var srcs = Object.keys(counts.source).sort(function(a, b) { return counts.source[b] - counts.source[a]; });
         var lim = st.srcMore ? srcs.length : 10;
         srcs.slice(0, lim).forEach(function(n) {
-            h += facet('sources', n, fr.counts.source[n], (st.filters.sources == null || st.filters.sources[n]));
+            h += facet('sources', n, counts.source[n], (st.filters.sources == null || st.filters.sources[n]));
         });
         if (srcs.length > 10) h += '<span class=evlMore role=button tabindex=0 onclick="return pluginHandler.eventlog.elFacetsMore()">' + (st.srcMore ? 'show fewer' : 'show ' + (srcs.length - 10) + ' more&hellip;') + '</span>';
         return h;
@@ -793,6 +798,7 @@ body.night #pluginEventLog {
         if (catMap[v]) { st.filters.logs = {}; st.filters.logs[catMap[v]] = 1; } else { st.filters.logs = null; }
         if (st.view == 'live') ph.elRequestLive(null);
         ph.elUpdate();
+        ph.elHistRefilter();
         return false;
     };
     obj.elSelLog = function(el) {
@@ -800,6 +806,7 @@ body.night #pluginEventLog {
         if (el.value == '_multi') return false;
         if (el.value == '') st.filters.logs = null; else { st.filters.logs = {}; st.filters.logs[el.value] = 1; }
         ph.elUpdate();
+        ph.elHistRefilter();
         return false;
     };
     obj.elSelSource = function(el) {
@@ -807,6 +814,7 @@ body.night #pluginEventLog {
         if (el.value == '_multi') return false;
         if (el.value == '') st.filters.sources = null; else { st.filters.sources = {}; st.filters.sources[el.value] = 1; }
         ph.elUpdate();
+        ph.elHistRefilter();
         return false;
     };
     obj.elToggleLevel = function(n) {
@@ -816,17 +824,19 @@ body.night #pluginEventLog {
         var all = true; ph.elLevelInfo().forEach(function(li) { if (!st.filters.levels[li.n]) all = false; });
         if (all) st.filters.levels = null;
         ph.elUpdate();
+        ph.elHistRefilter();
         return false;
     };
     obj.elToggleFacet = function(kind, name) {
         var ph = pluginHandler.eventlog, st = ph.elState();
-        var fr = ph.elFiltered();
-        var universe = Object.keys(kind == 'logs' ? fr.counts.log : fr.counts.source);
+        var counts = ph.elCounts(ph.elFiltered());
+        var universe = Object.keys(kind == 'logs' ? counts.log : counts.source);
         if (st.filters[kind] == null) { st.filters[kind] = {}; universe.forEach(function(n) { st.filters[kind][n] = 1; }); }
         if (st.filters[kind][name]) delete st.filters[kind][name]; else st.filters[kind][name] = 1;
         var all = true; universe.forEach(function(n) { if (!st.filters[kind][n]) all = false; });
         if (all) st.filters[kind] = null;
         ph.elUpdate();
+        ph.elHistRefilter();
         return false;
     };
     obj.elFacetsMore = function() {
@@ -838,14 +848,14 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         st.filters.ids = el.value;
         if (st._deb) clearTimeout(st._deb);
-        st._deb = setTimeout(function() { pluginHandler.eventlog.elUpdate(); }, 200);
+        st._deb = setTimeout(function() { pluginHandler.eventlog.elUpdate(); pluginHandler.eventlog.elHistRefilter(); }, 200);
         return false;
     };
     obj.elTextInput = function(el) {
         var ph = pluginHandler.eventlog, st = ph.elState();
         st.filters.text = el.value;
         if (st._deb) clearTimeout(st._deb);
-        st._deb = setTimeout(function() { pluginHandler.eventlog.elUpdate(); }, 200);
+        st._deb = setTimeout(function() { pluginHandler.eventlog.elUpdate(); pluginHandler.eventlog.elHistRefilter(); }, 200);
         return false;
     };
     obj.elClearFilter = function(kind) {
@@ -853,6 +863,7 @@ body.night #pluginEventLog {
         if (kind == 'ids' || kind == 'text') { st.filters[kind] = ''; var el = Q(kind == 'ids' ? 'evlIdIn' : 'evlTxtIn'); if (el) el.value = ''; }
         else st.filters[kind] = null;
         ph.elUpdate();
+        ph.elHistRefilter();
         return false;
     };
     obj.elResetFilters = function() {
@@ -861,6 +872,7 @@ body.night #pluginEventLog {
         var e1 = Q('evlIdIn'); if (e1) e1.value = '';
         var e2 = Q('evlTxtIn'); if (e2) e2.value = '';
         ph.elUpdate();
+        ph.elHistRefilter();
         return false;
     };
     obj.elSetRows = function(v) {
@@ -1072,6 +1084,7 @@ body.night #pluginEventLog {
         if (what == 'source') { st.filters.sources = {}; st.filters.sources[ev.source] = 1; }
         if (what == 'id') { st.filters.ids = String(ev.id); var el = Q('evlIdIn'); if (el) el.value = st.filters.ids; }
         ph.elUpdate();
+        ph.elHistRefilter();
         return false;
     };
     obj.elKeyNav = function(ev) {
@@ -1156,9 +1169,32 @@ body.night #pluginEventLog {
         st.hist.loading = true;
         var ranges = { '1h': 3600e3, '24h': 86400e3, '7d': 7 * 86400e3, '30d': 30 * 86400e3 };
         var since = ranges[st.range] ? (Date.now() - ranges[st.range]) : null;
-        meshserver.send({ action: 'plugin', plugin: 'eventlog', pluginaction: 'getNodeHistory', nodeid: currentNode._id, meshid: currentNode.meshid, limit: st.show, skip: st.hist.skip, since: since });
+        var msg = { action: 'plugin', plugin: 'eventlog', pluginaction: 'getNodeHistory', nodeid: currentNode._id, meshid: currentNode.meshid, limit: st.show, skip: st.hist.skip, since: since };
+        // push the tab's filters into the server query so they cover all stored events, not just the loaded page
+        var f = st.filters;
+        if (f.levels != null) msg.levels = Object.keys(f.levels).map(Number);
+        if (f.logs != null) msg.logs = Object.keys(f.logs);
+        if (f.sources != null) msg.sources = Object.keys(f.sources);
+        if (String(f.text || '').trim() != '') msg.text = String(f.text).trim();
+        if (String(f.ids || '').trim() != '') msg.ids = String(f.ids).trim();
+        meshserver.send(msg);
         ph.elRenderStatus();
         return false;
+    };
+    // History filters run on the SERVER (the tab only holds one page): any filter change re-queries, debounced.
+    obj.elHistRefilter = function() {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (st.view != 'history') return false;
+        if (st._refilterT) clearTimeout(st._refilterT);
+        st._refilterT = setTimeout(function() { pluginHandler.eventlog.elLoadHistory(true); }, 250);
+        return false;
+    };
+    // counts for chips/facets/dropdowns: in History the server reports range-wide counts
+    // (the loaded page is only a slice); Live counts come from the loaded events.
+    obj.elCounts = function(fr) {
+        var st = pluginHandler.eventlog.elState();
+        if (st.view == 'history' && st.hist.facets) return st.hist.facets;
+        return fr.counts;
     };
     // With "Fold repeats" on, a page of N raw events can collapse into far fewer rows.
     // Keep fetching further pages until ~N folded rows are visible (bounded at 5000 loaded events).
@@ -1204,6 +1240,7 @@ body.night #pluginEventLog {
         var st = ph.elState();
         st.hist.loading = false; st.hist.loaded = true;
         if (message.meta) st.meta = message.meta;
+        if (message.facets) st.hist.facets = message.facets;
         if (message.config) {
             st.hist.enabled = (message.config.historyEnabled !== false);
             if (message.config.retentionDays) st.hist.retentionDays = message.config.retentionDays;
@@ -1480,27 +1517,37 @@ body.night #pluginEventLog {
                 var q = {
                     limit: Math.min(Math.max(Number(command.limit) || 250, 1), 1000),
                     skip: Math.max(Number(command.skip) || 0, 0),
-                    since: (command.since != null) ? Number(command.since) : null
+                    since: (command.since != null) ? Number(command.since) : null,
+                    // user filters from the tab; sanitized in the db layer (normParams)
+                    levels: command.levels, logs: command.logs, sources: command.sources,
+                    text: command.text, ids: command.ids
                 };
-                obj.db.getConfigFor(command.nodeid, command.meshid)
-                .then((cfg) => {
-                  obj.db.getEventsFor(command.nodeid, cfg, q, function(events, total) {
-                    obj.db.getStatsFor(command.nodeid, function(stats) {
-                      var sendReply = function(meta) {
-                          if (myobj.parent.ws == null) return;
-                          myobj.parent.ws.send(JSON.stringify({
-                              action: 'plugin', plugin: 'eventlog', method: 'onLoadHistory',
-                              events: events || [], total: total || 0, skip: q.skip,
-                              stored: (stats != null) ? stats.count : 0,
-                              lastCollected: (stats != null) ? stats.last : null,
-                              config: cfg,
-                              meta: meta || null
-                          }));
-                      };
-                      if (typeof obj.db.getNodeMeta == 'function') obj.db.getNodeMeta(command.nodeid, sendReply); else sendReply(null);
+                var withMeta = function(meta) {
+                  obj.db.getConfigFor(command.nodeid, command.meshid)
+                  .then((cfg) => {
+                    var opts = cfg || {};
+                    if (meta && meta.os == 'linux' && opts.historyLogs != null) {
+                        // the config's historyLogs are Windows log names; on Linux they would hide
+                        // stored categories (Kernel, Auth, ...) from the query
+                        opts = Object.assign({}, opts); delete opts.historyLogs;
+                    }
+                    obj.db.getEventsFor(command.nodeid, opts, q, function(events, total) {
+                      obj.db.getStatsFor(command.nodeid, function(stats) {
+                        obj.db.getFacetsFor(command.nodeid, q.since, function(facets) {
+                            if (myobj.parent.ws == null) return;
+                            myobj.parent.ws.send(JSON.stringify({
+                                action: 'plugin', plugin: 'eventlog', method: 'onLoadHistory',
+                                events: events || [], total: total || 0, skip: q.skip,
+                                stored: (stats != null) ? stats.count : 0,
+                                lastCollected: (stats != null) ? stats.last : null,
+                                config: cfg, meta: meta || null, facets: facets || null
+                            }));
+                        });
+                      });
                     });
                   });
-                });
+                };
+                if (typeof obj.db.getNodeMeta == 'function') obj.db.getNodeMeta(command.nodeid, withMeta); else withMeta(null);
             } catch (e) { console.log('PLUGIN: eventlog: getNodeHistory error: ', e); }
           break;
         }

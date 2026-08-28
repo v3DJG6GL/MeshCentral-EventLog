@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Known Issues]
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
+## [0.1.9] - 2026-08-28
+### Fixed
+- **History filters now search ALL stored events, not just the loaded page.** Level chips, Category/Source facets and dropdowns, free-text search and the ID field are pushed into the server database query; changing any filter re-queries (debounced). Previously they only filtered the events already loaded into the browser, so e.g. the two stored Errors were invisible while the newest 500 Info entries filled the page
+- Chip / facet / dropdown counts in History are now range-wide server-side counts instead of counts over the loaded page (Live view still counts its loaded events)
+- Linux: the History query no longer applies the config set's Windows log names ("Application,System"), which silently hid stored Kernel/Auth/Cron/Daemon events from the History view
+- ID filter ranges (e.g. 100-199) now also match Linux events, whose PID is stored as a string
+
 ## [0.1.8] - 2026-08-28
 ### Fixed
 - History + "Fold repeats": a page of 500 events could collapse into a handful of rows. History now keeps loading further pages automatically until about "Show" folded rows are visible (bounded at 5000 loaded events); toggling Fold on triggers the same top-up
