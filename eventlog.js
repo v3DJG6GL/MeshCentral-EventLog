@@ -772,6 +772,7 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         st.show = Number(n) || 100; putstore('evl_show', String(st.show));
         if (st.view == 'live') ph.elRequestLive(null);
+        else ph.elLoadHistory(true);   // History: reload the first page with the new page size
         ph.elUpdate();
         return false;
     };

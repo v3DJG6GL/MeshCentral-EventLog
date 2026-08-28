@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Known Issues]
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
+## [0.1.6] - 2026-08-28
+### Fixed
+- History view: changing "Show" now reloads the page with the new page size immediately (previously it only applied to the next "Load more" / a full page reload)
+
 ## [0.1.5] - 2026-08-28
 ### Added
 - **Linux endpoint support (systemd-journald).** The Event Log tab now appears on Linux devices too:
