@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Known Issues]
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
+## [0.1.10] - 2026-08-28
+### Fixed
+- Saving the Default config set in the admin panel failed on NeDB servers with "Error loading plugin handler (TypeError: Cannot read properties of undefined (reading 'then'))": NeDB's update() does not return a promise the way MongoDB's does. Long-standing bug, surfaced once the admin page rendered again (0.1.7)
+
 ## [0.1.9] - 2026-08-28
 ### Fixed
 - **History filters now search ALL stored events, not just the loaded page.** Level chips, Category/Source facets and dropdowns, free-text search and the ID field are pushed into the server database query; changing any filter re-queries (debounced). Previously they only filtered the events already loaded into the browser, so e.g. the two stored Errors were invisible while the newest 500 Info entries filled the page

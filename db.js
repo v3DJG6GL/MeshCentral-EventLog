@@ -400,7 +400,12 @@ module.exports.CreateDB = function(meshserver) {
         obj.updateDefaultConfig = function(args) {
             args.type = 'configSet';
             args.uid = Math.random().toString(32).replace('0.', '');
-            return obj.settingsFile.update({default: true}, { $set: args }, {upsert: true});
+            // NeDB's classic update() returns undefined, not a promise - wrap it so callers can .then()
+            return new Promise(function(resolve, reject) {
+                obj.settingsFile.update({default: true}, { $set: args }, {upsert: true}, function(err, numAffected) {
+                    if (err) reject(err); else resolve(numAffected);
+                });
+            });
         };
         obj.updateConfig = function(id, args) {
             return new Promise(function(resolve, reject) {
