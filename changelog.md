@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Known Issues]
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
+## [0.1.5] - 2026-08-28
+### Added
+- **Linux endpoint support (systemd-journald).** The Event Log tab now appears on Linux devices too:
+  - Live view and periodic history collection read the journal via `journalctl -o json` (the same approach Filebeat uses); incremental collection resumes from a journal cursor, so nothing is re-sent and nothing is missed between runs. First run is bounded to the last 24 h
+  - Events are shown in KSystemLog/GNOME-Logs-style categories derived from the journal metadata: System, Application, Kernel, Auth, Cron, Daemon, Audit
+  - New "View" selector (All / Kernel / Security (auth) / Audit / This boot) — in Live view it is pushed down to journalctl (`-k`, auth facilities, `_TRANSPORT=audit`, `-b`)
+  - Columns and details adapt: Category instead of Log, PID instead of Event ID; the detail pane shows the systemd Unit and the raw syslog priority (Emergency…Debug) next to the collapsed level; the Details (JSON) pane and Copy now show the full journald record
+  - Syslog priorities map onto the existing level filter (0-2 Critical, 3 Error, 4 Warning, 5-6 Info, 7 Verbose), so config sets (entry types, history on/off, retention) apply unchanged
+  - The agent probes endpoint capabilities once (journalctl version, persistent journal, auditd, /var/log files) and the UI adapts: a volatile-journal hint, and a clear message on endpoints without systemd (flat-file /var/log support is planned as the next step)
+  - Safety rails: journalctl output is bounded (2000 events / 8 MB per batch, drained over successive runs), shell arguments are sanitized, and collection stays outside the agent's event loop
+### Fixed
+- Storing a single event failed if it did not have exactly 6 fields (brittle single-vs-array detection in the database layer)
+- `Object.assign` in the agent module replaced with a plain merge (not guaranteed to exist in the agent's duktape runtime)
+- Windows detection in the browser now uses the agent architecture id instead of matching "windows" in the OS description (which is a distro name like "Ubuntu 24.04.2 LTS" on Linux and could misdetect unusual Windows descriptions)
+
 ## [0.1.3] - 2026-08-23
 ### Added
 - Viewer: draggable sidebar width (rail between the facets and the list); "Reset sizes" covers it

@@ -20,7 +20,7 @@ Restart your MeshCentral server after making this change.
 Once installed, you'll need to update your agent cores in order to use the live / history features.
 
 ## Usage
-*Currently only supports Windows endpoints with a software agent installed.*
+*Supports Windows endpoints (Windows Event Log via PowerShell) and Linux endpoints (systemd-journald via journalctl) with a software agent installed. On Linux, events are shown in KSystemLog-style categories (System, Application, Kernel, Auth, Cron, Daemon, Audit); endpoints without systemd (e.g. Alpine, OpenWRT) are detected and flat-file /var/log support is planned.*
 
 As a proof of concept, several methods were employed to become familiar with the [MeshCentral2](https://github.com/Ylianst/MeshCentral) project. 
 

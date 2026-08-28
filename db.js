@@ -21,7 +21,7 @@ function loadModule(names) {
 
 module.exports.CreateDB = function(meshserver) {
     var obj = {};
-    obj.dbVersion = 3;
+    obj.dbVersion = 4;
     const expireLogEntrySeconds = (60 * 60 * 24 * 30); // 30 days (default, see retentionDays in the default config set)
     // numeric event time (ms since epoch) out of the PowerShell "/Date(ms)/" string or the stored digit array
     var tcOf = function(tcv) {
@@ -85,7 +85,8 @@ module.exports.CreateDB = function(meshserver) {
           obj.settingsFile = db.collection('plugin_eventlog_settings');
           
           obj.addEventsFor = function(nodeid, events) {
-              if (Object.getOwnPropertyNames(events).length == 6 && events.LogName) events = [ events ];
+              if (!Array.isArray(events)) events = [ events ]; // a single event arrives as a bare object
+              events = events.filter(function(e) { return e != null && typeof e == 'object'; });
               for (const [i, e] of Object.entries(events)) {
                   e.time = new Date();
                   e.nodeid = nodeid;
@@ -211,6 +212,17 @@ module.exports.CreateDB = function(meshserver) {
                   }
               });
           };
+          // per-node metadata reported by the agent (OS, Linux log capabilities)
+          obj.setNodeMeta = function(nodeid, meta) {
+              obj.settingsFile.updateOne({ type: 'nodeMeta', nodeid: nodeid }, { $set: { type: 'nodeMeta', nodeid: nodeid, os: meta.os || null, caps: meta.caps || null, updated: new Date() } }, { upsert: true })
+              .catch(function (e) { console.log('EVENTLOG: setNodeMeta error: ' + e); });
+          };
+          obj.getNodeMeta = function(nodeid, callback) {
+              obj.settingsFile.find({ type: 'nodeMeta', nodeid: nodeid }).limit(1).toArray()
+              .then(function (d) { callback((d && d[0]) ? { os: d[0].os, caps: d[0].caps } : null); })
+              .catch(function () { callback(null); });
+          };
+
           obj.updateDBVersion = function(new_version) {
             return obj.settingsFile.updateOne({type: "db_version"}, { $set: {version: new_version} }, {upsert: true});
           };
@@ -247,6 +259,9 @@ module.exports.CreateDB = function(meshserver) {
                   });
                   obj.updateDBVersion(3);
               }
+              if (current_version < 4) { // v4: Linux events (additive fields Priority/Unit/Transport/BootId, nullable Id) - no data rewrite needed
+                  obj.updateDBVersion(4);
+              }
           });
           obj.checkForDefault();
           obj.applyRetention();
@@ -267,7 +282,8 @@ module.exports.CreateDB = function(meshserver) {
         }
         
         obj.addEventsFor = function(nodeid, events) {
-            if (Object.getOwnPropertyNames(events).length == 6 && events.LogName) events = [ events ];
+            if (!Array.isArray(events)) events = [ events ]; // a single event arrives as a bare object
+            events = events.filter(function(e) { return e != null && typeof e == 'object'; });
             for (const [i, e] of Object.entries(events)) {
                 e.time = new Date();
                 e.nodeid = nodeid;
@@ -426,6 +442,16 @@ module.exports.CreateDB = function(meshserver) {
           });
       };
       
+      // per-node metadata reported by the agent (OS, Linux log capabilities)
+      obj.setNodeMeta = function(nodeid, meta) {
+          obj.settingsFile.update({ type: 'nodeMeta', nodeid: nodeid }, { $set: { type: 'nodeMeta', nodeid: nodeid, os: meta.os || null, caps: meta.caps || null, updated: new Date() } }, { upsert: true }, function () { });
+      };
+      obj.getNodeMeta = function(nodeid, callback) {
+          obj.settingsFile.find({ type: 'nodeMeta', nodeid: nodeid }).limit(1).exec(function (err, d) {
+              callback((d && d[0]) ? { os: d[0].os, caps: d[0].caps } : null);
+          });
+      };
+
       obj.updateDBVersion = function(new_version) {
         return new Promise(function(resolve, reject) {
             obj.settingsFile.update({type: "db_version"}, { $set: {version: new_version} }, {upsert: true}, function(err, upDocs) {
@@ -467,8 +493,11 @@ module.exports.CreateDB = function(meshserver) {
               });
               obj.updateDBVersion(3);
           }
+          if (current_version < 4) { // v4: Linux events (additive fields Priority/Unit/Transport/BootId, nullable Id) - no data rewrite needed
+              obj.updateDBVersion(4);
+          }
       });
-      
+
       obj.checkForDefault();
       obj.applyRetention();
     }

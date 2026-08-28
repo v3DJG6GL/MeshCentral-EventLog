@@ -94,7 +94,14 @@ module.exports.eventlog = function (parent) {
       'elVSplitDown',
       'elVSplitReset',
       'elRowFor',
-      'elDetailsText'
+      'elDetailsText',
+      // Linux support (v0.1.5)
+      'elPlatform',
+      'elIsSupported',
+      'elPriName',
+      'elLbl',
+      'elRawOf',
+      'elSelCat'
     ];
 
     obj._pluginPermissions = function() {
@@ -122,9 +129,47 @@ module.exports.eventlog = function (parent) {
     //  Front end (browser) code below. Serialized into the page.
     // ------------------------------------------------------------------
 
+    // 'windows' | 'linux' | null. Decided from the agent architecture id: on Linux, osdesc is the
+    // distro pretty-name ("Ubuntu 24.04.2 LTS") and never contains "linux", so osdesc is only a
+    // last-resort fallback for Windows.
+    obj.elPlatform = function() {
+      if ((typeof currentNode == 'undefined') || (currentNode == null)) return null;
+      if (currentNode.agent != null && currentNode.agent.id != null) {
+          var id = currentNode.agent.id;
+          var win = [1,2,3,4,21,22,34,42,43,10003,10004,10006,11000,11001,11002];
+          var lin = [5,6,7,8,9,10,12,13,15,18,19,20,24,25,26,27,28,32,33,35,36,37,40,41,45]; // 11 is macOS despite its 'linux' platform tag
+          if (win.indexOf(id) >= 0) return 'windows';
+          if (lin.indexOf(id) >= 0) return 'linux';
+      }
+      if ((typeof currentNode.osdesc == 'string') && (currentNode.osdesc.toLowerCase().indexOf('windows') !== -1)) return 'windows';
+      return null;
+    };
+    obj.elIsSupported = function() {
+      var p = pluginHandler.eventlog.elPlatform();
+      return (p == 'windows' || p == 'linux');
+    };
+    // syslog priority name (Linux detail views keep the raw 0-7 priority next to the collapsed level)
+    obj.elPriName = function(p) {
+      var names = ['Emergency','Alert','Critical','Error','Warning','Notice','Info','Debug'];
+      return (names[p] != null) ? names[p] : ('Priority ' + p);
+    };
+    // column/detail labels differ per OS: journald has categories and PIDs instead of logs and event ids
+    obj.elLbl = function(key) {
+      var lx = (pluginHandler.eventlog.elState().os == 'linux');
+      if (key == 'log') return lx ? 'Category' : 'Log';
+      if (key == 'id') return lx ? 'PID' : 'Event ID';
+      if (key == 'idShort') return lx ? 'PID' : 'ID';
+      return key;
+    };
+    // the raw event for the JSON pane / copy: full journald record when available, else the reconstructed shape
+    obj.elRawOf = function(ev) {
+      if (ev._raw) return ev._raw;
+      return { Level: ev.level, TimeCreated: new Date(ev.time).toISOString(), LogName: ev.log, ProviderName: ev.source, Id: ev.id, Message: ev.message };
+    };
+
     // called to notify the web server that there is a new tab in town
     obj.registerPluginTab = function() {
-      if ((typeof currentNode == 'undefined') || (currentNode == null) || (typeof currentNode.osdesc != 'string') || (currentNode.osdesc.toLowerCase().indexOf('windows') === -1)) return { tabId: null, tabTitle: null };
+      if (!pluginHandler.eventlog.elIsSupported()) return { tabId: null, tabTitle: null };
       return {
         tabTitle: "Event Log",
         tabId: "pluginEventLog"
@@ -143,6 +188,9 @@ module.exports.eventlog = function (parent) {
             ph.byKey = {};
             ph.st = {
                 view: 'live',
+                os: ph.elPlatform(),                                 // 'windows' | 'linux' | null (state resets on node change)
+                lsel: '',                                            // Linux view selector ('', kernel, auth, audit, boot)
+                meta: null,                                          // {os, caps} reported by the agent / server
                 layout: getstore('evl_layout', 'ledger'),           // 'ledger' | 'viewer'
                 fold: (getstore('evl_fold', '1') == '1'),
                 show: Number(getstore('evl_show', '100')),
@@ -211,10 +259,14 @@ module.exports.eventlog = function (parent) {
                 log: pluginHandler.eventlog.elFixText(raw.LogName),
                 source: pluginHandler.eventlog.elFixText(raw.ProviderName),
                 id: (raw.Id == null) ? '' : String(raw.Id),
-                message: pluginHandler.eventlog.elFixText(raw.Message)
+                message: pluginHandler.eventlog.elFixText(raw.Message),
+                pri: (raw.Priority != null && !isNaN(Number(raw.Priority))) ? Number(raw.Priority) : null,
+                unit: (raw.Unit != null) ? pluginHandler.eventlog.elFixText(raw.Unit) : '',
+                transport: (raw.Transport != null) ? String(raw.Transport) : ''
             };
             ev.sig = pluginHandler.eventlog.elHash(ev.level + '|' + ev.log + '|' + ev.source + '|' + ev.id + '|' + ev.message);
             ev.key = pluginHandler.eventlog.elHash(ev.sig + '|' + ev.time);
+            ev._raw = raw;   // full record for the JSON pane / copy (journald fields on Linux)
             return ev;
         } catch (e) { return null; }
     };
@@ -447,8 +499,13 @@ body.night #pluginEventLog {
         h += '<div class=evlSeg>' +
              '<button id=evlVLive class="' + (st.view == 'live' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetView(\'live\')">&#9679; Live</button>' +
              '<button id=evlVHist class="' + (st.view == 'history' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetView(\'history\')">History</button></div>';
+        if (st.os == 'linux') {
+            h += '<span class=evlLbl>View</span> <select id=evlLxSel class=evlSel title="Log view - in Live view this is queried from journalctl directly (Kernel = -k, Security = auth facilities, This boot = -b)" onchange="return pluginHandler.eventlog.elSelCat(this.value)">';
+            [['','All'],['kernel','Kernel'],['auth','Security (auth)'],['audit','Audit'],['boot','This boot']].forEach(function(o){ h += '<option value="' + o[0] + '"' + (st.lsel == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
+            h += '</select>';
+        }
         if (st.layout == 'ledger') {
-            h += '<span class=evlLbl>Log</span> <select id=evlLogSel class=evlSel onchange="return pluginHandler.eventlog.elSelLog(this)"><option value="">All</option></select>';
+            h += '<span class=evlLbl>' + ph.elLbl('log') + '</span> <select id=evlLogSel class=evlSel onchange="return pluginHandler.eventlog.elSelLog(this)"><option value="">All</option></select>';
             h += '<span class=evlLbl>Source</span> <select id=evlSrcSel class=evlSel onchange="return pluginHandler.eventlog.elSelSource(this)"><option value="">All</option></select>';
         }
         h += '<input id=evlIdIn class=evlIn style=width:120px placeholder="IDs: 1112, 100-199" value="' + esc(st.filters.ids) + '" oninput="return pluginHandler.eventlog.elIdInput(this)">';
@@ -529,7 +586,7 @@ body.night #pluginEventLog {
             return '<div class=evlFacet role=button tabindex=0 onclick="return pluginHandler.eventlog.elToggleFacet(\'' + kind + '\',\'' + esc(name).replace(/'/g, '&apos;') + '\')">' +
                    '<span class="cb' + (on ? ' on' : '') + '">' + (on ? '&#10003;' : '') + '</span><span class=t title="' + esc(name) + '">' + esc(name) + '</span><span class=n>' + count + '</span></div>';
         };
-        h += '<h4>Log</h4>';
+        h += '<h4>' + ph.elLbl('log') + '</h4>';
         Object.keys(fr.counts.log).sort().forEach(function(n) {
             h += facet('logs', n, fr.counts.log[n], (st.filters.logs == null || st.filters.logs[n]));
         });
@@ -580,7 +637,7 @@ body.night #pluginEventLog {
             h += '<div class=evlViewer id=evlViewer' + (st.sideW ? ' style="--evl-side:' + st.sideW + 'px"' : '') + '><div class=evlFacets id=evlFacets>' + ph.elRenderFacets(fr) + '</div>';
             h += '<div class=evlVSplit title="Drag to change the sidebar width &middot; double-click to reset" onpointerdown="return pluginHandler.eventlog.elVSplitDown(event)" ondblclick="return pluginHandler.eventlog.elVSplitReset()"></div>';
             h += '<div><div class="evlVList' + dens + '" id=evlVList tabindex=0' + hstyle + ' onkeydown="return pluginHandler.eventlog.elKeyNav(event)"><table class=evlLog><thead><tr>' +
-                 sortTh('level', 'Level') + sortTh('time', 'Time') + sortTh('source', 'Source') + sortTh('id', 'ID') + sortTh('message', 'Message') +
+                 sortTh('level', 'Level') + sortTh('time', 'Time') + sortTh('source', 'Source') + sortTh('id', ph.elLbl('idShort')) + sortTh('message', 'Message') +
                  '</tr></thead><tbody>';
             var selRep = null;
             frows.forEach(function(r) { h += rowHtml(r, 'viewer'); if (st.selected == r.ev.key) selRep = r; });
@@ -597,11 +654,13 @@ body.night #pluginEventLog {
                      '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elFilterBy(\'source\',\'' + selRep.ev.key + '\')">Filter: this source</button>' +
                      '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elFilterBy(\'id\',\'' + selRep.ev.key + '\')">Filter: ID ' + esc(selRep.ev.id) + '</button></div>';
                 if (st.dtab == 'json') {
-                    h += '<pre class=evlRaw style="margin:10px 13px">' + esc(JSON.stringify({ Level: selRep.ev.level, TimeCreated: new Date(selRep.ev.time).toISOString(), LogName: selRep.ev.log, ProviderName: selRep.ev.source, Id: selRep.ev.id, Message: selRep.ev.message }, null, 2)) + '</pre>';
+                    h += '<pre class=evlRaw style="margin:10px 13px">' + esc(JSON.stringify(ph.elRawOf(selRep.ev), null, 2)) + '</pre>';
                 } else {
                     h += '<div class=evlDBody><div class=evlMsgFull>' + esc(selRep.ev.message) + '</div><dl class=evlKv>' +
-                         '<dt>Log</dt><dd>' + esc(selRep.ev.log) + '</dd><dt>Source</dt><dd title="' + esc(selRep.ev.source) + '">' + esc(selRep.ev.source) + '</dd>' +
-                         '<dt>Event ID</dt><dd class=evlMono>' + esc(selRep.ev.id) + '</dd><dt>Level</dt><dd>' + esc(selRep.ev.levelName) + ' (' + selRep.ev.level + ')</dd>' +
+                         '<dt>' + ph.elLbl('log') + '</dt><dd>' + esc(selRep.ev.log) + '</dd><dt>Source</dt><dd title="' + esc(selRep.ev.source) + '">' + esc(selRep.ev.source) + '</dd>' +
+                         '<dt>' + ph.elLbl('id') + '</dt><dd class=evlMono>' + esc(selRep.ev.id) + '</dd><dt>Level</dt><dd>' + esc(selRep.ev.levelName) + ' (' + selRep.ev.level + ')</dd>' +
+                         (selRep.ev.unit ? '<dt>Unit</dt><dd title="' + esc(selRep.ev.unit) + '">' + esc(selRep.ev.unit) + '</dd>' : '') +
+                         (selRep.ev.pri != null ? '<dt>Priority</dt><dd>' + esc(ph.elPriName(selRep.ev.pri)) + ' (' + selRep.ev.pri + ')</dd>' : '') +
                          '<dt>Recorded</dt><dd class=evlMono>' + ph.elFmtTime(selRep.ev.time) + '</dd>' +
                          (selRep.count > 1 ? '<dt>Seen</dt><dd>' + selRep.count + '&times; &mdash; ' + selRep.times.slice(0, 6).map(function(t) { return ph.elFmtTime(t, true); }).join(', ') + (selRep.times.length > 6 ? '&hellip;' : '') + '</dd>' : '') +
                          '</dl></div>';
@@ -610,7 +669,7 @@ body.night #pluginEventLog {
             h += '</div></div></div>';
         } else {
             h += '<div class="evlScroll' + dens + '" id=evlScroll' + hstyle + '><table class=evlLog><thead><tr>' +
-                 sortTh('level', 'Level') + sortTh('time', 'Time') + sortTh('log', 'Log') + sortTh('source', 'Source') + sortTh('id', 'Event ID') + sortTh('message', 'Message') +
+                 sortTh('level', 'Level') + sortTh('time', 'Time') + sortTh('log', ph.elLbl('log')) + sortTh('source', 'Source') + sortTh('id', ph.elLbl('id')) + sortTh('message', 'Message') +
                  '</tr></thead><tbody>';
             frows.forEach(function(r) { h += rowHtml(r, 'ledger'); });
             if (!frows.length) h += '<tr><td colspan=6><div class=evlEmpty>' + ph.elEmptyText() + '</div></td></tr>';
@@ -636,8 +695,10 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         var esc = EscapeHtml, ev = r.ev;
         var h = '<div class=evlMsgFull>' + esc(ev.message) + '</div>';
-        h += '<div class=evlMeta><span>Log <b>' + esc(ev.log) + '</b></span><span>Source <b>' + esc(ev.source) + '</b></span>' +
-             '<span>Event ID <b class=evlMono>' + esc(ev.id) + '</b></span><span>Level <b>' + esc(ev.levelName) + ' (' + ev.level + ')</b></span>' +
+        h += '<div class=evlMeta><span>' + ph.elLbl('log') + ' <b>' + esc(ev.log) + '</b></span><span>Source <b>' + esc(ev.source) + '</b></span>' +
+             '<span>' + ph.elLbl('id') + ' <b class=evlMono>' + esc(ev.id) + '</b></span><span>Level <b>' + esc(ev.levelName) + ' (' + ev.level + ')</b></span>' +
+             (ev.unit ? '<span>Unit <b>' + esc(ev.unit) + '</b></span>' : '') +
+             (ev.pri != null ? '<span>Priority <b>' + esc(ph.elPriName(ev.pri)) + ' (' + ev.pri + ')</b></span>' : '') +
              '<span>Recorded <b class=evlMono>' + ph.elFmtTime(ev.time) + '</b></span></div>';
         if (r.count > 1) {
             h += '<div class=evlMeta><span>Occurrences (' + r.count + ')</span><span class=evlMono>' + r.times.slice(0, 12).map(function(t) { return ph.elFmtTime(t, true); }).join(' &middot; ') + (r.times.length > 12 ? ' &hellip;' : '') + '</span></div>';
@@ -649,7 +710,7 @@ body.night #pluginEventLog {
              '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elFilterBy(\'id\',\'' + ev.key + '\')">Filter: ID ' + esc(ev.id) + '</button>' +
              '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elToggleRaw(\'' + ev.key + '\')">' + (st.raw[ev.key] ? 'Hide' : 'Show') + ' raw JSON</button></div>';
         if (st.raw[ev.key]) {
-            h += '<pre class=evlRaw>' + esc(JSON.stringify({ Level: ev.level, TimeCreated: new Date(ev.time).toISOString(), LogName: ev.log, ProviderName: ev.source, Id: ev.id, Message: ev.message }, null, 2)) + '</pre>';
+            h += '<pre class=evlRaw>' + esc(JSON.stringify(ph.elRawOf(ev), null, 2)) + '</pre>';
         }
         return h;
     };
@@ -672,6 +733,10 @@ body.night #pluginEventLog {
             if (st.hist.events.length < st.hist.total) h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elLoadMore()">Load ' + Math.min(st.show, st.hist.total - st.hist.events.length) + ' more</button>';
             h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elCollectNow()">Collect now</button>';
             if (st.collectMsg) h += '<span>' + st.collectMsg + '</span>';
+        }
+        if (st.os == 'linux' && st.meta && st.meta.caps) {
+            if (st.meta.caps.journalctl === false) h += '<span class=warn>systemd-journald not found on this device &mdash; flat-file /var/log support arrives in a later plugin version</span>';
+            else if (st.meta.caps.persistent === false) h += '<span title="The journal is stored in memory only (/run/log/journal). Events collected into the server database are unaffected.">Volatile journal: the endpoint keeps logs since its last boot only</span>';
         }
         var parts = [];
         if (Object.keys(st.cols[st.layout] || {}).length > 0) parts.push('column widths');
@@ -714,6 +779,17 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         st.range = r; putstore('evl_range', r);
         if (st.view == 'history') ph.elLoadHistory(true); else ph.elUpdate();
+        return false;
+    };
+    // Linux view selector: in Live view the selection is pushed down to journalctl; in both views
+    // it also drives the client-side Category filter so the table follows immediately.
+    obj.elSelCat = function(v) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.lsel = v;
+        var catMap = { kernel: 'Kernel', auth: 'Auth', audit: 'Audit' };
+        if (catMap[v]) { st.filters.logs = {}; st.filters.logs[catMap[v]] = 1; } else { st.filters.logs = null; }
+        if (st.view == 'live') ph.elRequestLive(null);
+        ph.elUpdate();
         return false;
     };
     obj.elSelLog = function(el) {
@@ -953,9 +1029,11 @@ body.night #pluginEventLog {
     obj.elDetailsText = function(key) {
         var ph = pluginHandler.eventlog, r = ph.elRowFor(key);
         if (!r) return '';
-        var ev = r.ev, pad = function(l) { return (l + '              ').substring(0, 15); };
-        var t = pad('Log Name:') + ev.log + '\n' + pad('Source:') + ev.source + '\n' + pad('Date:') + ph.elFmtTime(ev.time) + '\n' +
-                pad('Event ID:') + ev.id + '\n' + pad('Level:') + ev.levelName + ' (' + ev.level + ')' + '\n';
+        var ev = r.ev, st = ph.elState(), lx = (st.os == 'linux'), pad = function(l) { return (l + '              ').substring(0, 15); };
+        var t = pad((lx ? 'Category:' : 'Log Name:')) + ev.log + '\n' + pad('Source:') + ev.source + '\n' + pad('Date:') + ph.elFmtTime(ev.time) + '\n' +
+                pad((lx ? 'PID:' : 'Event ID:')) + ev.id + '\n' + pad('Level:') + ev.levelName + ' (' + ev.level + ')' + '\n';
+        if (ev.unit) t += pad('Unit:') + ev.unit + '\n';
+        if (ev.pri != null) t += pad('Priority:') + ph.elPriName(ev.pri) + ' (' + ev.pri + ')' + '\n';
         if (r.count > 1) t += pad('Occurrences:') + r.count + ' (' + r.times.slice(0, 12).map(function(x) { return ph.elFmtTime(x); }).join(', ') + (r.times.length > 12 ? ', ...' : '') + ')\n';
         t += 'Description:\n' + ev.message;
         return t;
@@ -965,7 +1043,7 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, ev = ph.byKey[key];
         if (!ev) return false;
         var txt;
-        if (what == 'json') txt = JSON.stringify({ Level: ev.level, TimeCreated: new Date(ev.time).toISOString(), LogName: ev.log, ProviderName: ev.source, Id: ev.id, Message: ev.message }, null, 2);
+        if (what == 'json') txt = JSON.stringify(ph.elRawOf(ev), null, 2);
         else if (what == 'message') txt = ev.message;
         else txt = ph.elDetailsText(key);
         var fallback = function() {
@@ -1011,7 +1089,8 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         var fr = ph.elFiltered();
         var q = function(v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
-        var lines = ['Level,Time,Log,Source,EventId,Message'];
+        var lx = (st.os == 'linux');
+        var lines = ['Level,Time,' + (lx ? 'Category' : 'Log') + ',Source,' + (lx ? 'PID' : 'EventId') + ',Message'];
         fr.rows.forEach(function(ev) {
             lines.push([q(ev.levelName), q(new Date(ev.time).toISOString()), q(ev.log), q(ev.source), q(ev.id), q(ev.message)].join(','));
         });
@@ -1034,6 +1113,7 @@ body.night #pluginEventLog {
                 // when folding repeats, fetch a larger batch so that N distinct rows can be shown
                 var cmd = { action: 'plugin', plugin: 'eventlog', pluginaction: 'getlivelogs', num: st.fold ? Math.min(1000, st.show * 4) : st.show };
                 if (since != null) cmd.since = since;
+                if (st.os == 'linux' && st.lsel) cmd.lsel = st.lsel;
                 ph.livelog.sendText(cmd);
             }
         } catch (e) { }
@@ -1103,11 +1183,12 @@ body.night #pluginEventLog {
         ph.elRenderStatus();
     };
     obj.onLoadHistory = function(server, message) {
-        if (typeof currentNode == 'undefined' || currentNode == null || typeof currentNode.osdesc != 'string' || currentNode.osdesc.toLowerCase().indexOf('windows') === -1) return;
         var ph = pluginHandler.eventlog;
+        if (!ph.elIsSupported()) return;
         if (!ph.elEnsureShell()) return;
         var st = ph.elState();
         st.hist.loading = false; st.hist.loaded = true;
+        if (message.meta) st.meta = message.meta;
         if (message.config) {
             st.hist.enabled = (message.config.historyEnabled !== false);
             if (message.config.retentionDays) st.hist.retentionDays = message.config.retentionDays;
@@ -1143,6 +1224,7 @@ body.night #pluginEventLog {
       }
       if (!ph.elEnsureShell()) return;
       var st = ph.elState();
+      if (data.caps) st.meta = { os: data.os || st.os, caps: data.caps };
       var evs = data.data;
       if (evs == null) return;
       if (!Array.isArray(evs)) evs = [evs];
@@ -1205,8 +1287,8 @@ body.night #pluginEventLog {
       pluginHandler.registerPluginTab(ph.registerPluginTab());
       if (typeof ph.livelog == 'undefined') { ph.livelog = null; }
       if (typeof ph.livelognode == 'undefined') { ph.livelognode = null; }
-      var isWin = (typeof currentNode != 'undefined') && (currentNode != null) && (typeof currentNode.osdesc == 'string') && (currentNode.osdesc.toLowerCase().indexOf('windows') !== -1);
-      var sameNode = isWin && (ph.livelognode != null) && (ph.livelognode._id == currentNode._id);
+      var isSupported = ph.elIsSupported();   // Windows and Linux endpoints
+      var sameNode = isSupported && (ph.livelognode != null) && (ph.livelognode._id == currentNode._id);
       // MeshCentral calls this hook on every gotoDevice() -- tab switches, node updates, connection state changes.
       // Only tear down the tunnel and the UI state when the node actually changed; otherwise keep the live
       // connection (stopping a still-connecting websocket logs an error) and keep the user's filters/data.
@@ -1217,7 +1299,7 @@ body.night #pluginEventLog {
           ph.st = null;      // reset UI state for the new node
           ph.byKey = {};
       }
-      if (!isWin) return;
+      if (!isSupported) return;
       ph.livelognode = currentNode;
       if (ph.livelognode.conn && ph.livelog == null) {
           ph.livelog = CreateAgentRedirect(meshserver, ph.createRemoteEventLog(ph.fe_on_message), serverPublicNamePort, authCookie, authRelayCookie, domainUrl);
@@ -1276,7 +1358,7 @@ body.night #pluginEventLog {
     };
     obj.fixEvents = function(events) {
         var list = Array.isArray(events) ? events : [events];
-        list.forEach(function(e) { if (e && typeof e == 'object') { e.Message = obj.fixText(e.Message); e.ProviderName = obj.fixText(e.ProviderName); e.LogName = obj.fixText(e.LogName); } });
+        list.forEach(function(e) { if (e && typeof e == 'object') { e.Message = obj.fixText(e.Message); e.ProviderName = obj.fixText(e.ProviderName); e.LogName = obj.fixText(e.LogName); if (e.Unit != null) e.Unit = obj.fixText(e.Unit); } });
         return events;
     };
 
@@ -1348,11 +1430,16 @@ body.night #pluginEventLog {
         }
         case 'gatherlogs': { // submit logs to server db
             try {
+                if (typeof command.data != 'string' || command.data.length > 8 * 1024 * 1024) { console.log('EVENTLOG: gatherlogs payload rejected (missing or > 8MB)'); break; }
+                if (command.caps != null && typeof obj.meshServer.pluginHandler.eventlog_db.setNodeMeta == 'function') {
+                    // remember the endpoint's log capabilities (journald present/persistent, files, ...) for the UI
+                    obj.meshServer.pluginHandler.eventlog_db.setNodeMeta(myparent.dbNodeKey, { os: command.os || null, caps: command.caps });
+                }
                 obj.meshServer.pluginHandler.eventlog_db.addEventsFor(myparent.dbNodeKey, obj.fixEvents(JSON.parse(command.data)));
                 obj.meshServer.pluginHandler.eventlog_db.getLastEventFor(myparent.dbNodeKey, function (rec) {
                     // send a message to the endpoint verifying receipt
                     if (rec == null || rec[0] == null) return;
-                    myparent.send(JSON.stringify({
+                    var ack = {
                         action: 'plugin',
                         pluginaction: 'setLVDOC',
                         plugin: 'eventlog',
@@ -1360,7 +1447,9 @@ body.night #pluginEventLog {
                         rights: true,
                         sessionid: true,
                         value: Array.isArray(rec[0].TimeCreated) ? rec[0].TimeCreated[0] : rec[0].TimeCreated
-                    }));
+                    };
+                    if (command.os == 'linux' && command.cursor != null) ack.cursor = command.cursor; // echo: the agent commits this journal cursor
+                    myparent.send(JSON.stringify(ack));
                 });
               } catch (e) { console.log('Error gathering logs: ', e.stack); }
             break;
@@ -1379,15 +1468,18 @@ body.night #pluginEventLog {
                 .then((cfg) => {
                   obj.db.getEventsFor(command.nodeid, cfg, q, function(events, total) {
                     obj.db.getStatsFor(command.nodeid, function(stats) {
-                      if (myobj.parent.ws != null) {
+                      var sendReply = function(meta) {
+                          if (myobj.parent.ws == null) return;
                           myobj.parent.ws.send(JSON.stringify({
                               action: 'plugin', plugin: 'eventlog', method: 'onLoadHistory',
                               events: events || [], total: total || 0, skip: q.skip,
                               stored: (stats != null) ? stats.count : 0,
                               lastCollected: (stats != null) ? stats.last : null,
-                              config: cfg
+                              config: cfg,
+                              meta: meta || null
                           }));
-                      }
+                      };
+                      if (typeof obj.db.getNodeMeta == 'function') obj.db.getNodeMeta(command.nodeid, sendReply); else sendReply(null);
                     });
                   });
                 });
