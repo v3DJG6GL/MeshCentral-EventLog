@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Known Issues]
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
+## [0.1.12] - 2026-09-01
+### Added
+- **Config sets can now include or exclude by Category and by Source**, for Live and History separately. Each list has an Include/Exclude switch; empty lists mean no filter
+  - *Categories (Linux)*: the journald categories (System, Application, Kernel, Auth, Cron, Daemon, Audit). Until now the "Logs" fields only meant something on Windows, so a Linux endpoint collected every category - and on a desktop, *Application* (program stdout/stderr) is by far the noisiest
+  - *Sources*: comma-delimited source / provider names, `*` wildcards, case-insensitive - e.g. `plasmashell, kwin*` in Exclude mode. Works on Windows and Linux
+  - History rules are applied on the server as batches arrive, so they take effect immediately for every OS and every agent version. Linux agents additionally apply them before sending (less traffic) once their core is updated. Live rules are applied in the browser (and on Linux agents)
+  - Rules affect newly collected events; what is already stored ages out with retention. The Category/Source dropdowns on the device tab still show everything that is stored
+### Changed
+- The collection acknowledgement now reflects the newest event *received*, not the newest *stored*, so endpoints move past events that a rule dropped instead of re-sending them every minute
+
 ## [0.1.11] - 2026-09-01
 ### Fixed
 - **The plugin made the whole MeshCentral server stall for tens of seconds at a time, with CPU usage climbing a little more every day.** Every page was affected, desktop and terminal sessions included, and restarting MeshCentral did not help. The plugin compacted its NeDB store every 40 seconds; NeDB compaction serialises *every stored document* to JSON and rewrites the whole file on the Node event loop, so nothing else on the server runs while it happens. Measured on a fast local disk, one compaction blocks for roughly 9 ms per 1,000 stored events (0.9 s at 100k events, 3.6 s at 400k) - and the store grew with every collection, which is why the CPU graph kept climbing. Compaction now runs once every 24 hours, the same value MeshCentral uses for all of its own NeDB stores

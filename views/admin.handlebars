@@ -28,9 +28,17 @@
           liveLogs: 'Application,System',
           liveNum: 100,
           liveEntryTypes: [2,3],
+          liveCategories: [],
+          liveCategoriesMode: 'exclude',
+          liveSources: '',
+          liveSourcesMode: 'exclude',
           historyEnabled: true,
           historyLogs: 'Application,System',
           historyEntryTypes: [2,3],
+          historyCategories: [],
+          historyCategoriesMode: 'exclude',
+          historySources: '',
+          historySourcesMode: 'exclude',
           retentionDays: 30
         });
         let cfdd = document.querySelector('#elconfigSet');
@@ -54,9 +62,17 @@
               liveLogs: 'Application,System',
               liveNum: 100,
               liveEntryTypes: [2,3],
+              liveCategories: [],
+              liveCategoriesMode: 'exclude',
+              liveSources: '',
+              liveSourcesMode: 'exclude',
               historyEnabled: true,
               historyLogs: 'Application,System',
               historyEntryTypes: [2,3],
+              historyCategories: [],
+              historyCategoriesMode: 'exclude',
+              historySources: '',
+              historySourcesMode: 'exclude',
               retentionDays: 30
             };
           }
@@ -74,6 +90,12 @@
             break;
             case 'liveLogs':
             case 'historyLogs':
+            case 'liveSources':
+            case 'historySources':
+            case 'liveCategoriesMode':
+            case 'historyCategoriesMode':
+            case 'liveSourcesMode':
+            case 'historySourcesMode':
             case 'liveNum':
             case 'retentionDays':
             case 'name':
@@ -91,6 +113,14 @@
                 opt.selected = v.includes(Number(opt.value));
               });
             break;
+            case 'liveCategories':
+            case 'historyCategories':
+              if (typeof v == 'string') v = v.split(',');
+              v = (v || []).map(el => String(el).trim().toLowerCase());
+              Q('el'+k).querySelectorAll('option').forEach(function(opt){
+                opt.selected = v.includes(opt.value.toLowerCase());
+              });
+            break;
           }
         }
         
@@ -104,9 +134,17 @@
           liveLogs: Q('elliveLogs').value,
           liveNum: Q('elliveNum').value,
           liveEntryTypes: Array.from(document.querySelectorAll('#elliveEntryTypes option:checked')).map(el => el.value),
+          liveCategories: Array.from(document.querySelectorAll('#elliveCategories option:checked')).map(el => el.value),
+          liveCategoriesMode: Q('elliveCategoriesMode').value,
+          liveSources: Q('elliveSources').value,
+          liveSourcesMode: Q('elliveSourcesMode').value,
           historyEnabled: (Q('elhistoryEnabled').checked) ? true : false,
           historyLogs: Q('elhistoryLogs').value,
           historyEntryTypes: Array.from(document.querySelectorAll('#elhistoryEntryTypes option:checked')).map(el => el.value),
+          historyCategories: Array.from(document.querySelectorAll('#elhistoryCategories option:checked')).map(el => el.value),
+          historyCategoriesMode: Q('elhistoryCategoriesMode').value,
+          historySources: Q('elhistorySources').value,
+          historySourcesMode: Q('elhistorySourcesMode').value,
           retentionDays: Math.max(1, Number(Q('elretentionDays').value) || 30)
         };
         
@@ -375,7 +413,20 @@
           <table>
             <tr><td>Name</td><td><input type="text" id="elname" name="elName" value="" class="elLongTxt"></td></tr>
             <tr><td colspan="2" style="font-weight: bold; text-align:center;">Live Config</td></tr>
-            <tr><td>Logs (comma delimeted)</td><td><input type="text" id="elliveLogs" name="liveLogs" class="elLongTxt"></td></tr>
+            <tr><td>Logs (comma delimited)<br><small>Windows event logs, e.g. Application,System,Security</small></td><td><input type="text" id="elliveLogs" name="liveLogs" class="elLongTxt"></td></tr>
+            <tr><td>Categories (Linux)<br><small>journald categories. Nothing selected = no filter. Application is program output (stdout/stderr), usually the noisiest on desktops.</small></td><td>
+              <select id="elliveCategoriesMode" name="liveCategoriesMode" class="elSel"><option value="include">Include selected</option><option value="exclude" selected>Exclude selected</option></select> <br>
+              <select id="elliveCategories" name="liveCategories[]" multiple class="elMSel">
+                <option value="System">System</option>
+                <option value="Application">Application</option>
+                <option value="Kernel">Kernel</option>
+                <option value="Auth">Auth</option>
+                <option value="Cron">Cron</option>
+                <option value="Daemon">Daemon</option>
+                <option value="Audit">Audit</option>
+              </select></td>
+            </tr>
+            <tr><td>Sources<br><small>Comma delimited source / provider names, <code>*</code> matches anything, case-insensitive. Empty = no filter. Example: <code>plasmashell, kwin*</code></small></td><td><select id="elliveSourcesMode" name="liveSourcesMode" class="elSel"><option value="include">Include selected</option><option value="exclude" selected>Exclude selected</option></select> <br><input type="text" id="elliveSources" name="liveSources" class="elLongTxt"></td></tr>
             <tr><td>Default entries per log in the Live view<br><small>Users can pick 25&ndash;500 on the device tab; this is the initial value.</small></td><td><input type="text" id="elliveNum" name="liveNum"></td></tr>
             <tr><td>Entry Types</td><td>
               <select id="elliveEntryTypes" name="liveEntryTypes[]" multiple class="elMSel">
@@ -389,7 +440,19 @@
             </tr>
             <tr><td colspan="2" style="font-weight: bold; text-align:center;">History Config</td></tr>
             <tr><td>Enabled</td><td><input type="checkbox" id="elhistoryEnabled" name="historyEnabled"></td></tr>
-            <tr><td>LogName's</td><td><input type="text" id="elhistoryLogs" name="historyLogs" class="elLongTxt"></td></tr>
+            <tr><td>Logs (comma delimited)<br><small>Windows event logs to collect</small></td><td><input type="text" id="elhistoryLogs" name="historyLogs" class="elLongTxt"></td></tr>
+            <tr><td>Categories (Linux)<br><small>journald categories to collect. Nothing selected = no filter.</small></td><td>
+              <select id="elhistoryCategoriesMode" name="historyCategoriesMode" class="elSel"><option value="include">Include selected</option><option value="exclude" selected>Exclude selected</option></select> <br>
+              <select id="elhistoryCategories" name="historyCategories[]" multiple class="elMSel">
+                <option value="System">System</option>
+                <option value="Application">Application</option>
+                <option value="Kernel">Kernel</option>
+                <option value="Auth">Auth</option>
+                <option value="Cron">Cron</option>
+                <option value="Daemon">Daemon</option>
+                <option value="Audit">Audit</option>
+              </select></td>
+            </tr>
             <tr><td>Entry Types</td><td>
               <select id="elhistoryEntryTypes" name="historyEntryTypes[]" multiple class="elMSel">
                 <option value="0">LogAlways</option>
@@ -400,6 +463,7 @@
                 <option value="5">Verbose</option>
               </select><td>
             </tr>
+            <tr><td>Sources<br><small>Comma delimited source / provider names, <code>*</code> matches anything, case-insensitive. Empty = no filter. Example: <code>plasmashell, kwin*</code>. Applied on the server when events arrive, so it works for Windows and Linux alike.</small></td><td><select id="elhistorySourcesMode" name="historySourcesMode" class="elSel"><option value="include">Include selected</option><option value="exclude" selected>Exclude selected</option></select> <br><input type="text" id="elhistorySources" name="historySources" class="elLongTxt"></td></tr>
             <tr><td>Retention (days)<br><small>How long collected events are kept. Server-wide; taken from the Default set.</small></td><td><input type="text" id="elretentionDays" name="retentionDays" value="30"></td></tr>
           <tr><td>&nbsp;</td><td><span id="elConfigBtns"><button onclick="return saveConfig();">Save</button> <button onclick="return deleteConfig();">Delete</button></span></td></tr>
           </table>

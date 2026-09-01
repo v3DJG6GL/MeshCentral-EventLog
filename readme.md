@@ -1,7 +1,7 @@
 
 # MeshCentral-EventLog
 
-*Current Version: 0.1.11
+*Current Version: 0.1.12
 Released: 2026-09-01*
 
 Initially conceived as a proof of concept plugin for the [MeshCentral2](https://github.com/Ylianst/MeshCentral) Project to introduce extensibility into the project without requiring the MeshCentral2 project to incorporate everyone's requested changes into the main project, yet allow it to be accomplished by others. In creating this plugin, we're introducing the appropriate hooks into MeshCentral2 to allow extensibility to anyone who can write a plugin, while trying to modify the core project as little as possible.
@@ -26,6 +26,14 @@ As a proof of concept, several methods were employed to become familiar with the
 
 #### Plugin Admin
 You can now create configuration sets and assign them to nodes or meshes. Need to collect events from a new log file other than Application/System? Just add it and assign!
+
+Each set filters what is collected (History) and shown (Live), each with an Include/Exclude switch:
+- **Logs** — Windows event logs (`Application,System,Security`)
+- **Categories (Linux)** — journald categories: System, Application, Kernel, Auth, Cron, Daemon, Audit. *Application* is program output and is usually the noisy one on desktops
+- **Sources** — source / provider names, comma-delimited, `*` wildcards (e.g. exclude `plasmashell, kwin*`). Works on both OSes
+- **Entry Types** — levels; on Linux they map onto syslog priorities (Critical 0–2, Error 3, Warning 4, Info 5–6, Verbose 7)
+
+Retention (days) and the 100,000-events-per-device cap are server-wide.
 
 #### Endpoint - Plugin tab
 When viewing a remote endpoint, a new "Event Log" tab appears under the Plugins tab. It follows MeshCentral's light and night themes and uses the full width of the window.

@@ -15,6 +15,7 @@ module.exports.eventlog = function (parent) {
     obj.db = null;
     obj._lastMeta = {};   // nodeid -> last node metadata written, so repeat reports are not re-stored
     obj._lastAck = {};    // nodeid -> newest collection position acknowledged, so it never goes backwards
+    obj._cfgCache = {};   // nodeid -> { uid, cfg, t }: the node's resolved config set, for ingest filtering
 
     // Functions that need to be brought to the front end for processing.
     // (If they need to be accessed in the GUI, they should be here.)
@@ -112,7 +113,11 @@ module.exports.eventlog = function (parent) {
       'elStopLive',
       'elEnsureLive',
       'elHookTabSwitch',
-      'goPageStart'
+      'goPageStart',
+      // include/exclude rules for categories and sources (v0.1.12)
+      'elRules',
+      'elAllowed',
+      'elLiveAllowed'
     ];
 
     obj._pluginPermissions = function() {
@@ -178,6 +183,36 @@ module.exports.eventlog = function (parent) {
       return { Level: ev.level, TimeCreated: new Date(ev.time).toISOString(), LogName: ev.log, ProviderName: ev.source, Id: ev.id, Message: ev.message };
     };
 
+    // Include/exclude rules for a config set's Categories / Sources lists. `list` is an array or a
+    // comma-delimited string of names; '*' matches anything; matching is case-insensitive.
+    // Returns null when the list is empty (= no filter). The agent carries an ES5 copy of this.
+    obj.elRules = function(list, mode) {
+        var items = Array.isArray(list) ? list : String(list == null ? '' : list).split(',');
+        var res = [];
+        for (var i = 0; i < items.length; i++) {
+            var pt = String(items[i]).replace(/^\s+|\s+$/g, '');
+            if (pt == '') continue;
+            res.push(new RegExp('^' + pt.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$', 'i'));
+        }
+        if (res.length == 0) return null;
+        return { exclude: (String(mode || 'exclude').toLowerCase() != 'include'), res: res };
+    };
+    obj.elAllowed = function(rules, value) {
+        if (rules == null) return true;
+        var v = String(value == null ? '' : value), hit = false;
+        for (var i = 0; i < rules.res.length; i++) { if (rules.res[i].test(v)) { hit = true; break; } }
+        return rules.exclude ? !hit : hit;
+    };
+    // Live view: apply the config set's Live categories (Linux) and sources (all OSes) in the browser,
+    // so it works for Windows too, where the agent forwards PowerShell output as-is.
+    obj.elLiveAllowed = function(ev) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        var cfg = st.cfg;
+        if (cfg == null) return true;
+        if (st.os == 'linux' && !ph.elAllowed(ph.elRules(cfg.liveCategories, cfg.liveCategoriesMode), ev.log)) return false;
+        return ph.elAllowed(ph.elRules(cfg.liveSources, cfg.liveSourcesMode), ev.source);
+    };
+
     // called to notify the web server that there is a new tab in town
     obj.registerPluginTab = function() {
       if (!pluginHandler.eventlog.elIsSupported()) return { tabId: null, tabTitle: null };
@@ -212,6 +247,7 @@ module.exports.eventlog = function (parent) {
                 heights: { ledger: Number(getstore('evl_h_ledger', '0')) || 0, viewer: Number(getstore('evl_h_viewer', '0')) || 0 }, // user table height (px) per layout, 0 = automatic
                 filters: { levels: null, logs: null, sources: null, ids: '', text: '' },
                 sort: { key: 'time', dir: -1 },
+                cfg: null,                                           // resolved config set for this node (from onLoadHistory)
                 selected: null, expanded: {}, dtab: 'general', raw: {},
                 srcMore: false,
                 paused: false, pending: [],
@@ -1256,6 +1292,7 @@ body.night #pluginEventLog {
         if (message.meta) st.meta = message.meta;
         if (message.facets) st.hist.facets = message.facets;
         if (message.config) {
+            st.cfg = message.config;   // the node's resolved config set (live category/source rules)
             st.hist.enabled = (message.config.historyEnabled !== false);
             if (message.config.retentionDays) st.hist.retentionDays = message.config.retentionDays;
         }
@@ -1302,6 +1339,7 @@ body.night #pluginEventLog {
       for (var i in evs) {
           var n = ph.elNormalize(evs[i]);
           if (n == null || n.log == '' && n.source == '') continue;
+          if (!ph.elLiveAllowed(n)) continue;   // config set's Live include/exclude rules
           if (ph.byKey[n.key]) {
               // already known: skip if it is already in the live buffer
               var known = false;
@@ -1487,6 +1525,27 @@ body.night #pluginEventLog {
         return events;
     };
 
+    // The node's resolved config set, cached per node. `uid` is the config version the agent holds;
+    // a different uid (config saved in the admin page) or a 10-minute age refreshes it. Never rejects.
+    obj.nodeConfig = function(nodeid, meshid, uid) {
+        var c = obj._cfgCache[nodeid], now = Date.now();
+        if (c != null && (uid == null || c.uid == uid) && (now - c.t) < 600000) return Promise.resolve(c.cfg);
+        return obj.db.getConfigFor(nodeid, meshid)
+        .then(function (cfg) { obj._cfgCache[nodeid] = { uid: (cfg != null) ? cfg.uid : uid, cfg: cfg, t: now }; return cfg; })
+        .catch(function (e) { console.log('EVENTLOG: config lookup failed for ' + nodeid + ': ' + (e.message || e)); return (c != null) ? c.cfg : null; });
+    };
+
+    // Config set History rules, applied to a batch as it arrives. Categories only mean something for
+    // journald (on Windows LogName is the event log, which historyLogs already selects); sources
+    // apply everywhere. Returns the events to store.
+    obj.applyCollectionFilters = function(events, cfg, os) {
+        if (cfg == null) return events;
+        var cats = (os == 'linux') ? obj.elRules(cfg.historyCategories, cfg.historyCategoriesMode) : null;
+        var srcs = obj.elRules(cfg.historySources, cfg.historySourcesMode);
+        if (cats == null && srcs == null) return events;
+        return events.filter(function (e) { return e != null && obj.elAllowed(cats, e.LogName) && obj.elAllowed(srcs, e.ProviderName); });
+    };
+
     // send a message to a connected agent, if possible. Returns true when sent.
     obj.sendToAgent = function(webserver, nodeid, message) {
         try {
@@ -1580,12 +1639,21 @@ body.night #pluginEventLog {
                         }
                     }
                 }
-                // The ack value is the newest event time of THIS batch, which addEventsFor computes while
-                // storing it. Querying the node's newest stored event instead (getLastEventFor) meant a
-                // sort over everything that node had ever collected, once per node per minute.
-                obj.meshServer.pluginHandler.eventlog_db.addEventsFor(myparent.dbNodeKey, obj.fixEvents(JSON.parse(command.data)))
+                var batch = obj.fixEvents(JSON.parse(command.data));
+                if (!Array.isArray(batch)) batch = [batch];
+                // The ack value is the newest event time of the batch AS RECEIVED - before the config
+                // set's include/exclude rules drop anything - so the agent moves past dropped events too.
+                // (Reading the node's newest stored event instead meant a sort over everything that node
+                // had ever collected, once per node per minute.)
+                var batchMaxTc = 0;
+                batch.forEach(function (e) { var m = (e != null) ? String(e.TimeCreated).match(/\d+/) : null; if (m && Number(m[0]) > batchMaxTc) batchMaxTc = Number(m[0]); });
+                obj.nodeConfig(myparent.dbNodeKey, myparent.dbMeshKey, command.uid)
+                .then(function (cfg) {
+                    return obj.meshServer.pluginHandler.eventlog_db.addEventsFor(myparent.dbNodeKey, obj.applyCollectionFilters(batch, cfg, command.os));
+                })
                 .then(function (res) {
-                    if (res == null || !(res.count > 0) || !(res.maxTc > 0)) return; // nothing stored: leave the agent's position alone
+                    if (res == null || !(batchMaxTc > 0)) return; // nothing received: leave the agent's position alone
+                    res = { count: res.count, maxTc: batchMaxTc };
                     // Two collection runs can be in flight at once (a "Collect now" while the agent's
                     // one-minute timer run is still going). If the older batch's acknowledgement were
                     // to land last, the agent would rewind its position - or its journal cursor - and
@@ -1670,6 +1738,7 @@ body.night #pluginEventLog {
             break;
         }
         case 'adminSaveConfig': {
+            obj._cfgCache = {};   // ingest filters pick up the change with the next batch
             let opts = {...command.opts, ...{}};
             var selected = null;
             if (command.id == '_default') {
@@ -1692,6 +1761,7 @@ body.night #pluginEventLog {
             break;
         }
         case 'adminDeleteConfig': {
+            obj._cfgCache = {};
             obj.db.deleteConfigSet(command.id)
             .then((d) => {
               var x = { action: "plugin", plugin: "eventlog", method: "adminConfigDeleted", id: command.id };
@@ -1701,6 +1771,7 @@ body.night #pluginEventLog {
             break;
         }
         case 'adminAssignConfig': { // configId, nodes, meshes
+            obj._cfgCache = {};
             obj.db.assignConfig(command.configId, command.selection)
             .then(obj.db.getConfigAssignments)
             .then((d) => {

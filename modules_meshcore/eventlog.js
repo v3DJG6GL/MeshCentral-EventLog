@@ -263,6 +263,26 @@ var levelsToPriorities = function(levels) {
     return out.length ? out : null;
 };
 
+// Include/exclude rules from a config set (Categories / Sources). ES5 copy of elRules/elAllowed in
+// eventlog.js: `list` is an array or comma list, '*' matches anything, case-insensitive; null = no filter.
+var evlRules = function(list, mode) {
+    var items = (list instanceof Array) ? list : String(list == null ? '' : list).split(',');
+    var res = [];
+    for (var i = 0; i < items.length; i++) {
+        var pt = String(items[i]).replace(/^\s+|\s+$/g, '');
+        if (pt == '') continue;
+        res.push(new RegExp('^' + pt.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$', 'i'));
+    }
+    if (res.length == 0) return null;
+    return { exclude: (String(mode || 'exclude').toLowerCase() != 'include'), res: res };
+};
+var evlAllowed = function(rules, value) {
+    if (rules == null) return true;
+    var v = String(value == null ? '' : value), hit = false;
+    for (var i = 0; i < rules.res.length; i++) { if (rules.res[i].test(v)) { hit = true; break; } }
+    return rules.exclude ? !hit : hit;
+};
+
 // derive a KSystemLog/GNOME-Logs-style category from journal metadata (becomes LogName)
 var journalCategory = function(j) {
     if (j._TRANSPORT == 'kernel') return 'Kernel';
@@ -306,13 +326,16 @@ var parseJournalNdjson = function(txt, params) {
         if (priSet != null && !priSet[pri]) continue;
         var cat = journalCategory(j);
         if (params.catFilter != null && cat != params.catFilter) continue;
+        if (!evlAllowed(params.catRules, cat)) continue;                                 // config set: Categories
+        var src = j.SYSLOG_IDENTIFIER || j._COMM || j._SYSTEMD_UNIT || '';
+        if (!evlAllowed(params.srcRules, src)) continue;                                 // config set: Sources
         var tms = Math.floor(Number(j.__REALTIME_TIMESTAMP) / 1000); if (isNaN(tms)) tms = 0;
         out.events.push({
             LogName: cat,
             Level: priToLevel(pri),
             Priority: pri,
             TimeCreated: '/Date(' + tms + ')/',   // journald timestamps are UTC epoch microseconds
-            ProviderName: j.SYSLOG_IDENTIFIER || j._COMM || j._SYSTEMD_UNIT || '',
+            ProviderName: src,
             Unit: j._SYSTEMD_UNIT || '',
             Transport: j._TRANSPORT || '',
             BootId: j._BOOT_ID || '',
@@ -325,7 +348,7 @@ var parseJournalNdjson = function(txt, params) {
 
 // build and run one journalctl query. func({events, cursor, truncated, error?})
 var runJournalCollector = function(func, passedParams) {
-    var params = { num: 200, priorities: null, cursor: null, sinceSec: null, unit: null, kernelOnly: false, boot: false, facility: null, transport: null, catFilter: null, maxAgeHours: 24, live: false };
+    var params = { num: 200, priorities: null, cursor: null, sinceSec: null, unit: null, kernelOnly: false, boot: false, facility: null, transport: null, catFilter: null, catRules: null, srcRules: null, maxAgeHours: 24, live: false };
     for (var pk in passedParams) { if (passedParams[pk] !== undefined && passedParams[pk] !== null) params[pk] = passedParams[pk]; }
     var fileName = pickTmpDir() + '/evljout' + Math.random().toString(32).replace('0.', '') + '.txt';
     pushTmpFile(fileName);
@@ -393,7 +416,8 @@ var capturePeriodicLinux = function() {
             if (cur == '' || cur == null) cur = null;
             var lv = db.Get('pluginEventLog_lvdoc_lx');
             if (lv == '' || lv == null || isNaN(Number(lv))) lv = null; else lv = Number(lv);
-            runJournalCollector(linuxGatherCallback, { cursor: cur, sinceSec: lv, priorities: levelsToPriorities(cfg.historyEntryTypes) });
+            runJournalCollector(linuxGatherCallback, { cursor: cur, sinceSec: lv, priorities: levelsToPriorities(cfg.historyEntryTypes),
+                catRules: evlRules(cfg.historyCategories, cfg.historyCategoriesMode), srcRules: evlRules(cfg.historySources, cfg.historySourcesMode) });
         });
     } catch (e) { dbg('Periodic linux runner error: ' + e); }
 };
@@ -533,7 +557,8 @@ function consoleaction(args, rights, sessionid, parent) {
                                  Message: 'systemd-journald was not found on this endpoint. Flat-file /var/log support is planned for a later plugin version.' }]);
                         return;
                     }
-                    var p = { live: true, num: num, priorities: levelsToPriorities(entryTypes), sinceSec: lxSince };
+                    var p = { live: true, num: num, priorities: levelsToPriorities(entryTypes), sinceSec: lxSince,
+                              catRules: evlRules(cfg.liveCategories, cfg.liveCategoriesMode), srcRules: evlRules(cfg.liveSources, cfg.liveSourcesMode) };
                     if (lxSel == 'kernel') p.kernelOnly = true;
                     else if (lxSel == 'auth') { p.facility = 'auth,authpriv'; p.catFilter = 'Auth'; }
                     else if (lxSel == 'audit') { p.transport = 'audit'; p.catFilter = 'Audit'; }
