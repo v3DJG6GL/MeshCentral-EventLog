@@ -548,6 +548,13 @@ function consoleaction(args, rights, sessionid, parent) {
                 // args.since is UTC seconds; the collector builds its StartTime from local 1970-01-01, so shift by the local offset
                 sinceTime = Number(args.since) - (new Date().getTimezoneOffset() * 60) + 1;
             }
+            // One query per log, each with its own -MaxEvents budget. Collapsing them into a single
+            // Get-WinEvent over a LogName array would use one process instead of two, but -MaxEvents
+            // then applies to the combined result: a burst in one log can crowd the other out of the
+            // batch entirely, and since the next request resumes after the newest event received,
+            // those entries would never appear in the Live view. The live collector only runs while
+            // the Event Log tab is actually on screen (see elTabVisible in eventlog.js), which is
+            // where the real cost was.
             try { 
               for (var i in logList) {
                 runPwshCollector(getlogCallback, {'fromLog': logList[i], 'num': num, 'entryTypeNum': entryTypes, 'convertToJson': true, 'sinceTime': sinceTime});

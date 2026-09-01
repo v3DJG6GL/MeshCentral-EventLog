@@ -1,8 +1,8 @@
 
 # MeshCentral-EventLog
 
-*Current Version: 0.1.1
-Released: 2026-08-23*
+*Current Version: 0.1.11
+Released: 2026-09-01*
 
 Initially conceived as a proof of concept plugin for the [MeshCentral2](https://github.com/Ylianst/MeshCentral) Project to introduce extensibility into the project without requiring the MeshCentral2 project to incorporate everyone's requested changes into the main project, yet allow it to be accomplished by others. In creating this plugin, we're introducing the appropriate hooks into MeshCentral2 to allow extensibility to anyone who can write a plugin, while trying to modify the core project as little as possible.
 
@@ -62,6 +62,23 @@ Let's break that down:
 `false` is whether or not to return JSON formatted output, rather than truncated text
 
  
+## Storage
+
+Collected events are stored in **MeshCentral's own database**, so they are covered by the same backup:
+
+| MeshCentral database | Where the plugin stores events |
+| --- | --- |
+| MongoDB | `plugin_eventlog` / `plugin_eventlog_settings` collections |
+| PostgreSQL, MariaDB, MySQL | `plugin_eventlog_events` / `plugin_eventlog_settings` tables |
+| SQLite | the same tables, in MeshCentral's SQLite file |
+| NeDB (the default for small installs) | `plugin-eventlog-events.db` / `plugin-eventlog-settings.db` in `meshcentral-data` |
+
+The startup log says which one is in use (`EVENTLOG: storage backend = ...`).
+
+When a server that had been using the plugin's own NeDB files moves onto one of the SQL backends, config sets and their assignments are imported automatically the first time the plugin starts; previously collected events are not carried over (they expire on their own and the agents refill the history within a minute). The old `plugin-eventlog-*.db` files can then be deleted. Setting the environment variable `EVENTLOG_STORAGE=nedb` keeps the plugin on its own files.
+
+How much is kept is controlled by **Retention (days)** in the Default config set, plus a fixed cap of 100,000 events per device.
+
 # Future
 
 This project may be expanded to include:

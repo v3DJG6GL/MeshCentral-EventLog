@@ -13,6 +13,8 @@ module.exports.eventlog = function (parent) {
     obj.parent = parent;
     obj.meshServer = parent.parent;
     obj.db = null;
+    obj._lastMeta = {};   // nodeid -> last node metadata written, so repeat reports are not re-stored
+    obj._lastAck = {};    // nodeid -> newest collection position acknowledged, so it never goes backwards
 
     // Functions that need to be brought to the front end for processing.
     // (If they need to be accessed in the GUI, they should be here.)
@@ -104,7 +106,13 @@ module.exports.eventlog = function (parent) {
       'elSelCat',
       'elHistAutoFill',
       'elHistRefilter',
-      'elCounts'
+      'elCounts',
+      // live tunnel gating (v0.1.11)
+      'elTabVisible',
+      'elStopLive',
+      'elEnsureLive',
+      'elHookTabSwitch',
+      'goPageStart'
     ];
 
     obj._pluginPermissions = function() {
@@ -1137,6 +1145,10 @@ body.night #pluginEventLog {
     };
     obj.elAutoTick = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
+        // The tab can be left without another gotoDevice() (back button, plugin tab switch), so the
+        // timer is also where an orphaned tunnel gets cleaned up.
+        if (!ph.elTabVisible()) { ph.elStopLive(); return; }
+        if ((typeof document != 'undefined') && (document.hidden === true)) return; // browser tab in the background
         if (st.paused) return;
         var newest = 0;
         st.live.events.forEach(function(ev) { if (ev.time > newest) newest = ev.time; });
@@ -1236,6 +1248,8 @@ body.night #pluginEventLog {
     obj.onLoadHistory = function(server, message) {
         var ph = pluginHandler.eventlog;
         if (!ph.elIsSupported()) return;
+        // a reply for the previous device can still arrive after the user has switched away
+        if ((message.nodeid != null) && (typeof currentNode != 'undefined') && (currentNode != null) && (message.nodeid != currentNode._id)) return;
         if (!ph.elEnsureShell()) return;
         var st = ph.elState();
         st.hist.loading = false; st.hist.loaded = true;
@@ -1311,14 +1325,11 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog;
         switch (state) {
             case 0:
-                if (ph.livelog != null) {
-                  ph.livelog.Stop();
-                  ph.livelog = null;
-                }
+                ph.elStopLive();
                 ph.elRenderStatus();
-                if (ph.autoTimer != null) { clearInterval(ph.autoTimer); ph.autoTimer = null; }
                 break;
             case 3:
+                if (!ph.elTabVisible()) { ph.elStopLive(); return; }   // tab was left while the tunnel was still connecting
                 ph.elEnsureShell();
                 ph.elRequestLive(null);
                 if (ph.autoTimer != null) { clearInterval(ph.autoTimer); }
@@ -1337,42 +1348,100 @@ body.night #pluginEventLog {
         return myobj;
     }
 
+    // True only when the Event Log tab is the plugin tab the user is actually looking at.
+    // The live tunnel keeps an agent relay open and makes the endpoint run a collector every 30 s
+    // (a PowerShell process on Windows), so it must not exist while the user is on the Desktop /
+    // Terminal / Files tab or on another plugin's tab.
+    obj.elTabVisible = function() {
+        try {
+            if ((typeof xxcurrentView != 'undefined') && (xxcurrentView != 19)) return false;   // 19 = the device Plugins panel
+            var p = Q('p19');
+            if ((p != null) && (p.style.display == 'none')) return false;
+            var tab = Q('p19ph-pluginEventLog');
+            if (tab == null) return false;
+            if (tab.classList != null) return tab.classList.contains('on');
+            return ((' ' + tab.className + ' ').indexOf(' on ') !== -1);
+        } catch (e) { return false; }
+    };
+
+    obj.elStopLive = function() {
+        var ph = pluginHandler.eventlog;
+        if (ph.autoTimer != null) { clearInterval(ph.autoTimer); ph.autoTimer = null; }
+        // clear the reference first: Stop() fires onStateChanged(0), which would otherwise stop it again
+        var l = ph.livelog; ph.livelog = null;
+        if (l != null) { try { l.Stop(); } catch (e) { } }
+    };
+
+    // Bring the tunnel in line with what is on screen. Safe to call repeatedly.
+    obj.elEnsureLive = function() {
+        var ph = pluginHandler.eventlog;
+        if (!ph.elTabVisible()) { ph.elStopLive(); return; }
+        if ((typeof currentNode == 'undefined') || (currentNode == null) || !ph.elIsSupported()) return;
+        if (!ph.elEnsureShell()) return;
+        ph.livelognode = currentNode;
+        if (!ph.livelognode.conn) { ph.elStopLive(); ph.elRenderStatus(); return; }   // agent offline
+        if (ph.livelog == null) {
+            ph.livelog = CreateAgentRedirect(meshserver, ph.createRemoteEventLog(ph.fe_on_message), serverPublicNamePort, authCookie, authRelayCookie, domainUrl);
+            ph.livelog.attemptWebRTC = attemptWebRTC;
+            ph.livelog.onStateChanged = ph.onRemoteEventLogStateChange;
+            ph.livelog.onConsoleMessageChange = function () {
+                if (pluginHandler.eventlog.livelog && pluginHandler.eventlog.livelog.consoleMessage) {
+                    console.log('console message available. ', pluginHandler.eventlog.livelog.consoleMessage)
+                }
+            }
+            ph.livelog.Start(ph.livelognode._id);
+        }
+        var st = ph.elState();
+        if (!st.hist.loaded && !st.hist.loading) ph.elLoadHistory(true);   // first page of stored events
+    };
+
+    // Switching between plugin tabs does not go through gotoDevice(), so hook the switcher once.
+    obj.elHookTabSwitch = function() {
+        var ph = pluginHandler.eventlog;
+        if (ph._cppWrapped === true) return;
+        if ((typeof pluginHandler == 'undefined') || (typeof pluginHandler.callPluginPage != 'function')) return;
+        ph._cppWrapped = true;
+        var orig = pluginHandler.callPluginPage;
+        pluginHandler.callPluginPage = function(id, el) {
+            var r = orig.apply(this, arguments);
+            try { setTimeout(function() { pluginHandler.eventlog.elEnsureLive(); }, 0); } catch (e) { }
+            return r;
+        };
+    };
+
+    // MeshCentral calls this hook at the top of go(), its panel switcher. The device Plugins panel
+    // is opened with go(19) from the tab bar, which fires neither onDeviceRefreshEnd nor
+    // callPluginPage - so without this, selecting the Event Log tab from another device tab would
+    // never start the live view. It also stops the tunnel promptly when the user navigates away.
+    obj.goPageStart = function(x, event) {
+        // the panel has not been switched yet at this point, so decide once the stack unwinds
+        setTimeout(function() { try { pluginHandler.eventlog.elEnsureLive(); } catch (e) { } }, 0);
+    };
+
     obj.onDeviceRefreshEnd = function(nodeid, panel, refresh, event) {
       var ph = pluginHandler.eventlog;
       pluginHandler.registerPluginTab(ph.registerPluginTab());
+      ph.elHookTabSwitch();
       if (typeof ph.livelog == 'undefined') { ph.livelog = null; }
       if (typeof ph.livelognode == 'undefined') { ph.livelognode = null; }
       var isSupported = ph.elIsSupported();   // Windows and Linux endpoints
       var sameNode = isSupported && (ph.livelognode != null) && (ph.livelognode._id == currentNode._id);
       // MeshCentral calls this hook on every gotoDevice() -- tab switches, node updates, connection state changes.
-      // Only tear down the tunnel and the UI state when the node actually changed; otherwise keep the live
-      // connection (stopping a still-connecting websocket logs an error) and keep the user's filters/data.
+      // Only tear down the UI state when the node actually changed; otherwise keep the live connection
+      // (stopping a still-connecting websocket logs an error) and keep the user's filters/data.
       if (!sameNode) {
-          if (ph.livelog != null) { ph.livelog.Stop(); ph.livelog = null; }
-          if (ph.autoTimer != null) { clearInterval(ph.autoTimer); ph.autoTimer = null; }
+          ph.elStopLive();
           ph.livelognode = null;
           ph.st = null;      // reset UI state for the new node
           ph.byKey = {};
       }
-      if (!isSupported) return;
+      if (!isSupported) { ph.elStopLive(); return; }
       ph.livelognode = currentNode;
-      if (ph.livelognode.conn && ph.livelog == null) {
-          ph.livelog = CreateAgentRedirect(meshserver, ph.createRemoteEventLog(ph.fe_on_message), serverPublicNamePort, authCookie, authRelayCookie, domainUrl);
-          ph.livelog.attemptWebRTC = attemptWebRTC;
-          ph.livelog.onStateChanged = ph.onRemoteEventLogStateChange;
-          ph.livelog.onConsoleMessageChange = function () {
-              if (pluginHandler.eventlog.livelog && pluginHandler.eventlog.livelog.consoleMessage) {
-                  console.log('console message available. ', pluginHandler.eventlog.livelog.consoleMessage)
-              }
-          }
-          ph.livelog.Start(ph.livelognode._id);
-      } else if (!ph.livelognode.conn && ph.livelog != null) {
-          ph.livelog.Stop(); ph.livelog = null;   // agent went offline
-          if (ph.autoTimer != null) { clearInterval(ph.autoTimer); ph.autoTimer = null; }
-      }
       // the plugin tab DOM is rebuilt by MeshCentral on every refresh: re-create the shell (renders from state)
       ph.elEnsureShell();
-      if (!sameNode) ph.elLoadHistory(true);    // request node historical events (first page)
+      // MeshCentral restores the previously selected plugin tab right AFTER this hook returns, so the
+      // "is our tab on screen?" decision has to wait for the current call stack to finish.
+      setTimeout(function() { pluginHandler.eventlog.elEnsureLive(); }, 0);
     };
 
     // ------------------------------------------------------------------
@@ -1403,7 +1472,8 @@ body.night #pluginEventLog {
                 sessionid: true,
                 cfg: cfgBlob
             }));
-        });
+        })
+        .catch((e) => console.log('EVENTLOG: could not send the config to ' + myparent.dbNodeKey + ': ' + (e.message || e)));
     };
 
     // Repair UTF-8 text that the agent decoded as Latin-1 (the PowerShell output file is UTF-8).
@@ -1434,23 +1504,26 @@ body.night #pluginEventLog {
       myobj.parent = myparent;
 
       if (command.uid) { // check to see if config is valid/current, if not, send update
+        // This runs for every agent message carrying a uid (once per node per minute). On a SQL
+        // backend these promises reject while the database is unreachable, and an unhandled
+        // rejection terminates the MeshCentral process - so every path here is caught.
         obj.db.checkConfigAuth(command.uid)
         .then((cnt) => {
-          if (cnt == 0) {
-              obj.db.getConfigFor(myparent.dbNodeKey, myparent.dbMeshKey)
-              .then((cfgBlob) => {
-                myparent.send(JSON.stringify({
-                    action: 'plugin',
-                    pluginaction: 'setConfigBlob',
-                    plugin: 'eventlog',
-                    nodeid: myparent.dbNodeKey,
-                    rights: true,
-                    sessionid: true,
-                    cfg: cfgBlob
-                }));
-              });
-          }
-        });
+          if (cnt != 0) return null;
+          return obj.db.getConfigFor(myparent.dbNodeKey, myparent.dbMeshKey)
+          .then((cfgBlob) => {
+            myparent.send(JSON.stringify({
+                action: 'plugin',
+                pluginaction: 'setConfigBlob',
+                plugin: 'eventlog',
+                nodeid: myparent.dbNodeKey,
+                rights: true,
+                sessionid: true,
+                cfg: cfgBlob
+            }));
+          });
+        })
+        .catch((e) => console.log('EVENTLOG: could not refresh the endpoint config: ' + (e.message || e)));
       }
 
       // For user-initiated actions, make sure the user has rights to the node.
@@ -1487,13 +1560,42 @@ body.night #pluginEventLog {
             try {
                 if (typeof command.data != 'string' || command.data.length > 8 * 1024 * 1024) { console.log('EVENTLOG: gatherlogs payload rejected (missing or > 8MB)'); break; }
                 if (command.caps != null && typeof obj.meshServer.pluginHandler.eventlog_db.setNodeMeta == 'function') {
-                    // remember the endpoint's log capabilities (journald present/persistent, files, ...) for the UI
-                    obj.meshServer.pluginHandler.eventlog_db.setNodeMeta(myparent.dbNodeKey, { os: command.os || null, caps: command.caps });
+                    // remember the endpoint's log capabilities (journald present/persistent, files, ...) for the UI.
+                    // Linux agents report this with every batch, i.e. once a minute per node, but it changes
+                    // almost never - only write when it actually differs from what we last stored.
+                    var meta = { os: command.os || null, caps: command.caps };
+                    var metaKey = JSON.stringify(meta);
+                    var metaNode = myparent.dbNodeKey;
+                    if (obj._lastMeta[metaNode] !== metaKey) {
+                        obj._lastMeta[metaNode] = metaKey;
+                        var mp = obj.meshServer.pluginHandler.eventlog_db.setNodeMeta(metaNode, meta);
+                        // drop the cache entry again if the write failed, or the endpoint's OS would
+                        // stay unknown until it changes (History would then apply the Windows log
+                        // filter to a Linux node and hide its Kernel/Auth categories)
+                        if (mp != null && typeof mp.catch == 'function') {
+                            mp.catch(function (e) {
+                                delete obj._lastMeta[metaNode];
+                                console.log('EVENTLOG: setNodeMeta error: ' + (e.message || e));
+                            });
+                        }
+                    }
                 }
-                obj.meshServer.pluginHandler.eventlog_db.addEventsFor(myparent.dbNodeKey, obj.fixEvents(JSON.parse(command.data)));
-                obj.meshServer.pluginHandler.eventlog_db.getLastEventFor(myparent.dbNodeKey, function (rec) {
+                // The ack value is the newest event time of THIS batch, which addEventsFor computes while
+                // storing it. Querying the node's newest stored event instead (getLastEventFor) meant a
+                // sort over everything that node had ever collected, once per node per minute.
+                obj.meshServer.pluginHandler.eventlog_db.addEventsFor(myparent.dbNodeKey, obj.fixEvents(JSON.parse(command.data)))
+                .then(function (res) {
+                    if (res == null || !(res.count > 0) || !(res.maxTc > 0)) return; // nothing stored: leave the agent's position alone
+                    // Two collection runs can be in flight at once (a "Collect now" while the agent's
+                    // one-minute timer run is still going). If the older batch's acknowledgement were
+                    // to land last, the agent would rewind its position - or its journal cursor - and
+                    // re-send events that are already stored, duplicating them. Never acknowledge a
+                    // position earlier than one already sent for this node. An equal position is still
+                    // acknowledged, so a lost ack is simply repeated rather than stalling collection.
+                    var prevAck = obj._lastAck[myparent.dbNodeKey];
+                    if (prevAck != null && res.maxTc < prevAck) return;
+                    obj._lastAck[myparent.dbNodeKey] = res.maxTc;
                     // send a message to the endpoint verifying receipt
-                    if (rec == null || rec[0] == null) return;
                     var ack = {
                         action: 'plugin',
                         pluginaction: 'setLVDOC',
@@ -1501,11 +1603,12 @@ body.night #pluginEventLog {
                         nodeid: myparent.dbNodeKey,
                         rights: true,
                         sessionid: true,
-                        value: Array.isArray(rec[0].TimeCreated) ? rec[0].TimeCreated[0] : rec[0].TimeCreated
+                        value: String(res.maxTc)    // ms since epoch, as the agent expects
                     };
                     if (command.os == 'linux' && command.cursor != null) ack.cursor = command.cursor; // echo: the agent commits this journal cursor
                     myparent.send(JSON.stringify(ack));
-                });
+                })
+                .catch(function (e) { console.log('EVENTLOG: error storing collected events: ' + e); });
               } catch (e) { console.log('Error gathering logs: ', e.stack); }
             break;
         }
@@ -1524,6 +1627,7 @@ body.night #pluginEventLog {
                 };
                 var withMeta = function(meta) {
                   obj.db.getConfigFor(command.nodeid, command.meshid)
+                  .catch(function (e) { console.log('EVENTLOG: getNodeHistory config lookup failed: ' + (e.message || e)); return null; })
                   .then((cfg) => {
                     var opts = cfg || {};
                     if (meta && meta.os == 'linux' && opts.historyLogs != null) {
@@ -1532,18 +1636,22 @@ body.night #pluginEventLog {
                         opts = Object.assign({}, opts); delete opts.historyLogs;
                     }
                     obj.db.getEventsFor(command.nodeid, opts, q, function(events, total) {
-                      obj.db.getStatsFor(command.nodeid, function(stats) {
+                      // stored/lastCollected describe the node as a whole, not the page: only the first
+                      // page needs them (the tab keeps the previous values for paged loads).
+                      var withStats = function(stats) {
                         obj.db.getFacetsFor(command.nodeid, q.since, function(facets) {
                             if (myobj.parent.ws == null) return;
-                            myobj.parent.ws.send(JSON.stringify({
+                            var msg = {
                                 action: 'plugin', plugin: 'eventlog', method: 'onLoadHistory',
+                                nodeid: command.nodeid,      // the tab drops replies for a device it has moved away from
                                 events: events || [], total: total || 0, skip: q.skip,
-                                stored: (stats != null) ? stats.count : 0,
-                                lastCollected: (stats != null) ? stats.last : null,
                                 config: cfg, meta: meta || null, facets: facets || null
-                            }));
+                            };
+                            if (stats != null) { msg.stored = stats.count; msg.lastCollected = stats.last; }
+                            myobj.parent.ws.send(JSON.stringify(msg));
                         });
-                      });
+                      };
+                      if (q.skip == 0) obj.db.getStatsFor(command.nodeid, withStats); else withStats(null);
                     });
                   });
                 };
