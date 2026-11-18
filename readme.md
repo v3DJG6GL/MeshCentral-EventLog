@@ -186,11 +186,11 @@ How much is kept is controlled by **Retention (days)** in the Default config set
 The tests use Node's built-in test runner and need no dependencies (Node 22 or newer):
 
 ```
-node --test test/
+node --test "test/**/*.test.js"
 ```
 
 Some optional suites are skipped unless their modules can be found:
-- NeDB backend tests: install `@seald-io/nedb` and point `NODE_PATH` at its `node_modules` (`NODE_PATH=/path/to/node_modules node --test test/`). The SQLite tests use `node:sqlite` and are skipped where it is missing.
+- NeDB backend tests: install `@seald-io/nedb` and point `NODE_PATH` at its `node_modules` (`NODE_PATH=/path/to/node_modules node --test "test/**/*.test.js"`). The SQLite tests use `node:sqlite` and are skipped where it is missing.
 - Answer rendering tests in a simulated browser: set `EVL_JSDOM` to a `jsdom` module and `EVL_MC_SCRIPTS` to MeshCentral's `public/scripts` folder (for its `marked` and DOMPurify copies).
 
 `node scripts/check-syntax.js` checks the syntax of every `.js` file and of the inline scripts of the admin page. CI (`.github/workflows/ci.yml`) runs it and all test suites, the optional ones included, on Node 22, 24 and 26 for every push to master and every pull request.

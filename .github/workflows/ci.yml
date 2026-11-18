@@ -70,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           node --test --test-reporter=spec --test-reporter-destination=stdout \
-            --test-reporter=tap --test-reporter-destination="$RUNNER_TEMP/tests.tap" test/
+            --test-reporter=tap --test-reporter-destination="$RUNNER_TEMP/tests.tap" "test/**/*.test.js"
           if ! grep -qx '# skipped 0' "$RUNNER_TEMP/tests.tap"; then
             grep '# SKIP' "$RUNNER_TEMP/tests.tap" || true
             echo "::error::tests were skipped - an optional test dependency was not found"
