@@ -7,6 +7,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Added
+- **Assistant: help from a language model to understand a device's event log.** It reads the device's stored events and MeshCentral data and answers in three places on the Event Log tab. It only reads: it runs no commands, and suggested commands are text for the technician. Answers can be wrong; they cite the stored events they rely on (`E1`, `E2`, ...), and selecting a citation finds and highlights the event in the table
+  - *Explain this event* on History rows: what it means, what it means on this device, whether it is usually harmless, what to check next. Can be continued in Ask
+  - *Diagnosis*, a third view next to Live and History: for the last 24 hours, the last 7 days or around the last restart, a summary, a timeline, possible causes with evidence for and against, numbered next steps and the evidence used. It only runs when asked
+  - *Ask about this device*, a chat panel beside the table (below it on narrow windows), with suggested follow-up questions, Stop and New chat. "Open these N events in History" shows exactly the cited events
+  - Answers can be marked *Helpful* / *Not helpful*; a possible cause can be marked as wrong
+  - No agent core update is needed: everything runs on the MeshCentral server, which is also the only place that talks to the model
+- **Assistant tab on the admin page** (full administrators only)
+  - *Endpoints*: add, edit, test and delete model servers. Presets for self-hosted servers only (Ollama, vLLM, LM Studio, llama.cpp, LocalAI, Custom); a cloud service can be used by entering its address. A permanent note recommends local or self-hosted models, and the address field says whether an address is on this server, the local network or outside it. No specific models are recommended: *Fetch models* and *Test connection* show what the server reports (tool-call support, context size)
+  - API formats: OpenAI-compatible chat (Chat Completions; for Ollama with a context size set, Ollama's own chat API so *Ollama context (num_ctx)* takes effect), OpenAI Responses and Anthropic Messages
+  - *How the model reads data*: Tool calls, Summary only (one prepared summary, for models without tool calls) or Automatic
+  - *Data sent to the model*: which values are replaced before sending, which categories the model may read (device summary and hardware, network interfaces, stored event history, MeshCentral device events, device notes, installed software), and whether to show a preview before sending to an endpoint outside your network (every time, once per user and endpoint, or never)
+  - *Access*: turn the Assistant on or off, questions and tokens per user per day, steps per answer
+  - *Audit log*: every answer with user, device, endpoint, amount sent, values replaced, tokens and result; paged, with a retention period (90 days by default), optional full transcripts and CSV export (cells that a spreadsheet would run as a formula are neutralised)
+- **"Assistant endpoint" in each config set**, so different devices can use different models. *None* by default, which keeps the Assistant off for those devices. Only full administrators can change it
+- **Installed software** as a data category (off by default), read live from the agent's own software inventory. Only when the agent is online and the user's device rights include the software inventory
+- **Pseudonymization:** user, computer and domain names, IP and MAC addresses, email addresses, Windows SIDs, paths with user names and secrets in messages are replaced with placeholders before sending, and restored (marked) in the answer. Always on for endpoints outside your network, optional for local ones. It is best effort: names in free text can slip through
+- **Preview before sending** to an endpoint outside your network: the user sees what will be sent (readable and raw, counts per category, replaced values), can switch categories off, and sends or cancels
+- **Safeguards**
+  - The model can only use read-only tools, bound to the one device the conversation started on; permission and device rights are checked again before every tool call
+  - Never sent: stored SSH / RDP credentials, BitLocker recovery keys, Intel AMT passwords, device group invitation codes, user records, location data and hardware serial numbers
+  - Event log text is treated as untrusted data and suspicious text is flagged. This lowers, but cannot remove, the risk of misleading answers caused by text planted in a log (prompt injection)
+  - Answers are rendered without raw HTML and without loading images; links show their real domain
+  - API keys are stored encrypted and never shown again; `env:VAR_NAME` reads a key from an environment variable of the MeshCentral server instead. A key is never sent over plain http to a public address
+  - Requests go from the MeshCentral server only, without following redirects; public https endpoints use the `HTTPS_PROXY` / `HTTP_PROXY` proxy. Link-local and cloud metadata addresses are blocked unless allowed for the endpoint
+- **New data:** the Assistant's audit log is stored in a `plugin_eventlog_ai_audit` collection (MongoDB), a `plugin_eventlog_ai_audit` table (PostgreSQL, MariaDB, MySQL, SQLite) or `plugin-eventlog-ai-audit.db` (NeDB, in `meshcentral-data`). Endpoints and settings go into the existing settings store
+  - API keys are encrypted with the key file `plugin-eventlog-ai.key` in `meshcentral-data` (created on first start, mode 0600). Back it up with the rest of your data: if it is lost, stored API keys have to be entered again
+- Tests: `node --test test/` (Node 22 or newer, no dependencies)
 ### Changed
 - **Breaking: access to the Event Log tab is now controlled by MeshCentral's plugin permissions.** Three permissions are registered, all **denied by default**: *Event Log: Live view*, *Event Log: History and Collect now* and *Event Log: Assistant*. Until an administrator grants them (My Server, Plugins, Event Log, Permissions), only full administrators can use the tab. Users also still need MeshCentral rights on the device
   - The permission keys are the same as in the Tech-Werkz fork, so permissions granted there keep working
@@ -18,6 +46,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Security:** a browser session could send messages meant for agents, for example to push messages into another user's open Event Log tab. Agent messages are now accepted only from agents, and device actions only from users
 - The plugin admin page inserted device, device group and config set names as HTML. They are now inserted as text
 - Live view replies carried no device id (a wrong variable)
+- MongoDB: loading further pages of History could repeat or skip events that share the same timestamp. Paging now has a tie-breaker
 
 ## [0.1.14] - 2026-11-14
 ### Added
