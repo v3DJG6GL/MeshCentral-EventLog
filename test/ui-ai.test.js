@@ -414,6 +414,11 @@ test('Diagnose: the toolbar button opens the window choice in full width; the di
     var radios = doc.querySelectorAll('#evlAiLog .evlDgWin input[type=radio]');
     assert.deepStrictEqual(Array.prototype.map.call(radios, function (r) { return r.value; }), ['24h', '7d', 'restart']);
     assert.strictEqual(doc.querySelector('#evlAiHd h2').textContent, 'Diagnose');
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlDgWin > legend').textContent, 'Time window', 'the legend above the options');
+    assert.strictEqual(doc.querySelectorAll('#evlAiLog .evlDgWin > .evlDgOpts > label.evlDgOpt').length, 3, 'the options in one grid');
+    var line = ph.aiInfoLine(null);
+    assert.ok(line && doc.getElementById('evlAiHd').textContent.indexOf(line) >= 0, 'the header names the model');
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlDgSetup').textContent.indexOf(line), -1, 'the setup card does not name it again');
     ph.aiDiagCancel();
     assert.strictEqual(doc.querySelector('#evlAiLog .evlDgSetup'), null);
     var s = runDiagnosis(w, '7d');
@@ -480,6 +485,10 @@ test('Diagnosis card: laid out for the chat width (container query), timeline wi
     ph.aiInjectStyles();
     var css = doc.getElementById('evlAiStyles').textContent;
     assert.match(css, /\.evlDgCard \{ container:evldg \/ inline-size;/);
+    assert.match(css, /\.evlDgSetup \{[^}]*max-width:820px;[^}]*container:evldgset \/ inline-size;/, 'the setup card: its own width decides the layout');
+    assert.match(css, /\.evlDgOpts \{ display:grid; grid-template-columns:repeat\(3, minmax\(0, 1fr\)\);/, 'the time windows in one row');
+    assert.match(css, /@container evldgset \(max-width: 560px\) \{ #pluginEventLog \.evlDgOpts \{ grid-template-columns:minmax\(0, 1fr\); \} \}/, 'one column when narrow');
+    assert.match(css, /\.evlDgWin legend \{ float:none;/, 'a floated legend (Bootstrap) would not stay above the options');
     assert.match(css, /@container evldg \(max-width: 560px\) \{[\s\S]*\.evlLane \{ grid-template-columns:minmax\(0,1fr\);/);
     assert.match(css, /\.evlTlIn \{ min-width:0; \}/, 'no horizontal scroll forced at 420 px');
     assert.ok(!/evlDiag/.test(css), 'the old Diagnosis view styles are gone');

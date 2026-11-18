@@ -2564,21 +2564,21 @@ module.exports.attach = function (obj) {
         return false;
     };
     obj.aiDiagSetupHtml = function () {
-        var ph = pluginHandler.eventlog, a = ph.elState().ai, acc = ph.elAccess || {}, esc = ph.aiEsc, line = ph.aiInfoLine(null), cur = a.convs[a.chat];
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, acc = ph.elAccess || {}, esc = ph.aiEsc, cur = a.convs[a.chat];
         var opts = [['24h', 'Last 24 hours', 'Everything stored since yesterday at this time.'], ['7d', 'Last 7 days', 'For problems that come and go.'],
                     ['restart', 'Around the last restart', 'From 6 hours before the most recent restart to 1 hour after it.']];
         var h = '<section class=evlDgSetup aria-labelledby=evlDgSetupT><h3 id=evlDgSetupT>Diagnose this device</h3>' +
                 '<p>The assistant reads the events stored for this device in the window you choose, sorts out what happened and suggests likely causes, with the events it relied on. The result opens as a chat: ask follow-up questions about it.</p>' +
-                '<fieldset class=evlDgWin><legend>Time window</legend>';
+                '<fieldset class=evlDgWin><legend>Time window</legend><div class=evlDgOpts>';
         opts.forEach(function (o) {
             h += '<label class=evlDgOpt><input type=radio name=evlDgWin value=' + o[0] + (a.diagWin == o[0] ? ' checked' : '') + ' onchange="return pluginHandler.eventlog.aiSetWin(this.value)">' +
                  '<span><b>' + o[1] + '</b><small>' + o[2] + '</small></span></label>';
         });
-        h += '</fieldset>';
+        h += '</div></fieldset>';
         if (acc.assistantReason == 'noEndpoint') h += '<p>' + esc(ph.aiErrText('noEndpoint')) + '</p>';
         var busy = ph.aiBusy(cur);
         h += '<div class=evlAiActs><button id=evlDgRun class="evlBtn on evlDgRun" onclick="return pluginHandler.eventlog.aiDiagnose()"' + (busy ? ' disabled title="Wait until the answer is finished or stop it"' : '') + '>' + ph.aiIcon('diag') + 'Diagnose</button>' +
-             '<button class=evlBtn onclick="return pluginHandler.eventlog.aiDiagCancel()">Cancel</button>' + (line ? '<span class=evlAiMuted>' + esc(line) + '</span>' : '') + '</div>';
+             '<button class=evlBtn onclick="return pluginHandler.eventlog.aiDiagCancel()">Cancel</button></div>';
         if (cur && ph.aiIsChat(cur) && !cur.chatId) h += '<p class=evlAiMuted>The current chat is not saved and closes when the diagnosis starts.</p>';
         return h + '</section>';
     };
@@ -3194,11 +3194,15 @@ body.night #pluginEventLog .evlAiPop { box-shadow:0 10px 28px rgba(0,0,0,.75); b
 #pluginEventLog .evlDBodyEx .evlAiEx { margin-top:0; }
 #pluginEventLog tr.evlExpand td > .evlAiEx { max-width:min(110ch, calc(100cqw - 44px)); }
 /* Diagnosis: the window choice, and the diagnosis as the first answer of its chat */
-#pluginEventLog .evlDgSetup { border:1px solid var(--evl-line2); border-radius:4px; background:var(--evl-bg); padding:12px 14px 14px; max-width:76ch; }
+/* the setup card keeps the conversation's left edge; its own width decides between one row of windows and a column */
+#pluginEventLog .evlDgSetup { border:1px solid var(--evl-line2); border-radius:4px; background:var(--evl-bg); padding:12px 14px 14px; width:100%; max-width:820px; box-sizing:border-box; align-self:flex-start; container:evldgset / inline-size; }
 #pluginEventLog .evlDgSetup h3 { margin:0 0 6px; font-size:15px; font-weight:bold; color:var(--evl-ink); }
-#pluginEventLog .evlDgSetup p { margin:0 0 10px; line-height:1.5; }
-#pluginEventLog .evlDgWin { border:0; margin:0 0 12px; padding:0; min-width:0; display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:6px; }
-#pluginEventLog .evlDgWin legend { padding:0; margin:0 0 6px; font-size:12px; font-weight:bold; color:var(--evl-muted); border:0; width:auto; }
+#pluginEventLog .evlDgSetup p { margin:0 0 10px; line-height:1.5; max-width:76ch; }
+#pluginEventLog .evlDgWin { display:block; border:0; margin:0 0 12px; padding:0; min-width:0; }
+/* float:none: Bootstrap (MeshCentral's modern UI) floats legends, which would take them out of their place above the options */
+#pluginEventLog .evlDgWin legend { float:none; display:block; width:auto; padding:0; margin:0 0 6px; font-size:12px; line-height:1.4; font-weight:bold; color:var(--evl-muted); border:0; }
+#pluginEventLog .evlDgOpts { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:6px; }
+@container evldgset (max-width: 560px) { #pluginEventLog .evlDgOpts { grid-template-columns:minmax(0, 1fr); } }
 #pluginEventLog .evlDgOpt { display:flex; gap:8px; align-items:flex-start; margin:0; padding:8px 10px; border:1px solid var(--evl-line); border-radius:4px; cursor:pointer; font-weight:normal; background:var(--evl-input); }
 #pluginEventLog .evlDgOpt:hover { border-color:var(--evl-acc); }
 #pluginEventLog .evlDgOpt:has(input:checked) { border-color:var(--evl-acc); background:var(--evl-sel); box-shadow:inset 0 0 0 1px var(--evl-acc); }
