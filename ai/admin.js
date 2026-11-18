@@ -245,7 +245,7 @@ function create(o) {
             else cdetail += '. ' + OLLAMA_CTX_NOTE;
         }
         add('context', ctx ? true : null, 0, short(cdetail));
-        const caps = { tools: pr.tools === true ? true : pr.tools === false ? false : null, ctx: ctx, server: pr.server ? String(pr.server).slice(0, 80) : null, at: Date.now() };
+        const caps = { tools: pr.tools === true ? true : pr.tools === false ? false : null, ctx: ctx, numCtx: ol && Number(ol.numCtx) > 0 ? Math.floor(Number(ol.numCtx)) : null, server: pr.server ? String(pr.server).slice(0, 80) : null, at: Date.now() };
         return { ok: true, steps: steps, network: chk.network, caps: caps, tgt: tgt, ms: Date.now() - t0 };
     }
 

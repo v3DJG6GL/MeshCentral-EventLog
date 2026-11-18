@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Fixed
+- Assistant admin page: empty limit fields show the value that applies (default or detected, e.g. 262,144 tokens), and Test connection no longer shows 0 ms for steps answered by the same request
 
 ## [0.3.1] - 2026-11-18
 ### Fixed

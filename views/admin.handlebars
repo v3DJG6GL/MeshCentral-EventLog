@@ -684,6 +684,38 @@
         if (EL_AI_PRESETS[p] && isDefault) u.value = EL_AI_PRESETS[p];   // never overwrite an address the admin typed
         elAiUrlChanged();
         elAiOllamaVisible();
+        elAiModelFacts();
+      }
+      // what Fetch models / Test connection / the saved endpoint found belongs to one server type + address (+ model);
+      // a changed form no longer uses it
+      function elAiFormTarget(withModel) {
+        return Q('elAiType').value + ' ' + Q('elAiUrl').value.trim().replace(/\/+$/, '') + (withModel ? ' ' + Q('elAiModel').value.trim() : '');
+      }
+      function elAiFormCaps() { var e = elAi.edit; return (e && e.caps && e.capsFor === elAiFormTarget(true)) ? e.caps : null; }
+      function elAiFormModel() {
+        var e = elAi.edit, id = Q('elAiModel').value.trim(), m = null;
+        if (e && e.modelsFor === elAiFormTarget(false)) elAi.models.forEach(function(x) { if (x && x.id === id) m = x; });
+        return m;
+      }
+      // placeholders of the empty limit fields show the value that applies (mirrors contextFor in ai/index.js)
+      function elAiLimitHints() {
+        var caps = elAiFormCaps(), m = elAiFormModel(), fmt = elAiFmtNum;
+        var pos = function(v) { v = Number(v); return (isFinite(v) && v > 0) ? Math.floor(v) : null; };
+        var detected = (m && pos(m.ctx)) || (caps && pos(caps.ctx)) || null;
+        var ollama = caps ? /ollama/i.test(String(caps.server || '')) : (elAiFormKind().preset == 'ollama');
+        var numCtx = pos(Q('elAiNumCtx').value), ctx = null, ctxText;
+        if (ollama && numCtx) { ctx = numCtx; ctxText = fmt(ctx) + ' (Ollama context)'; }
+        else if (ollama && caps && pos(caps.numCtx)) { ctx = pos(caps.numCtx); ctxText = fmt(ctx) + ' (model file)'; }
+        else if (ollama) { ctx = Math.min(detected || 4096, 4096); ctxText = fmt(ctx) + ' (Ollama default)'; }
+        else if (detected) { ctx = detected; ctxText = fmt(ctx) + ' (detected)'; }
+        else if (caps) { ctx = 8192; ctxText = '8,192 (assumed)'; }
+        else ctxText = 'Detected when tested';
+        Q('elAiCtx').placeholder = ctxText;
+        var set = pos(Q('elAiCtx').value);
+        if (set) ctx = set;
+        var lim = (elAi.settings && elAi.settings.limits) || {}, out = pos(lim.maxOutputTokens) || 2048;
+        Q('elAiMaxOut').placeholder = (ctx && Math.floor(ctx / 2) < out) ? fmt(Math.max(256, Math.floor(ctx / 2))) + ' (half the context)' : fmt(out) + ' (default)';
+        Q('elAiTimeout').placeholder = '120 (default)';
       }
       function elAiOpenForm(ep) {
         var f = Q('elAiEpForm');
@@ -706,11 +738,13 @@
         var num = function(v) { return (v == null || v === '' || !isFinite(Number(v))) ? '' : String(v); };
         Q('elAiNumCtx').value = ep ? num(ep.numCtx) : '';
         Q('elAiMaxOut').value = ep ? num(ep.maxOutputTokens) : '';
-        Q('elAiTimeout').value = ep ? num(ep.timeoutSec) : '';
+        Q('elAiTimeout').value = (ep && Number(ep.timeoutSec) !== 120) ? num(ep.timeoutSec) : '';   // 120 s is the default an empty field stores
         Q('elAiCtx').value = ep ? num(ep.contextTokens) : '';
         var tm = (ep && (ep.toolMode == 'tools' || ep.toolMode == 'summary')) ? ep.toolMode : 'auto';
         document.querySelectorAll('input[name="elAiToolMode"]').forEach(function(r) { r.checked = (r.value == tm); });
         Q('elAiLinkLocal').checked = !!(ep && ep.allowLinkLocal);
+        elAi.edit.capsFor = ep ? elAiFormTarget(true) : null;
+        elAi.edit.modelsFor = null;
         Q('elAiTestOut').hidden = true; Q('elAiTestOut').textContent = '';
         setStatus('elAiFormStatus', '', ''); setStatus('elAiModelsStatus', '', '');
         elAiKeyState();
@@ -800,6 +834,8 @@
         if (d == null) return null;
         elAi.edit.sentHost = elAi.edit.sentHost || {};
         elAi.edit.sentHost[forTest ? 'test' : 'models'] = elAiHost(d.endpoint.baseUrl);   // the server's address verdict belongs to this host
+        elAi.edit.sentTarget = elAi.edit.sentTarget || {};
+        elAi.edit.sentTarget[forTest ? 'test' : 'models'] = elAiFormTarget(forTest);
         // a saved endpoint tested unchanged is sent by id only: the server then records the result as its last test
         var stored = (forTest && elAi.edit && elAi.edit.id) ? elAi.endpoints.filter(function(x) { return x.id === elAi.edit.id; })[0] : null;
         if (stored && d.keyAction == 'keep' && ['name', 'format', 'preset', 'baseUrl', 'model', 'contextTokens', 'numCtx', 'maxOutputTokens', 'timeoutSec', 'toolMode', 'allowLinkLocal'].every(function(k) {
@@ -833,16 +869,15 @@
       }
       function elAiModelFacts() {
         var box = Q('elAiModelFacts'); if (box == null) return;
-        var id = Q('elAiModel').value.trim(), m = null;
-        elAi.models.forEach(function(x) { if (x && x.id === id) m = x; });
-        var caps = (elAi.edit && elAi.edit.caps) || null, facts = [];
-        var tools = (m && m.tools != null) ? m.tools : (caps && caps.tools != null && (!caps.model || caps.model === id)) ? caps.tools : null;
-        var ctx = (m && m.ctx) ? m.ctx : (caps && caps.ctx && (!caps.model || caps.model === id)) ? caps.ctx : null;
+        var m = elAiFormModel(), caps = elAiFormCaps(), facts = [];
+        var tools = (m && m.tools != null) ? m.tools : (caps && caps.tools != null) ? caps.tools : null;
+        var ctx = (m && m.ctx) ? m.ctx : (caps && caps.ctx) ? caps.ctx : null;
         if (tools === true) facts.push('Tool calls supported');
         else if (tools === false) facts.push('No tool calls: the assistant will use summary mode');
         if (ctx) facts.push('Context: ' + elAiFmtNum(ctx) + ' tokens');
         if (caps && caps.server && /ollama/i.test(String(caps.server))) facts.push('Server: Ollama');
         box.textContent = facts.join(' \u00B7 ');
+        elAiLimitHints();
       }
       function elAiRenderTest(msg) {
         var out = Q('elAiTestOut');
@@ -864,7 +899,8 @@
           li.appendChild(sr);
           li.appendChild(document.createTextNode(EL_AI_STEPS[s.name] || String(s.name || '')));
           if (s.ok == null) { var nr = document.createElement('span'); nr.className = 'elAiSub'; nr.textContent = ' (not run)'; li.appendChild(nr); }
-          else if (s.ms != null && isFinite(Number(s.ms))) { var ms = document.createElement('span'); ms.className = 'elAiSub'; ms.textContent = ' ' + elAiFmtNum(Math.round(s.ms)) + ' ms'; li.appendChild(ms); }
+          // a step answered by an earlier step's request reports 0 ms: show a duration only for a step's own request
+          else if (Number(s.ms) > 0) { var ms = document.createElement('span'); ms.className = 'elAiSub'; ms.textContent = ' ' + elAiFmtNum(Math.round(s.ms)) + ' ms'; li.appendChild(ms); }
           if (s.detail) { var dt = document.createElement('div'); dt.className = 'elAiSub'; dt.textContent = String(s.detail); li.appendChild(dt); }
           ul.appendChild(li);
         });
@@ -1082,7 +1118,7 @@
       });
       parent.pluginHandler['eventlog'].aiAdminTestResult = elAiHandler(function(msg) {
         if (elAiTake(msg) == null || elAi.edit == null) return;
-        if (msg.caps && typeof msg.caps == 'object') elAi.edit.caps = msg.caps;
+        if (msg.caps && typeof msg.caps == 'object') { elAi.edit.caps = msg.caps; elAi.edit.capsFor = elAi.edit.sentTarget && elAi.edit.sentTarget.test; }
         setStatus('elAiFormStatus', msg.ok ? 'ok' : 'err', msg.ok ? '\u2713 Test passed.' : '\u2717 Test failed; see the steps above.', 'elAiTestBtn');
         elAiRenderTest(msg);
         elAiServerNet('test', msg.network);
@@ -1095,6 +1131,7 @@
         elAiServerNet('models', msg.network);
         if (!msg.ok) { setStatus('elAiModelsStatus', 'err', '\u2717 ' + String(msg.error || 'The server did not return a model list.'), 'elAiFetchBtn'); return; }
         elAi.models = (Array.isArray(msg.models) ? msg.models : []).filter(function(m) { return m && typeof m.id == 'string'; });
+        elAi.edit.modelsFor = elAi.edit.sentTarget && elAi.edit.sentTarget.models;
         var dl = Q('elAiModelList'); dl.textContent = '';
         elAi.models.forEach(function(m) { dl.appendChild(new Option(m.id, m.id)); });
         setStatus('elAiModelsStatus', 'ok', elAi.models.length ? ('\u2713 ' + elAiFmtNum(elAi.models.length) + ' models; pick one in the Model field.') : 'The server lists no models.', 'elAiFetchBtn');
@@ -1254,7 +1291,7 @@
     .elAiGrid > div > label { display: inline-block; }
     .elAiRadio { display: block; margin: 2px 0; }
     .elAiLimits label { display: inline-block; margin: 0 14px 4px 0; }
-    .elAiLimits input[type=number] { width: 110px; margin-left: 4px; }
+    .elAiLimits input[type=number] { width: 12.5em; max-width: 100%; margin-left: 4px; }
     .elMidTxt { width: 100%; max-width: 360px; }
     .elAiChecks { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 3px 16px; }
     .elAiFs { border: 1px solid var(--evl-line2); border-radius: 4px; padding: 6px 10px 8px 10px; margin: 0 0 10px 0; max-width: 900px; }
@@ -1414,7 +1451,7 @@
             <div><input type="text" id="elAiName" class="elLongTxt" maxlength="100" autocomplete="off" aria-required="true"></div>
 
             <label for="elAiUrl">Address</label>
-            <div><input type="text" id="elAiUrl" class="elLongTxt" inputmode="url" spellcheck="false" autocomplete="off" aria-required="true" aria-describedby="elAiUrlHint" oninput="elAiUrlChanged();">
+            <div><input type="text" id="elAiUrl" class="elLongTxt" inputmode="url" spellcheck="false" autocomplete="off" aria-required="true" aria-describedby="elAiUrlHint" oninput="elAiUrlChanged(); elAiModelFacts();">
               <div id="elAiUrlHint" aria-live="polite"></div></div>
 
             <label for="elAiKey">API key</label>
@@ -1431,7 +1468,7 @@
               <div id="elAiModelFacts" class="elAiHelp" aria-live="polite"></div></div>
 
             <label for="elAiNumCtx" class="elAiOllama" hidden>Ollama context (num_ctx)</label>
-            <div class="elAiOllama" hidden><input type="number" id="elAiNumCtx" min="1024" max="4194304" step="1" placeholder="Not set" aria-describedby="elAiNumCtxHelp">
+            <div class="elAiOllama" hidden><input type="number" id="elAiNumCtx" min="1024" max="4194304" step="1" placeholder="Not set" aria-describedby="elAiNumCtxHelp" oninput="elAiLimitHints();">
               <small id="elAiNumCtxHelp" class="elAiHelp">Ollama's default context can be only 4,096 tokens, too small for event logs. The Assistant sends this size with every request. A larger context needs more memory on the Ollama server.</small></div>
 
             <span class="elAiLbl" id="elAiToolModeL">How the model reads data</span>
@@ -1443,10 +1480,10 @@
 
             <span class="elAiLbl">Limits</span>
             <div class="elAiLimits">
-              <label>Max output tokens <input type="number" id="elAiMaxOut" min="64" max="128000" step="1" placeholder="Default"></label>
-              <label>Timeout (s) <input type="number" id="elAiTimeout" min="10" max="900" step="1" placeholder="120"></label>
-              <label>Context tokens <input type="number" id="elAiCtx" min="1024" max="4194304" step="1" placeholder="Detected" aria-describedby="elAiCtxHelp"></label>
-              <small id="elAiCtxHelp" class="elAiHelp">Context tokens is optional: leave it empty to use the size detected from the server. Timeout is per request to the model (default 120 s).</small></div>
+              <label>Max output tokens <input type="number" id="elAiMaxOut" min="64" max="128000" step="1" placeholder="2,048 (default)" aria-describedby="elAiCtxHelp"></label>
+              <label>Timeout (s) <input type="number" id="elAiTimeout" min="10" max="900" step="1" placeholder="120 (default)" aria-describedby="elAiCtxHelp"></label>
+              <label>Context tokens <input type="number" id="elAiCtx" min="1024" max="4194304" step="1" placeholder="Detected when tested" aria-describedby="elAiCtxHelp" oninput="elAiLimitHints();"></label>
+              <small id="elAiCtxHelp" class="elAiHelp">Leave empty to use the value shown. Max output is at most half the context. Timeout is per request to the model.</small></div>
 
             <span class="elAiLbl">Advanced</span>
             <div><label><input type="checkbox" id="elAiLinkLocal" aria-describedby="elAiLinkLocalHelp" onchange="elAiUrlChanged();"> Allow link-local addresses</label>
