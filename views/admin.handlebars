@@ -275,6 +275,17 @@
         }
       }
       
+      // One assignment row, built from DOM nodes: device and group names are user-entered text and must never be parsed as HTML.
+      function assignRow(id, name, groupName, configName) {
+        var tr = document.createElement('tr'); tr.className = 'eldataRow';
+        var td1 = document.createElement('td'), lbl = document.createElement('label'), cb = document.createElement('input');
+        cb.type = 'checkbox'; cb.name = 'assign[]'; cb.value = id;
+        lbl.appendChild(cb); lbl.appendChild(document.createTextNode(' ' + (name == null ? '' : name)));
+        td1.appendChild(lbl); tr.appendChild(td1);
+        [groupName, configName].forEach(function (t) { var td = document.createElement('td'); td.textContent = (t == null || t === '') ? '\u00a0' : t; tr.appendChild(td); });
+        return tr;
+      }
+
       function updateAssignRows() {
         let dRows = document.querySelectorAll('.eldataRow');
         dRows.forEach((r) => {
@@ -303,12 +314,7 @@
                       })
                     }
                 });
-                let tpl = `<tr class="eldataRow">
-                  <td><label><input type="checkbox" name="assign[]" value="${item._id}"> ${item.name}</label></td>
-                  <td>&nbsp;</td>
-                  <td>${item.currentConfigName}</td>
-                </tr>`;
-                meshRowIns.insertAdjacentHTML('beforebegin', tpl);
+                meshRowIns.parentNode.insertBefore(assignRow(item._id, item.name, '', item.currentConfigName), meshRowIns);
             }
         }
         
@@ -326,12 +332,7 @@
                     }
                 });
                 item.meshName = parent.meshes[item['meshid']].name;
-                let tpl = `<tr class="eldataRow">
-                  <td><label><input type="checkbox" name="assign[]" value="${item._id}"> ${item.name}</label></td>
-                  <td>${item.meshName}</td>
-                  <td>${item.currentConfigName}</td>
-                </tr>`;
-                nodeRowIns.insertAdjacentHTML('beforeend', tpl);
+                nodeRowIns.appendChild(assignRow(item._id, item.name, item.meshName, item.currentConfigName));
             }
         });
       }
@@ -374,10 +375,9 @@
           }
         });
         configSets.forEach(function(i) {
-          let tpl = `<option value="${i._id}">${i.name}</option>`
           if (!i.default) {
-            e1.insertAdjacentHTML('beforeend', tpl);
-            e2.insertAdjacentHTML('beforeend', tpl);
+            e1.appendChild(new Option(i.name, i._id));   // Option() sets text, not HTML
+            e2.appendChild(new Option(i.name, i._id));
           }
         });
         if (sel != null && sel != 'undefined') e2.value = sel;

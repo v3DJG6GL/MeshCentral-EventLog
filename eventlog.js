@@ -119,17 +119,70 @@ module.exports.eventlog = function (parent) {
       // include/exclude rules for categories and sources (v0.1.12)
       'elRules',
       'elAllowed',
-      'elLiveAllowed'
+      'elLiveAllowed',
+      // plugin permissions (v0.2.0)
+      'elCan',
+      'elAccessGate',
+      'elRequestAccess',
+      'elRecheckAccess',
+      'onAccess',
+      'onAccessDenied'
     ];
 
     obj._pluginPermissions = function() {
         return {
-            "deviceLiveTab": "Event Log: Live Tab",
-            "deviceHistoryTab": "Event Log: History Tab"
+            "deviceLiveTab": "Event Log: Live view",
+            "deviceHistoryTab": "Event Log: History and Collect now",
+            "deviceAssistant": "Event Log: Assistant"
         };
     };
 
+    // ---- Plugin permissions (server side) -----------------------------------------------------
+    // Registered with MeshCentral's plugin permission framework, so administrators grant them per user in MeshCentral's
+    // permissions dialog (global, device group or device). All are denied by default. The keys are the ones the
+    // Tech-Werkz fork introduced, so permissions granted there keep working.
+    obj.PERMISSIONS = {
+        deviceLiveTab:    { title: 'Event Log: Live view', desc: 'Can open the live event view of a device. Enforced by the tab only: the live view runs through MeshCentral\'s relay tunnel.', default: 'denied' },
+        deviceHistoryTab: { title: 'Event Log: History and Collect now', desc: 'Can view the stored event history of a device and ask it to collect now.', default: 'denied' },
+        deviceAssistant:  { title: 'Event Log: Assistant', desc: 'Can ask the Event Log assistant about a device. Also needs the Details right on the device.', default: 'denied' }
+    };
+    obj.MESHRIGHT_DEVICEDETAILS = 0x00100000;
+    obj.MESHRIGHT_LIMITEVENTS = 0x00002000;
+    obj.MESHRIGHT_NOSOFTWARE = 0x00800000;
+    obj.MESHRIGHT_ADMIN = 0xFFFFFFFF;
+    obj._permApi = false;
+    obj.registerPermissions = function() {
+        obj._permApi = false;
+        try {
+            if (obj.parent != null && typeof obj.parent.registerPermissions == 'function' && typeof obj.parent.checkPluginPermission == 'function') {
+                obj.parent.registerPermissions('eventlog', obj.PERMISSIONS);
+                obj._permApi = true;
+            }
+        } catch (e) { console.log('EVENTLOG: could not register plugin permissions: ' + ((e && e.message) || e)); }
+        if (obj._permApi) console.log('EVENTLOG: plugin permissions registered (Live view, History and Collect now, Assistant; all denied by default)');
+        else console.log('EVENTLOG: this MeshCentral has no plugin permission framework; the Event Log tab is limited to full administrators');
+        return obj._permApi;
+    };
+    obj.isFullAdmin = function(myparent) {
+        try { return (myparent != null && myparent.user != null && (myparent.user.siteadmin >>> 0) === 0xFFFFFFFF); } catch (e) { return false; }
+    };
+    // True when the user holds the plugin permission `key` for this device. Synchronous, fails closed.
+    // `node` must be the device as loaded by resolveNodeRights: MeshCentral's check needs the device group explicitly
+    // (its own lookup from a node id does not work), and a group sent by the browser must never be used.
+    obj.hasPerm = function(user, key, node) {
+        try {
+            if (user == null || node == null || obj.PERMISSIONS[key] == null) return false;
+            if ((user.siteadmin >>> 0) === 0xFFFFFFFF) return true;
+            if (!obj._permApi) return false;   // no permission framework: full administrators only
+            // MeshCentral allows everything for a plugin that registered nothing; we did register, so a missing
+            // registration means something went wrong: refuse.
+            if (obj.parent.pluginPermissions == null || obj.parent.pluginPermissions.eventlog == null) return false;
+            return obj.parent.checkPluginPermission(user, 'eventlog', key, node._id, node.meshid) === true;
+        } catch (e) { console.log('EVENTLOG: permission check failed: ' + ((e && e.message) || e)); return false; }
+    };
+
     obj.server_startup = function() {
+        obj.registerPermissions();
         obj.meshServer.pluginHandler.eventlog_db = require (__dirname + '/db.js').CreateDB(obj.meshServer);
         obj.db = obj.meshServer.pluginHandler.eventlog_db;
     };
@@ -530,11 +583,79 @@ body.night #pluginEventLog {
         document.head.appendChild(s);
     };
 
+    // ---- Plugin permissions (browser side) ----------------------------------------------------
+    // The server decides (MeshCentral plugin permissions plus device rights); the tab asks once per device and
+    // shows only the views it was granted. Until the answer arrives nothing is shown or started.
+    obj.elCan = function(what) {
+        var a = pluginHandler.eventlog.elAccess;
+        return (a != null && typeof currentNode != 'undefined' && currentNode != null && a.nodeid == currentNode._id && a[what] === true);
+    };
+    obj.elRequestAccess = function(force) {
+        var ph = pluginHandler.eventlog;
+        if (typeof currentNode == 'undefined' || currentNode == null) return;
+        var now = Date.now(), asked = ph._accessAsked;
+        if (force !== true && asked != null && asked.nodeid == currentNode._id && (now - asked.t) < 5000) return;   // one request per device and 5 s
+        ph._accessAsked = { nodeid: currentNode._id, t: now };
+        meshserver.send({ action: 'plugin', plugin: 'eventlog', pluginaction: 'checkAccess', nodeid: currentNode._id });
+    };
+    obj.elRecheckAccess = function() {   // "Check again" in the notice: pick up a permission granted a moment ago
+        var ph = pluginHandler.eventlog;
+        ph.elAccess = null;
+        ph.elAccessGate();
+        ph.elRequestAccess(true);
+        return false;
+    };
+    // True when the tab may be drawn; otherwise draws a notice in its place.
+    obj.elAccessGate = function() {
+        var ph = pluginHandler.eventlog;
+        if (!Q('pluginEventLog')) return false;
+        var a = ph.elAccess, known = (a != null && typeof currentNode != 'undefined' && currentNode != null && a.nodeid == currentNode._id);
+        if (known && (a.live || a.history || a.assistant)) {
+            if (Q('evlNotice')) QH('pluginEventLog', '');   // permission was granted since the notice was drawn
+            return true;
+        }
+        var key = known ? 'denied' : 'checking';
+        if (!Q('evlNotice') || Q('evlNotice').getAttribute('data-k') != key) {
+            QH('pluginEventLog', '<div id=evlNotice data-k=' + key + ' style="padding:18px 14px;opacity:.85">' +
+                (known ? 'You do not have permission to use the Event Log on this device. A MeshCentral administrator can grant it in the plugin\'s permissions (My Server, Plugins, Event Log, Permissions). <a href=# onclick="return pluginHandler.eventlog.elRecheckAccess()">Check again</a>'
+                       : 'Checking permissions&hellip;') + '</div>');
+        }
+        if (!known) ph.elRequestAccess();
+        return false;
+    };
+    obj.onAccess = function(server, message) {
+        var ph = pluginHandler.eventlog, prev = ph.elAccess;
+        var a = {}; for (var k in message) { if (k != 'action' && k != 'plugin' && k != 'method') a[k] = message[k]; }
+        a.live = (message.live === true); a.history = (message.history === true); a.assistant = (message.assistant === true);
+        ph.elAccess = a;
+        if (typeof currentNode == 'undefined' || currentNode == null || currentNode._id != message.nodeid) return;
+        var same = (prev != null && prev.nodeid == a.nodeid && prev.live == a.live && prev.history == a.history && prev.assistant == a.assistant);
+        if (same && (Q('evlWrap') || Q('evlNotice'))) return;   // nothing changed: keep the tab as it is
+        if (!a.live) ph.elStopLive();
+        if (Q('evlWrap')) QH('pluginEventLog', '');   // rebuild the shell with the views this user may use
+        if (ph.elEnsureShell()) {
+            var st = ph.elState();
+            if (st.view == 'history' && a.history && !st.hist.loaded && !st.hist.loading) ph.elLoadHistory(true);
+        }
+        setTimeout(function() { try { pluginHandler.eventlog.elEnsureLive(); } catch (e) { } }, 0);
+    };
+    // The server refused an action: the permissions may have changed, so ask again.
+    obj.onAccessDenied = function(server, message) {
+        var ph = pluginHandler.eventlog;
+        if (typeof currentNode == 'undefined' || currentNode == null || currentNode._id != message.nodeid) return;
+        if (message.act == 'checkAccess') { ph.onAccess(server, { nodeid: message.nodeid, live: false, history: false, assistant: false }); return; }
+        ph.elRequestAccess(true);
+    };
+
     obj.elEnsureShell = function() {
         var ph = pluginHandler.eventlog;
         ph.elInjectStyles();
         if (!Q('pluginEventLog')) return false;
+        if (!ph.elAccessGate()) return false;
         if (!Q('evlWrap')) {
+            var st0 = ph.elState();   // open on a view this user is allowed to see
+            if (st0.view == 'live' && !ph.elCan('live') && ph.elCan('history')) st0.view = 'history';
+            else if (st0.view == 'history' && !ph.elCan('history') && ph.elCan('live')) st0.view = 'live';
             QH('pluginEventLog', '<div id=evlWrap><div id=evlToolbar></div><div id=evlChips class=evlChips></div><div id=evlBody></div><div id=evlStatus class=evlStatus></div></div>');
             ph.elRenderShell();
         }
@@ -548,8 +669,8 @@ body.night #pluginEventLog {
         var esc = EscapeHtml;
         var h = '<div class=evlBar>';
         h += '<div class=evlSeg>' +
-             '<button id=evlVLive class="' + (st.view == 'live' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetView(\'live\')">&#9679; Live</button>' +
-             '<button id=evlVHist class="' + (st.view == 'history' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetView(\'history\')">History</button></div>';
+             '<button id=evlVLive' + (ph.elCan('live') ? '' : ' style=display:none') + ' class="' + (st.view == 'live' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetView(\'live\')">&#9679; Live</button>' +
+             '<button id=evlVHist' + (ph.elCan('history') ? '' : ' style=display:none') + ' class="' + (st.view == 'history' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetView(\'history\')">History</button></div>';
         if (st.os == 'linux') {
             h += '<span class=evlLbl>View</span> <select id=evlLxSel class=evlSel title="Log view - in Live view this is queried from journalctl directly (Kernel = -k, Security = auth facilities, This boot = -b)" onchange="return pluginHandler.eventlog.elSelCat(this.value)">';
             [['','All'],['kernel','Kernel'],['auth','Security (auth)'],['audit','Audit'],['boot','This boot']].forEach(function(o){ h += '<option value="' + o[0] + '"' + (st.lsel == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
@@ -805,6 +926,7 @@ body.night #pluginEventLog {
     // ---- interactions ----
     obj.elSetView = function(v) {
         var ph = pluginHandler.eventlog, st = ph.elState();
+        if (!ph.elCan(v == 'live' ? 'live' : 'history')) return false;
         st.view = v;
         if (v == 'history' && !st.hist.loaded && !st.hist.loading) ph.elLoadHistory(true);
         ph.elRenderShell();
@@ -1217,6 +1339,8 @@ body.night #pluginEventLog {
         // timer is also where an orphaned tunnel gets cleaned up.
         if (!ph.elTabVisible()) { ph.elStopLive(); return; }
         if ((typeof document != 'undefined') && (document.hidden === true)) return; // browser tab in the background
+        ph.elRequestAccess();   // permissions can change while the tab is open (onAccess stops Live when it is revoked)
+        if (!ph.elCan('live')) return;
         if (st.paused) return;
         var newest = 0;
         st.live.events.forEach(function(ev) { if (ev.time > newest) newest = ev.time; });
@@ -1244,6 +1368,7 @@ body.night #pluginEventLog {
     // ---- history data ----
     obj.elLoadHistory = function(reset) {
         var ph = pluginHandler.eventlog, st = ph.elState();
+        if (!ph.elCan('history')) return false;
         if (typeof currentNode == 'undefined' || currentNode == null) return false;
         if (reset) { st.hist.skip = 0; }
         st.hist.loading = true;
@@ -1296,6 +1421,7 @@ body.night #pluginEventLog {
     };
     obj.elCollectNow = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
+        if (!ph.elCan('history')) return false;
         if (typeof currentNode == 'undefined' || currentNode == null) return false;
         st.collectMsg = 'Requesting collection&hellip;';
         meshserver.send({ action: 'plugin', plugin: 'eventlog', pluginaction: 'collectNow', nodeid: currentNode._id, meshid: currentNode.meshid });
@@ -1449,6 +1575,12 @@ body.night #pluginEventLog {
         if ((typeof currentNode == 'undefined') || (currentNode == null) || !ph.elIsSupported()) return;
         if (!ph.elEnsureShell()) return;
         ph.livelognode = currentNode;
+        if (!ph.elCan('live')) {   // no permission for the Live view: never open the tunnel
+            ph.elStopLive();
+            var st1 = ph.elState();
+            if (ph.elCan('history') && !st1.hist.loaded && !st1.hist.loading) ph.elLoadHistory(true);
+            return;
+        }
         if (!ph.livelognode.conn) { ph.elStopLive(); ph.elRenderStatus(); return; }   // agent offline
         if (ph.livelog == null) {
             ph.livelog = CreateAgentRedirect(meshserver, ph.createRemoteEventLog(ph.fe_on_message), serverPublicNamePort, authCookie, authRelayCookie, domainUrl);
@@ -1507,6 +1639,7 @@ body.night #pluginEventLog {
       }
       if (!isSupported) { ph.elStopLive(); return; }
       ph.livelognode = currentNode;
+      ph.elRequestAccess();   // every refresh (at most once per 5 s per device): a grant or a revoke takes effect without a page reload
       // the plugin tab DOM is rebuilt by MeshCentral on every refresh: re-create the shell (renders from state)
       ph.elEnsureShell();
       // MeshCentral restores the previously selected plugin tab right AFTER this hook returns, so the
@@ -1701,12 +1834,115 @@ body.night #pluginEventLog {
         } catch (e) { return false; }
     };
 
+    // Which plugin actions may come from where. Agent actions are only accepted from an agent connection;
+    // device actions only from a user session, after the user's rights on that device are confirmed.
+    obj.AGENT_ACTIONS = { sendlog: true, gatherlogs: true };
+    obj.NODE_ACTIONS = { checkAccess: true, getNodeHistory: true, collectNow: true };
+    // Device actions that need a plugin permission, and device actions that need MeshCentral device rights on top.
+    obj.ACTION_PERMISSION = { getNodeHistory: 'deviceHistoryTab', collectNow: 'deviceHistoryTab' };
+    obj.ACTION_RIGHTS = {};
+
+    // Send to a browser session if it is still open. Never throws.
+    obj.safeSend = function(myparent, o) {
+        try {
+            var ws = (myparent != null) ? myparent.ws : null;
+            if (ws == null || (ws.readyState != null && ws.readyState !== 1)) return false;
+            o.action = 'plugin'; o.plugin = 'eventlog';
+            ws.send(JSON.stringify(o));
+            return true;
+        } catch (e) { return false; }
+    };
+
+    // One line per user, device and reason every 10 minutes, so "why can't X use the tab" can be read from the log.
+    obj._deniedLogged = {};
+    obj.logDenied = function(myparent, nodeid, action, reason) {
+        try {
+            var u = myparent.user, k = u._id + '|' + nodeid + '|' + reason, now = Date.now();
+            if (obj._deniedLogged[k] != null && (now - obj._deniedLogged[k]) < 600000) return;
+            obj._deniedLogged[k] = now;
+            console.log('EVENTLOG: ' + action + ' refused for ' + (u.name || u._id) + ' on ' + nodeid + ': ' + reason);
+        } catch (e) { }
+    };
+    obj.sendDenied = function(myparent, command, reason) {
+        obj.logDenied(myparent, command.nodeid, command.pluginaction, reason);
+        obj.safeSend(myparent, { method: 'onAccessDenied', nodeid: command.nodeid, act: command.pluginaction, reason: reason });
+    };
+
+    // What the Assistant offers this user on this device. Resolves to {assistant:false, assistantReason} until the
+    // Assistant is configured; never rejects.
+    obj.assistantAccess = function(myparent, node, rights) {
+        try {
+            if (obj.ai != null && typeof obj.ai.accessInfo == 'function') {
+                return Promise.resolve(obj.ai.accessInfo(myparent, node, rights)).catch(function (e) {
+                    console.log('EVENTLOG AI: access check failed: ' + ((e && e.message) || e));
+                    return { assistant: false, assistantReason: 'error' };
+                });
+            }
+        } catch (e) { }
+        return Promise.resolve({ assistant: false, assistantReason: 'unavailable' });
+    };
+    // Tell the tab which views this user may use on this device.
+    obj.sendAccess = function(myparent, node, rights) {
+        var user = myparent.user;
+        var msg = { method: 'onAccess', nodeid: node._id, live: obj.hasPerm(user, 'deviceLiveTab', node), history: obj.hasPerm(user, 'deviceHistoryTab', node) };
+        return obj.assistantAccess(myparent, node, rights).then(function (a) {
+            for (var k in a) { if (k != 'method' && k != 'nodeid') msg[k] = a[k]; }
+            obj.safeSend(myparent, msg);
+        });
+    };
+
+    // Resolve the device and the user's rights on it from the database, never from what the browser sent:
+    // a meshid supplied by the browser would let a user with rights on one device group pass the check for a
+    // device in another group. Calls back (node, rights) with node == null when the user may not see the device.
+    obj.resolveNodeRights = function(myparent, grandparent, nodeid, func) {
+        var done = function (node, rights) { try { func(node, rights); } catch (e) { console.log('EVENTLOG: device action error: ' + ((e && e.message) || e)); } };
+        try {
+            if (typeof nodeid != 'string' || nodeid.length > 128 || grandparent == null) { done(null, 0); return; }
+            if (typeof grandparent.GetNodeWithRights == 'function') {
+                grandparent.GetNodeWithRights(myparent.domain, myparent.user, nodeid, function (node, rights, visible) {
+                    done((node != null && visible && rights != 0) ? node : null, rights || 0);
+                });
+                return;
+            }
+            // older MeshCentral: look the device up ourselves and check rights against its real device group
+            if (grandparent.db != null && typeof grandparent.db.Get == 'function' && typeof grandparent.GetNodeRights == 'function') {
+                grandparent.db.Get(nodeid, function (err, nodes) {
+                    if (err || nodes == null || nodes.length != 1 || nodes[0].meshid == null) { done(null, 0); return; }
+                    var r = grandparent.GetNodeRights(myparent.user, nodes[0].meshid, nodeid);
+                    done((r != 0) ? nodes[0] : null, r);
+                });
+                return;
+            }
+        } catch (e) { console.log('EVENTLOG: device rights check failed: ' + ((e && e.message) || e)); }
+        done(null, 0);   // no way to check: refuse
+    };
+
     // data was sent to server from the client. do something with it.
     obj.serveraction = function(command, myparent, grandparent) {
+        if (command == null || myparent == null) return;
+        var fromUser = (myparent.user != null);
+        if (fromUser && obj.AGENT_ACTIONS[command.pluginaction]) return;   // a browser session cannot pose as an agent
+        if (!fromUser && obj.NODE_ACTIONS[command.pluginaction]) return;   // device actions are user actions
+        if (fromUser) { for (var f in command) { if (f.charAt(0) == '_') delete command[f]; } }   // '_' fields are set by the server only
+        if (!fromUser || !obj.NODE_ACTIONS[command.pluginaction]) return obj._serveraction(command, myparent, grandparent);
+        obj.resolveNodeRights(myparent, grandparent, command.nodeid, function (node, rights) {
+            var act = command.pluginaction;
+            if (node == null) { obj.sendDenied(myparent, command, 'no rights on this device'); return; }
+            command.meshid = node.meshid;   // from now on, the device group is the one stored for the device
+            command._node = node; command._rights = rights;
+            if (act == 'checkAccess') { obj.sendAccess(myparent, node, rights); return; }
+            var perm = obj.ACTION_PERMISSION[act];
+            if (perm != null && !obj.hasPerm(myparent.user, perm, node)) { obj.sendDenied(myparent, command, 'missing permission ' + perm); return; }
+            var need = obj.ACTION_RIGHTS[act];
+            if (need != null && (rights >>> 0) !== 0xFFFFFFFF && (rights & need) == 0) { obj.sendDenied(myparent, command, 'missing device right 0x' + need.toString(16)); return; }
+            obj._serveraction(command, myparent, grandparent);
+        });
+    };
+    obj._serveraction = function(command, myparent, grandparent) {
       var myobj = {};
       myobj.parent = myparent;
 
-      if (command.uid) { // check to see if config is valid/current, if not, send update
+      if (command.uid && myparent.user == null) { // agent only: check to see if config is valid/current, if not, send update
         // This runs for every agent message carrying a uid (once per node per minute). On a SQL
         // backend these promises reject while the database is unreachable, and an unhandled
         // rejection terminates the MeshCentral process - so every path here is caught.
@@ -1729,17 +1965,6 @@ body.night #pluginEventLog {
         .catch((e) => console.log('EVENTLOG: could not refresh the endpoint config: ' + (e.message || e)));
       }
 
-      // For user-initiated actions, make sure the user has rights to the node.
-      var userHasNodeRights = function() {
-          if (myparent.user == null) return true; // agent context, not a user session
-          try {
-              if (typeof grandparent.GetNodeRights == 'function') {
-                  return (grandparent.GetNodeRights(myparent.user, command.meshid, command.nodeid) != 0);
-              }
-          } catch (e) { }
-          return true; // older MeshCentral without GetNodeRights: keep previous behavior
-      };
-
       switch (command.pluginaction) {
         case 'sendlog': {
           command.method = 'fe_on_message';
@@ -1751,7 +1976,7 @@ body.night #pluginEventLog {
                   // See if the session is connected. If so, go ahead and send this message to the target node
                   var ws = grandparent.wssessions2[command.sessionid];
                   if (ws != null) {
-                      command.nodeid = parent.dbNodeKey; // Set the nodeid, required for responses.
+                      command.nodeid = myparent.dbNodeKey; // Set the nodeid, required for responses.
                       delete command.sessionid;       // Remove the sessionid, since we are sending to that sessionid, so it's implyed.
                       try { ws.send(JSON.stringify(command)); } catch (ex) { }
                   }
@@ -1827,7 +2052,6 @@ body.night #pluginEventLog {
         }
         case 'getNodeHistory': {
             try {
-                if (!userHasNodeRights()) break;
                 // make sure the agent-side module is loaded so the periodic collector runs
                 obj.sendToAgent(grandparent, command.nodeid, { action: 'plugin', plugin: 'eventlog', pluginaction: 'serviceCheck', nodeid: command.nodeid, rights: true, sessionid: true });
                 var q = {
@@ -1874,7 +2098,6 @@ body.night #pluginEventLog {
         }
         case 'collectNow': {
             try {
-                if (!userHasNodeRights()) break;
                 var ok = obj.sendToAgent(grandparent, command.nodeid, { action: 'plugin', plugin: 'eventlog', pluginaction: 'collectnow', nodeid: command.nodeid, rights: true, sessionid: true });
                 if (myobj.parent.ws != null) {
                     myobj.parent.ws.send(JSON.stringify({ action: 'plugin', plugin: 'eventlog', method: 'onCollectNow', ok: ok }));

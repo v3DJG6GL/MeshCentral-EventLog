@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Known Issues]
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
+## [Unreleased]
+### Changed
+- **Breaking: access to the Event Log tab is now controlled by MeshCentral's plugin permissions.** Three permissions are registered, all **denied by default**: *Event Log: Live view*, *Event Log: History and Collect now* and *Event Log: Assistant*. Until an administrator grants them (My Server, Plugins, Event Log, Permissions), only full administrators can use the tab. Users also still need MeshCentral rights on the device
+  - The permission keys are the same as in the Tech-Werkz fork, so permissions granted there keep working
+  - History and Collect now are checked on the server. The Live view runs through MeshCentral's relay tunnel, so its permission is enforced by the tab only
+  - Without Live permission the tab never opens the live tunnel; without History permission it hides History. A user with neither sees a notice with a "Check again" link. Permission changes take effect on the next device refresh, without reloading the page
+  - On a MeshCentral without the plugin permission framework, only full administrators can use the tab
+### Fixed
+- **Security:** History and Collect now checked the user's rights against the device group sent by the browser. A user with rights on one device group could read the stored events of a device in another group. The device group is now taken from MeshCentral's database
+- **Security:** a browser session could send messages meant for agents, for example to push messages into another user's open Event Log tab. Agent messages are now accepted only from agents, and device actions only from users
+- The plugin admin page inserted device, device group and config set names as HTML. They are now inserted as text
+- Live view replies carried no device id (a wrong variable)
+
 ## [0.1.14] - 2026-11-14
 ### Added
 - **Alerts.** A config set can now hold alert rules. When incoming events match a rule, the plugin raises a MeshCentral device event (action `eventlogalert`), which is stored in the device's Events list
