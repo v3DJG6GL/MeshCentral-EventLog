@@ -7,6 +7,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Added
+- Assistant: questions can be edited or deleted and answers retried; questions can be copied
+
+### Changed
+- Assistant: a diagnosis is now a chat — the result appears in the Ask panel, follow-up questions continue it, and earlier diagnoses are listed with the chats
+- Assistant: the chat panel can be switched to full width
+- Assistant: the Stop button shows that the model is still working
+- Assistant: what the model writes between its lookups is shown in the steps, not in the answer
+
+### Removed
+- Assistant: the Helpful / Not helpful buttons
+
+### Fixed
+- Assistant: long diagnoses scroll inside the window
+- Assistant: dragging the panel's height grip no longer makes the panel jump to an earlier height
 
 ## [0.4.1] - 2026-11-18
 ### Fixed

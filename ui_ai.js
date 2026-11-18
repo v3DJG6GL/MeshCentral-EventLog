@@ -1,5 +1,5 @@
 /**
-* @description MeshCentral event log plugin: the Assistant on the device tab (Explain, Diagnosis, Ask, data preview)
+* @description MeshCentral event log plugin: the Assistant on the device tab (Explain, Ask and Diagnose chats, data preview)
 * @license Apache-2.0
 */
 
@@ -119,9 +119,14 @@ module.exports.attach = function (obj) {
         // saved: the server's saved results of this user on this device (null until asked for; ai/history.js on the
         // server), hist: the chat list is shown, opening: a chat id being loaded, delAsk: a chat id waiting for the
         // delete confirmation, exReq: saved explanations asked for (event id -> 1)
-        return { nodeid: nid, open: false, w: Number(getstore('evl_ai_w', '0')) || 0, convs: {}, chat: null, diag: null, explainBy: {},
+        // full: the panel takes the whole width (evl_ai_full), diagSetup: the window choice before a diagnosis runs,
+        // act: a message action waiting for its inline editor or confirmation { cid, n, kind: 'edit'|'del'|'retry' },
+        // pend: a message action sent to the server { cid, n, op, then }
+        var full = false;
+        try { full = getstore('evl_ai_full', '') == '1'; } catch (e) { }
+        return { nodeid: nid, open: false, w: Number(getstore('evl_ai_w', '0')) || 0, convs: {}, chat: null, explainBy: {},
                  focus: null, sel: null, draft: '', diagWin: win, notice: null, reveal: null, peek: null, hyp: {}, citeVer: 0,
-                 saved: null, hist: false, opening: null, delAsk: null, exReq: {} };
+                 saved: null, hist: false, opening: null, delAsk: null, exReq: {}, full: full, diagSetup: false, act: null, pend: null };
     };
     obj.aiStashSave = function () {
         var ph = pluginHandler.eventlog, st = ph.st;
@@ -154,13 +159,22 @@ module.exports.attach = function (obj) {
     };
     obj.aiNewTurn = function (n, q) {
         return { n: n, srvN: null, q: q, status: 'running', steps: [], text: '', live: '', html: '', sHtml: null, structured: null, cites: {}, invalid: [],
-                 usage: null, followups: [], error: null, vote: null, lastSeq: 0, gap: false, segment: 0, t0: Date.now() };
+                 usage: null, followups: [], error: null, lastSeq: 0, gap: false, segment: 0, round: 0, diag: false, t0: Date.now() };
+    };
+    // a conversation of the chat panel: an Ask chat, or a diagnosis chat (its first turn is the diagnosis)
+    obj.aiIsChat = function (c) {
+        return !!(c && (c.mode == 'ask' || c.mode == 'diagnose'));
+    };
+    // the tool steps of a turn (its steps also hold the notes the model wrote between lookups)
+    obj.aiToolSteps = function (t) {
+        return (t && t.steps ? t.steps : []).filter(function (x) { return x != null && x.note == null; });
     };
     obj.aiNewConv = function (mode, input, q) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai;
         ph._aiSeq = (ph._aiSeq || 0) + 1;
         var c = { id: 'c' + ph._aiSeq, mode: mode, input: input, reqId: ph.aiReqId(), convId: null, status: 'starting', closed: false, ended: false,
                   info: null, notes: [], preview: null, red: null, last: Date.now(), doneAt: 0, turns: [ph.aiNewTurn(1, q)] };
+        if (mode == 'diagnose') c.turns[0].diag = true;
         a.convs[c.id] = c;
         ph.aiPrune();
         return c;
@@ -171,7 +185,7 @@ module.exports.attach = function (obj) {
         var ids = Object.keys(a.convs).sort(function (x, y) { return Number(x.slice(1)) - Number(y.slice(1)); });
         for (var i = 0; i < ids.length && Object.keys(a.convs).length > 24; i++) {
             var c = a.convs[ids[i]];
-            if (c.id == a.chat || c.id == a.diag || ph.aiBusy(c)) continue;
+            if (c.id == a.chat || ph.aiBusy(c)) continue;
             ph.aiCloseConv(c);
             for (var k in a.explainBy) { if (a.explainBy[k] == c.id) delete a.explainBy[k]; }
             delete a.convs[c.id];
@@ -259,7 +273,7 @@ module.exports.attach = function (obj) {
         if (c.status == 'stopped' || c.closed) { ph.aiCloseConv(c); return; }
         c.info = { endpointName: String(m.endpointName || '').slice(0, 120), model: String(m.model || '').slice(0, 200), network: m.network, redacted: m.redacted === true, toolMode: m.toolMode };
         c.notes = Array.isArray(m.notes) ? m.notes.filter(function (x) { return typeof x == 'string'; }).slice(0, 4).map(function (x) { return x.slice(0, 400); }) : [];
-        if (c.mode == 'ask' && 'chatId' in m) c.chatId = (typeof m.chatId == 'string' && /^ch[0-9a-f]{24}$/.test(m.chatId)) ? m.chatId : null;
+        if (ph.aiIsChat(c) && 'chatId' in m) c.chatId = (typeof m.chatId == 'string' && /^ch[0-9a-f]{24}$/.test(m.chatId)) ? m.chatId : null;
         c.last = Date.now();
         if (c.status == 'starting') c.status = 'running';
         ph.aiRefresh(c);
@@ -286,8 +300,23 @@ module.exports.attach = function (obj) {
         if (!ph.aiOk(m)) return;
         var c = ph.aiFind(m); if (!c || !ph.aiBusy(c)) return;
         var t = ph.aiTurn(c, m.turn), i = Number(m.i);
-        if (!t || !(i >= 0 && i < 64) || Math.floor(i) !== i) return;
+        if (!t || !(i >= 0 && i < 128) || Math.floor(i) !== i) return;
         t.steps[i] = { tool: String(m.tool || '').slice(0, 60), args: m.args, status: String(m.status || ''), items: Number(m.items) || 0, ms: Number(m.ms) || 0 };
+        t.ph = 'step';
+        c.last = Date.now();
+        if (c.status == 'starting') c.status = 'running';
+        ph.aiSchedule(c, t);
+    };
+    // What the model wrote in a round that also called tools: a note in the steps ("Model: I'll start with…"); the
+    // text streamed for that round leaves the answer.
+    obj.onAiNote = function (server, m) {
+        var ph = pluginHandler.eventlog;
+        if (!ph.aiOk(m)) return;
+        var c = ph.aiFind(m); if (!c || !ph.aiBusy(c)) return;
+        var t = ph.aiTurn(c, m.turn), i = Number(m.i), round = Number(m.round);
+        if (!t || t.status != 'running' || !(i >= 0 && i < 128) || Math.floor(i) !== i) return;
+        t.steps[i] = { note: String(m.text == null ? '' : m.text).slice(0, 2000) };
+        if (!(round >= 0) || round >= (t.round || 0)) { t.text = ''; t.live = ''; t.gap = false; }
         t.ph = 'step';
         c.last = Date.now();
         if (c.status == 'starting') c.status = 'running';
@@ -320,8 +349,10 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog;
         if (!ph.aiOk(m)) return;
         var c = ph.aiFind(m); if (!c || !ph.aiBusy(c)) return;
-        var t = ph.aiTurn(c, m.turn), seq = Number(m.seq);
+        var t = ph.aiTurn(c, m.turn), seq = Number(m.seq), round = Number(m.round);
         if (!t || t.status != 'running' || !(seq > t.lastSeq)) return;
+        // each model call (round) writes afresh: an earlier round's text was a note between lookups
+        if (round > 0 && round < 1e6 && round !== t.round) { if (t.round) { t.text = ''; t.gap = false; } t.round = round; }
         if (seq !== t.lastSeq + 1) t.gap = true;   // a lost chunk: keep what we have, the final text replaces it
         else if (!t.gap && t.text.length < 400000) t.text += String(m.text == null ? '' : m.text);
         if (m.text != null && String(m.text) !== '') t.ph = 'write';
@@ -346,12 +377,12 @@ module.exports.attach = function (obj) {
         t.status = 'done'; t.live = ''; t.sHtml = null;
         if (m.redactionCounts) c.red = m.redactionCounts;
         c.status = 'done'; c.doneAt = Date.now(); c.last = Date.now();
-        if (c.mode == 'ask' && typeof m.chatId == 'string' && /^ch[0-9a-f]{24}$/.test(m.chatId)) c.chatId = m.chatId;
+        if (ph.aiIsChat(c) && typeof m.chatId == 'string' && /^ch[0-9a-f]{24}$/.test(m.chatId)) c.chatId = m.chatId;
         t.html = ph.aiMd(t.text, c);
         ph.aiHistoryTouch(c, t);
         a.focus = c.id; a.citeVer++;
         ph.aiRefresh(c, true);
-        ph.aiSay(c.mode == 'diagnose' ? 'The diagnosis is ready.' : (c.mode == 'explain' ? 'The explanation is ready.' : 'The answer is ready.'));
+        ph.aiSay(t.diag ? 'The diagnosis is ready.' : (c.mode == 'explain' ? 'The explanation is ready.' : 'The answer is ready.'));
     };
     obj.onAiError = function (server, m) {
         var ph = pluginHandler.eventlog;
@@ -398,8 +429,8 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, st = ph.st, acc = ph.elAccess || {};
         if (st == null || st.ai == null || !ph.elCan('assistant') || st.ai.saved != null) return;
         var h = (acc.saved && typeof acc.saved == 'object') ? acc.saved : {};
-        if (h.enabled !== true) { st.ai.saved = { loaded: true, enabled: false, retentionDays: null, chats: [], diagnosis: null, explains: {} }; return; }
-        st.ai.saved = { loaded: false, enabled: true, retentionDays: Number(h.retentionDays) || null, chats: [], diagnosis: null, explains: {} };
+        if (h.enabled !== true) { st.ai.saved = { loaded: true, enabled: false, retentionDays: null, chats: [], explains: {} }; return; }
+        st.ai.saved = { loaded: false, enabled: true, retentionDays: Number(h.retentionDays) || null, chats: [], explains: {} };
         ph.aiSendMsg('aiHistoryList', {}, st.ai.nodeid);
     };
     obj.aiHistoryGet = function (kind, id) {
@@ -410,27 +441,29 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog;
         if (!ph.aiOk(m)) return;
         var a = ph.st.ai, isId = function (x) { return typeof x == 'string' && /^ch[0-9a-f]{24}$/.test(x); };
-        var sv = { loaded: true, enabled: m.enabled === true, retentionDays: Number(m.retentionDays) || null, chats: [], diagnosis: null, explains: {} };
+        var sv = { loaded: true, enabled: m.enabled === true, retentionDays: Number(m.retentionDays) || null, chats: [], explains: {} };
         (Array.isArray(m.chats) ? m.chats : []).slice(0, 50).forEach(function (x) {
-            if (x && isId(x.id)) sv.chats.push({ id: x.id, title: String(x.title || 'Chat').slice(0, 120), updated: Number(x.updated) || 0, count: Math.max(0, Math.floor(Number(x.count) || 0)) });
+            if (!x || !isId(x.id)) return;
+            var e = { id: x.id, title: String(x.title || 'Chat').slice(0, 120), updated: Number(x.updated) || 0, count: Math.max(0, Math.floor(Number(x.count) || 0)) };
+            if (x.type == 'diagnosis') { e.type = 'diagnosis'; e.window = (['24h', '7d', 'restart'].indexOf(x.window) >= 0) ? x.window : null; }
+            sv.chats.push(e);
         });
-        if (m.diagnosis && Number(m.diagnosis.generatedAt) > 0) sv.diagnosis = { generatedAt: Number(m.diagnosis.generatedAt), window: String(m.diagnosis.window || '') };
         (Array.isArray(m.explains) ? m.explains : []).slice(0, 200).forEach(function (x) { if (x && typeof x.eventId == 'string' && x.eventId.length <= 64) sv.explains[x.eventId] = Number(x.time) || 0; });
         a.saved = sv;
         if (sv.enabled) {
-            // after a reload: the most recent chat comes back into the panel, and the last diagnosis into its view
+            // after a reload: the most recent chat (or diagnosis) comes back into the panel
             var cur = a.convs[a.chat];
             if (!cur && !a.opening && sv.chats.length) { a.opening = sv.chats[0].id; a.openAuto = true; ph.aiHistoryGet('chat', sv.chats[0].id); }
-            if (!a.convs[a.diag] && sv.diagnosis) { a.diagLoading = true; ph.aiHistoryGet('diagnosis', null); }
         }
         if (a.open) ph.aiRenderPanel();
-        if (ph.st.view == 'diag') ph.aiRenderDiag();
-        else if (Object.keys(sv.explains).length) ph.elUpdate();
+        if (Object.keys(sv.explains).length) ph.elUpdate();
     };
     // A conversation object for a saved item, shown like a finished one (no server conversation behind it).
+    // kind 'chat' (an Ask chat, or a diagnosis chat: item.type 'diagnosis') or 'explain'
     obj.aiConvFromSaved = function (kind, item) {
         var ph = pluginHandler.eventlog, a = ph.st.ai;
-        var mode = (kind == 'chat') ? 'ask' : (kind == 'diagnosis' ? 'diagnose' : 'explain');
+        var isDiag = (kind == 'chat' && item.type == 'diagnosis');
+        var mode = (kind == 'chat') ? (isDiag ? 'diagnose' : 'ask') : 'explain';
         var msgs = (kind == 'chat') ? (Array.isArray(item.messages) ? item.messages : []) : [item];
         ph._aiSeq = (ph._aiSeq || 0) + 1;
         var lastMsg = msgs[msgs.length - 1] || {};
@@ -438,18 +471,23 @@ module.exports.attach = function (obj) {
                   info: { endpointName: String(lastMsg.endpointName || item.endpointName || '').slice(0, 120), model: String(lastMsg.model || item.model || '').slice(0, 200), network: null, redacted: null },
                   notes: [], preview: null, red: (lastMsg.redactionCounts && typeof lastMsg.redactionCounts == 'object') ? lastMsg.redactionCounts : null,
                   last: Date.now(), doneAt: Number(item.updated || item.time) || 0, turns: [] };
-        msgs.slice(-200).forEach(function (x, i) {
+        // the message actions address messages by their index in the saved chat
+        c.msgOff = Math.max(0, msgs.length - 200);
+        if (isDiag && c.msgOff) c.msgOff = 0;   // (never more than 200 messages in practice; the diagnosis must stay first)
+        msgs.slice(c.msgOff, c.msgOff + 200).forEach(function (x, i) {
             if (!x || typeof x != 'object') return;
             var q = (kind == 'chat') ? String(x.q || '') : '';
             var t = ph.aiNewTurn(i + 1, q);
             t.srvN = -1; t.status = 'done'; t.restored = true; t.at = Number(x.time) || 0; t.cont = (x.cont === true && i > 0);
+            t.diag = (isDiag && i == 0);
             t.text = String((kind == 'chat' ? x.a : x.text) || '').slice(0, 400000);
             t.structured = (x.structured && typeof x.structured == 'object') ? x.structured : null;
             t.cites = ph.aiCitesIn(x.cites);
             t.invalid = Array.isArray(x.invalid) ? x.invalid : [];
             t.usage = (x.usage && typeof x.usage == 'object') ? x.usage : null;
             t.followups = (Array.isArray(x.followups) ? x.followups : []).filter(function (f) { return typeof f == 'string' && f.trim(); }).slice(0, 3).map(function (f) { return f.slice(0, 200); });
-            t.steps = (Array.isArray(x.steps) ? x.steps : []).slice(0, 64).map(function (s) {
+            t.steps = (Array.isArray(x.steps) ? x.steps : []).slice(0, 128).map(function (s) {
+                if (s && typeof s.note == 'string') return { note: s.note.slice(0, 2000) };
                 var args = s && s.args; if (typeof args == 'string') { try { args = JSON.parse(args); } catch (e) { } }
                 return { tool: String((s && s.tool) || '').slice(0, 60), args: args, status: (s && s.status == 'error') ? 'error' : 'done', items: Number(s && s.items) || 0, ms: Number(s && s.ms) || 0 };
             });
@@ -458,7 +496,7 @@ module.exports.attach = function (obj) {
         if (!c.turns.length) return null;
         c.turns.forEach(function (t) { t.html = ph.aiMd(t.text, c); });
         if (kind == 'chat') { c.chatId = item.id; c.created = Number(item.created) || c.turns[0].at; }
-        if (kind == 'diagnosis') { c.win = (['24h', '7d', 'restart'].indexOf(item.window) >= 0) ? item.window : '24h'; c.input = { window: c.win }; c.doneAt = Number(item.generatedAt || item.time) || c.doneAt; c.turns[0].q = 'Diagnose ' + ph.aiWinText(c.win); }
+        if (isDiag) { c.win = (['24h', '7d', 'restart'].indexOf(item.window) >= 0) ? item.window : '24h'; c.input = { window: c.win }; c.turns[0].q = 'Diagnose ' + ph.aiWinText(c.win); }
         if (kind == 'explain') {
             c.input = { eventId: String(item.eventId) }; c.doneAt = Number(item.time) || c.doneAt;
             for (var k in ph.byKey) { var e = ph.byKey[k]; if (e._raw && e._raw._id != null && String(e._raw._id) == c.input.eventId) { c.evLabel = e.source + ' ' + e.id; break; } }
@@ -486,21 +524,11 @@ module.exports.attach = function (obj) {
             if (cur && ph.aiBusy(cur)) return;
             c = ph.aiConvFromSaved('chat', Object.assign({}, item, { id: m.id }));
             if (!c) return;
-            if (cur && cur.mode == 'ask') { ph.aiCloseConv(cur); delete a.convs[cur.id]; }
-            a.chat = c.id; a.hist = false; a.focus = c.id; a.sel = null; a.peek = null; a.citeVer++;
+            if (ph.aiIsChat(cur)) { ph.aiCloseConv(cur); delete a.convs[cur.id]; }
+            a.chat = c.id; a.hist = false; a.diagSetup = false; a.act = null; a.focus = c.id; a.sel = null; a.peek = null; a.citeVer++;
             ph.aiRenderPanel();
-            if (ph.st.view != 'diag') ph.elUpdate();
-            if (!auto) { ph.aiSay('Opened the saved chat.'); var ta = Q('evlAiIn'); if (ta) ta.focus(); }
-            return;
-        }
-        if (m.kind == 'diagnosis') {
-            a.diagLoading = false;
-            if (!item) { sv.diagnosis = null; }
-            else if (!a.convs[a.diag] || (!ph.aiBusy(a.convs[a.diag]) && a.convs[a.diag].status != 'done')) {
-                c = ph.aiConvFromSaved('diagnosis', item);
-                if (c) a.diag = c.id;
-            }
-            ph.aiRenderDiag();
+            ph.elUpdate();
+            if (!auto) { ph.aiSay(c.mode == 'diagnose' ? 'Opened the saved diagnosis.' : 'Opened the saved chat.'); var ta = Q('evlAiIn'); if (ta) ta.focus(); }
             return;
         }
         if (m.kind == 'explain' && typeof m.id == 'string') {
@@ -509,7 +537,7 @@ module.exports.attach = function (obj) {
                 c = ph.aiConvFromSaved('explain', Object.assign({}, item, { eventId: m.id }));
                 if (c) a.explainBy[m.id] = c.id;
             }
-            if (ph.st.view != 'diag') ph.elUpdate();
+            ph.elUpdate();
         }
     };
     obj.onAiHistoryDeleted = function (server, m) {
@@ -520,13 +548,13 @@ module.exports.attach = function (obj) {
         if (m.ok !== true) { ph.aiSay('The chat could not be deleted.'); if (a.open) ph.aiRenderPanel(); return; }
         for (var id in a.convs) {
             var c = a.convs[id];
-            if (c.mode != 'ask' || c.chatId !== m.id || ph.aiBusy(c)) continue;
+            if (!ph.aiIsChat(c) || c.chatId !== m.id || ph.aiBusy(c)) continue;
             ph.aiCloseConv(c);
             if (a.chat == c.id) { a.chat = null; if (a.focus == c.id) { a.focus = null; a.sel = null; } a.citeVer++; }
             delete a.convs[id];
         }
         if (a.open) ph.aiRenderPanel();
-        if (ph.st.view != 'diag') ph.elUpdate();
+        ph.elUpdate();
         ph.aiSay('Chat deleted.');
         var f = document.querySelector('#evlAiLog .evlAiHistRow button.evlAiHistOpen') || Q('evlAiHistBtn');
         if (f) f.focus();
@@ -535,16 +563,20 @@ module.exports.attach = function (obj) {
     obj.aiHistoryTouch = function (c, t) {
         var ph = pluginHandler.eventlog, a = ph.st.ai, sv = a.saved, now = Date.now();
         if (!sv || !sv.enabled || !sv.loaded) return;
-        if (c.mode == 'ask' && c.chatId) {
+        if (ph.aiIsChat(c) && c.chatId) {
             var e = null;
             sv.chats = sv.chats.filter(function (x) { if (x.id === c.chatId) { e = x; return false; } return true; });
-            if (!e) { var q = String(c.turns[0].q || '').replace(/\s+/g, ' ').trim(); e = { id: c.chatId, title: q.length > 80 ? q.slice(0, 79) + '…' : (q || 'Chat'), updated: now, count: 0 }; }
+            if (!e) {
+                var q = String(c.turns[0].q || '').replace(/\s+/g, ' ').trim();
+                if (c.mode == 'diagnose') q = ph.aiDiagTitle(c);
+                e = { id: c.chatId, title: q.length > 80 ? q.slice(0, 79) + '…' : (q || 'Chat'), updated: now, count: 0 };
+                if (c.mode == 'diagnose') { e.type = 'diagnosis'; e.window = c.win || '24h'; }
+            }
             e.updated = now; e.count = Math.max(e.count + 1, c.turns.filter(function (x) { return x.status == 'done'; }).length);
             sv.chats.unshift(e);
             if (sv.chats.length > 50) sv.chats.length = 50;
             if (a.open) QH('evlAiHd', ph.aiHeadHtml(a.convs[a.chat] || null));
-        } else if (c.mode == 'diagnose') sv.diagnosis = { generatedAt: now, window: c.win || '' };
-        else if (c.mode == 'explain' && c.input && c.input.eventId) sv.explains[c.input.eventId] = now;
+        } else if (c.mode == 'explain' && c.input && c.input.eventId) sv.explains[c.input.eventId] = now;
     };
     obj.aiHistoryToggle = function () {
         var ph = pluginHandler.eventlog, a = ph.elState().ai;
@@ -560,7 +592,7 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, sv = a.saved || { chats: [] }, esc = ph.aiEsc, cur = a.convs[a.chat];
         var h = '<div class=evlAiHist>';
         if (!sv.loaded) return h + '<p class=evlAiMuted>Loading your chats…</p></div>';
-        if (!sv.chats.length) h += '<p class=evlAiMuted>No saved chats for this device yet. Ask a question and it appears here.</p>';
+        if (!sv.chats.length) h += '<p class=evlAiMuted>No saved chats for this device yet. Ask a question or run a diagnosis and it appears here.</p>';
         var day = function (t) { var d = new Date(t); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); };
         var today = day(Date.now()), lastDay = null, open = false;
         sv.chats.forEach(function (x) {
@@ -572,8 +604,10 @@ module.exports.attach = function (obj) {
                 h += '<h3 class=evlAiHistDay>' + esc(lab) + '</h3><ul class=evlAiHistL>';
                 lastDay = d; open = true;
             }
-            var isCur = !!(cur && cur.chatId === x.id), busy = isCur && ph.aiBusy(cur), n = x.count;
-            var meta = ph.aiTimeShort(x.updated) + (n ? ', ' + n + (n == 1 ? ' question' : ' questions') : '');
+            var isCur = !!(cur && cur.chatId === x.id), busy = isCur && ph.aiBusy(cur), n = x.count, dg = (x.type == 'diagnosis');
+            if (dg) n = Math.max(0, n - 1);   // the diagnosis itself is not a question
+            var meta = ph.aiTimeShort(x.updated) + (n ? ', ' + n + (n == 1 ? (dg ? ' follow-up question' : ' question') : (dg ? ' follow-up questions' : ' questions')) : '');
+            var mk = dg ? '<span class=evlAiDgMark>' + esc(ph.aiWinShort(x.window)) + '</span>' : '';
             h += '<li class="evlAiHistRow' + (isCur ? ' cur' : '') + '">';
             if (a.delAsk === x.id) {
                 h += '<div class=evlAiHistAsk role=group aria-label="Delete this chat?"><span>Delete “' + esc(x.title) + '”? This cannot be undone.</span>' +
@@ -581,7 +615,7 @@ module.exports.attach = function (obj) {
                      '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiHistoryDelNo()">Keep</button></div>';
             } else {
                 h += '<button class="evlAiHistOpen" onclick="return pluginHandler.eventlog.aiHistoryOpen(\'' + x.id + '\')"' + (isCur ? ' aria-current=true' : '') + '>' +
-                     '<span class=t>' + esc(x.title) + '</span><span class=m>' + esc(meta) + (isCur ? ' (open)' : '') + '</span></button>' +
+                     '<span class=t>' + esc(x.title) + '</span><span class=m>' + mk + esc(meta) + (isCur ? ' (open)' : '') + '</span></button>' +
                      '<button class="evlBtn mini evlAiHistDel" aria-label="Delete chat “' + esc(x.title) + '”" title="' + (busy ? 'Wait until the answer is finished' : 'Delete this chat') + '"' + (busy ? ' disabled' : '') +
                      ' onclick="return pluginHandler.eventlog.aiHistoryDel(\'' + x.id + '\')"><svg width=12 height=12 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.8 aria-hidden=true><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></button>';
             }
@@ -590,6 +624,18 @@ module.exports.attach = function (obj) {
         if (open) h += '</ul>';
         h += '<p class=evlAiHistNote>' + esc(ph.aiSavedNote()) + '</p>';
         return h + '</div>';
+    };
+    // "Diagnosis · 24 h": the marker of a diagnosis chat in the list
+    obj.aiWinShort = function (w) {
+        return 'Diagnosis \u00b7 ' + (({ '24h': '24 h', '7d': '7 days', restart: 'restart' })[w] || '24 h');
+    };
+    // the list title of a diagnosis chat before the server's list has it: the first sentence of its summary
+    obj.aiDiagTitle = function (c) {
+        var ph = pluginHandler.eventlog, t0 = c && c.turns[0], s = t0 && t0.structured ? String(t0.structured.summary || '') : '';
+        s = ph.aiStripMarks(s).replace(/\s*\[\s*E\d{1,6}(?:\s*[,;]\s*E\d{1,6})*\s*\]/g, '').replace(/[*_`#>]+/g, '').replace(/\s+/g, ' ').trim();
+        var m = /^(.{12,}?[.!?])(\s|$)/.exec(s);
+        if (m) s = m[1];
+        return s || ('Diagnosis of ' + ph.aiWinText(c && c.win));
     };
     obj.aiSavedNote = function () {
         var sv = pluginHandler.eventlog.elState().ai.saved, n = sv && sv.retentionDays;
@@ -633,8 +679,7 @@ module.exports.attach = function (obj) {
         if (st == null || st.ai == null || !Q('evlWrap')) return;
         var a = st.ai;
         if (a.chat == c.id) ph.aiRenderPanel();
-        if (a.diag == c.id) ph.aiRenderDiag();
-        if (st.view != 'diag' && (c.mode == 'explain' || (done && a.focus == c.id))) ph.elUpdate();
+        if (c.mode == 'explain' || (done && a.focus == c.id)) ph.elUpdate();
         else ph.aiApplySel();
         ph.aiBtnSync();
         ph.aiTick();
@@ -927,7 +972,7 @@ module.exports.attach = function (obj) {
         return 'done';
     };
     obj.aiUsageText = function (t) {
-        var n = t.steps.filter(function (x) { return x != null; }).length, u = t.usage || {}, parts = [];
+        var n = pluginHandler.eventlog.aiToolSteps(t).length, u = t.usage || {}, parts = [];
         parts.push(n ? (n + (n == 1 ? ' step' : ' steps')) : 'No tools used');
         var ms = Number(u.ms) || 0;
         if (ms > 0) { var s = ms / 1000; parts.push(s < 10 ? s.toFixed(1) + ' s' : (s < 60 ? Math.round(s) + ' s' : Math.floor(s / 60) + ' min ' + Math.round(s % 60) + ' s')); }
@@ -937,16 +982,19 @@ module.exports.attach = function (obj) {
     };
     obj.aiStepsHtml = function (c, t) {
         var ph = pluginHandler.eventlog, esc = ph.aiEsc, key = c.id + '-' + t.n;
-        var steps = t.steps.filter(function (x) { return x != null; });
-        if (!steps.length) return '<div data-t=' + key + ' data-p=s hidden></div>';
+        var all = t.steps.filter(function (x) { return x != null; }), steps = ph.aiToolSteps(t);
+        if (!all.length) return '<div data-t=' + key + ' data-p=s hidden></div>';
         var running = (t.status == 'running');
         var open = (t.stepsOpen != null) ? t.stepsOpen : running;
         var h = '<details class=evlAiSteps data-t=' + key + ' data-p=s' + (open ? ' open' : '') + '><summary onclick="return pluginHandler.eventlog.aiStepsClick(\'' + c.id + '\',' + t.n + ',this)">' +
-                (running ? steps.length + (steps.length == 1 ? ' step' : ' steps') + ' so far' : esc(ph.aiUsageText(t))) + '</summary><div class=evlAiStepL>';
-        t.steps.forEach(function (s, i) {
+                (running ? (steps.length ? steps.length + (steps.length == 1 ? ' step' : ' steps') + ' so far' : 'Getting started') : esc(ph.aiUsageText(t))) + '</summary><div class=evlAiStepL>';
+        var k = 0;
+        t.steps.forEach(function (s) {
             if (s == null) return;
+            // what the model wrote between its lookups (model text: escaped, never Markdown here)
+            if (s.note != null) { h += '<div class="evlAiStep note"><span class=n aria-hidden=true></span><span class=t><b>Model:</b> ' + ph.aiPlain(s.note) + '</span></div>'; return; }
             var r = ph.aiStepResult(s);
-            h += '<div class=evlAiStep><span class=n>' + (i + 1) + '</span><code>' + esc(s.tool) + '(' + esc(ph.aiArgsShort(s.args)) + ')</code><span class="r' + (s.status == 'error' ? ' err' : '') + '">' + esc(r) + '</span></div>';
+            h += '<div class=evlAiStep><span class=n>' + (++k) + '</span><code>' + esc(s.tool) + '(' + esc(ph.aiArgsShort(s.args)) + ')</code><span class="r' + (s.status == 'error' ? ' err' : '') + '">' + esc(r) + '</span></div>';
         });
         return h + '</div></details>';
     };
@@ -986,8 +1034,7 @@ module.exports.attach = function (obj) {
         if (c.status == 'stopping') return { key: 'stop', text: 'Stopping…', step: '', clock: true };
         if (t.ph == 'write') return { key: 'write', text: ({ explain: 'Writing the explanation…', diagnose: 'Writing the diagnosis…' })[c.mode] || 'Writing the answer…', step: '', clock: true };
         if (t.ph == 'think') return { key: 'think' + ((t.think && t.think.round) || 0), text: 'Thinking…', count: ph.aiThinkCount(t.think && t.think.chars), step: '', clock: true };
-        var n = 0, s = null;
-        for (var i = t.steps.length - 1; i >= 0; i--) { if (t.steps[i]) { n = i + 1; s = t.steps[i]; break; } }
+        var ts = ph.aiToolSteps(t), n = ts.length, s = n ? ts[n - 1] : null;
         if (s) return { key: 'step' + n, text: ph.aiToolWords(s.tool, s.args), step: 'Step ' + n, clock: true };
         return { key: 'prep', text: 'Preparing…', step: '', clock: true };
     };
@@ -1012,6 +1059,13 @@ module.exports.attach = function (obj) {
         if (!on) return '<div class=evlAiStrip aria-hidden=true></div>';
         var d = (Date.now() - (Number(t.t0) || Date.now())) % 1800;
         return '<div class="evlAiStrip on" aria-hidden=true><i style="animation-delay:-' + Math.max(0, Math.floor(d)) + 'ms"></i></div>';
+    };
+    // The Stop button while the model works: a turning arc around the stop mark and the elapsed time (ticked by aiTick);
+    // its accessible name stays "Stop". cls: extra classes ('mini' in the Explain box).
+    obj.aiStopInner = function (t) {
+        var ph = pluginHandler.eventlog, t0 = Number(t && t.t0) || Date.now();
+        return '<svg class=evlAiRing width=16 height=16 viewBox="0 0 16 16" aria-hidden=true><circle class=trk cx=8 cy=8 r=6.5 /><circle class=arc cx=8 cy=8 r=6.5 /><rect x=5.6 y=5.6 width=4.8 height=4.8 rx=0.8 /></svg>' +
+               '<span class=evlAiStopL>Stop</span><span class="evlAiClock evlAiStopT" data-t0=' + t0 + ' aria-hidden=true>' + ph.aiElapsed(Date.now() - t0) + '</span>';
     };
     // Streaming caret: after the last text of the answer so far (not after a command's note).
     obj.aiCaret = function (root) {
@@ -1087,14 +1141,6 @@ module.exports.attach = function (obj) {
         if (!c || !c.notes || !c.notes.length) return '';
         return c.notes.map(function (n) { return '<p class=evlAiNoteLine>' + ph.aiEsc(n) + '</p>'; }).join('');
     };
-    obj.aiVoteHtml = function (c, t, target) {
-        if (!c.convId || t.srvN === -1) return '';   // a saved answer (or one of an earlier conversation of this chat): nothing to give feedback to
-        var mk = function (vote, label, path, aria) {
-            return '<button class="evlBtn mini" aria-pressed=' + (t.vote == vote ? 'true' : 'false') + ' aria-label="' + aria + '" onclick="return pluginHandler.eventlog.aiVote(\'' + c.id + '\',' + t.n + ',\'' + target + '\',\'' + vote + '\')">' +
-                   '<svg width=13 height=13 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.7 aria-hidden=true><path d="' + path + '"/></svg>' + label + '</button>';
-        };
-        return mk('up', 'Helpful', 'M3 8.5l3.2 3.2L13 5', 'This helped') + mk('down', 'Not helpful', 'M4 4l8 8M12 4l-8 8', 'This did not help');
-    };
     // plain-text rendition of a finished turn (clipboard)
     obj.aiTurnText = function (c, t) {
         var ph = pluginHandler.eventlog, s = t.structured, x = ph.aiStripMarks, out = [];
@@ -1105,7 +1151,7 @@ module.exports.attach = function (obj) {
             if (s.checkNext && s.checkNext.length) out.push('Check next\n' + s.checkNext.map(function (z) { return '- ' + x(z); }).join('\n'));
             return out.join('\n\n');
         }
-        if (s && c.mode == 'diagnose' && t.n == 1) {
+        if (s && t.diag) {
             if (s.summary) out.push(x(s.summary));
             if (s.hypotheses && s.hypotheses.length) out.push('Possible causes\n' + s.hypotheses.map(function (h) { return '- ' + ph.aiStatusWord(h.status) + ': ' + x(h.title) + (h.why ? ' ' + x(h.why) : ''); }).join('\n'));
             if (s.nextSteps && s.nextSteps.length) out.push('Next steps\n' + s.nextSteps.map(function (n, i) { return (i + 1) + '. ' + x(n.text) + (n.command ? '\n   ' + x(n.command.text) : ''); }).join('\n'));
@@ -1119,43 +1165,38 @@ module.exports.attach = function (obj) {
         if (!t) return false;
         return ph.aiCopyText(ph.aiTurnText(c, t), btn);
     };
+    // "This is wrong" / "Reopen" on a possible cause of a diagnosis: changes how it is shown and tells the server
     obj.aiVote = function (cid, n, target, vote, hid) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[cid], t = null;
         if (c) c.turns.forEach(function (x) { if (x.n == n) t = x; });
-        if (!c || !t || !c.convId) return false;
-        if (['up', 'down', 'wrong', 'reopen'].indexOf(vote) < 0 || ['answer', 'explain', 'hyp'].indexOf(target) < 0) return false;
-        var m = { convId: c.convId, turn: (t.srvN != null) ? t.srvN : t.n, target: target, vote: vote };
-        if (target == 'hyp') {
-            if (typeof hid != 'string' || !/^[\w-]{1,20}$/.test(hid)) return false;
-            if (a.hyp[cid + ':' + hid] == vote) return false;
-            a.hyp[cid + ':' + hid] = vote; m.hid = hid;
-        } else {
-            if (t.vote == vote) return false;
-            t.vote = vote;
-        }
+        if (!c || !t || !c.convId || target != 'hyp' || (vote != 'wrong' && vote != 'reopen')) return false;
+        if (typeof hid != 'string' || !/^[\w-]{1,20}$/.test(hid)) return false;
+        if (a.hyp[cid + ':' + hid] == vote) return false;
+        a.hyp[cid + ':' + hid] = vote;
         t.sHtml = null;
-        ph.aiSendMsg('aiFeedback', m);
+        ph.aiSendMsg('aiFeedback', { convId: c.convId, turn: (t.srvN != null && t.srvN > 0) ? t.srvN : t.n, target: 'hyp', hid: hid, vote: vote });
         ph.aiRefresh(c);
-        ph.aiSay(vote == 'wrong' ? 'Marked as wrong. Thanks for the feedback.' : (vote == 'reopen' ? 'Reopened.' : 'Thanks for the feedback.'));
+        ph.aiSay(vote == 'wrong' ? 'Marked as wrong.' : 'Reopened.');
         return false;
     };
     obj.aiRetry = function (cid) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[cid];
         if (!c || ph.aiBusy(c)) return false;
-        var t = c.turns[c.turns.length - 1];
-        if (c.mode == 'ask' && t.n > 1 && c.convId && !c.closed) {
+        var t = c.turns[c.turns.length - 1], later = ph.aiIsChat(c) && !t.diag && c.turns.length > 1;
+        if (later && c.convId && !c.closed && c.turns[0].status == 'done') {
             c.turns[c.turns.length - 1] = ph.aiNewTurn(t.n, t.q);
             c.status = 'running'; c.last = Date.now();
             ph.aiSendMsg('aiSend', { convId: c.convId, text: t.q });
             ph.aiDogStart();
-        } else if (c.mode == 'ask' && c.chatId && c.turns.length > 1) {
+        } else if (later && c.chatId) {
             c.turns.pop(); a.chat = c.id; ph.aiAsk(t.q); return false;   // the saved chat continues with this question
-        } else if (c.mode == 'ask' && t.n > 1) {
+        } else if (later) {
             a.chat = null; ph.aiAsk(t.q); return false;
         } else {
             ph.aiCloseConv(c);
             c.convId = null; c.closed = false; c.ended = false; c.restored = false; c.reqId = ph.aiReqId(); c.info = null; c.notes = []; c.preview = null; c.red = null;
-            c.turns = [ph.aiNewTurn(1, c.turns[0].q)]; c.status = 'starting';
+            if (c.mode == 'diagnose') c.chatId = null;   // a new diagnosis: a new chat
+            c.turns = [ph.aiNewTurn(1, c.turns[0].q)]; c.turns[0].diag = (c.mode == 'diagnose'); c.status = 'starting';
             ph.aiStartConv(c);
         }
         ph.aiRefresh(c);
@@ -1326,11 +1367,10 @@ module.exports.attach = function (obj) {
         if (!ci) return false;
         if (a.focus != cid) a.citeVer++;
         a.focus = cid; a.sel = ref; a.notice = null; a.peek = null;
-        if (st.view == 'diag' || (!ph.elCan('live') && !ph.elCan('history'))) {
-            if (!ph.elCan('history')) { a.peek = { cid: cid, ref: ref, where: (st.view == 'diag' && a.diag == cid) ? 'diag' : 'panel' }; ph.aiRenderPeek(); ph.aiApplySel(); return false; }
-            st.view = 'history';
-            ph.elRenderShell();
-        }
+        // no event list at all (the Assistant permission only): the cited event in a small card
+        if (!ph.elCan('live') && !ph.elCan('history')) { a.peek = { cid: cid, ref: ref, where: 'panel' }; ph.aiRenderPeek(); ph.aiApplySel(); return false; }
+        // full width: back beside the table, so the row can be shown
+        if (a.full) { a.full = false; ph.aiRenderPanel(); }
         ph.aiReveal(cid, ref, 0);
         return false;
     };
@@ -1426,7 +1466,7 @@ module.exports.attach = function (obj) {
         c.turns.forEach(function (t) { for (var r in t.cites) { var id = t.cites[r].id; if (id != null && ids.indexOf(id) < 0) ids.push(id); } });
         if (!ids.length) return false;
         st.hist.recIds = ids.slice(0, 200);
-        st.ai.focus = cid; st.ai.citeVer++;
+        st.ai.focus = cid; st.ai.citeVer++; st.ai.full = false;   // the events show beside the panel
         st.view = 'history';
         ph.elRenderShell();
         ph.elLoadHistory(true);
@@ -1445,13 +1485,8 @@ module.exports.attach = function (obj) {
                '<div class=evlAiPeekM>' + esc(ev.message) + '</div></div>';
     };
     obj.aiRenderPeek = function () {
-        var ph = pluginHandler.eventlog, a = ph.elState().ai, h = ph.aiPeekHtml();
-        var p1 = Q('evlAiPeekSlot'), p2 = Q('evlDiagPeekSlot');
-        var where = a.peek ? a.peek.where : null;
-        if (where == 'diag' && !p2) where = 'panel';
-        if (where == 'panel' && !p1 && p2) where = 'diag';
-        if (p1) p1.innerHTML = (where == 'panel') ? h : '';
-        if (p2) p2.innerHTML = (where == 'diag') ? h : '';
+        var ph = pluginHandler.eventlog, p1 = Q('evlAiPeekSlot');
+        if (p1) p1.innerHTML = ph.aiPeekHtml();
         ph.aiApplySel();
     };
     obj.aiPeekClose = function () {
@@ -1465,14 +1500,43 @@ module.exports.attach = function (obj) {
     obj.aiLayout = function () {
         var ph = pluginHandler.eventlog, st = ph.elState(), main = Q('evlMain'), wrap = Q('evlWrap');
         if (!main || !wrap) return;
-        var w = wrap.clientWidth, lim = (st.layout == 'viewer' && st.view != 'diag') ? 1150 : 900;
+        var w = wrap.clientWidth, lim = (st.layout == 'viewer') ? 1150 : 900;
         var was = main.classList.contains('evlStack');
         var stack = (w > 0) ? (was ? (w < lim + 24) : (w < lim)) : was;   // a little hysteresis: no flip-flop at the edge
         main.classList.toggle('evlStack', stack);
-        main.classList.toggle('evlDiagOn', st.view == 'diag');
+        // full width: the panel takes the table's place (the toolbar stays); stacked it is full width anyway; without
+        // an event list (the Assistant permission only) it always is
+        var only = ph.aiOnly(), pe = Q('evlAi'), open = !!(pe && !pe.hidden);
+        main.classList.toggle('evlAiOnly', only);
+        main.classList.toggle('evlAiFull', open && (only || (!!st.ai.full && !stack)));
         main.style.setProperty('--evl-ai-w', (st.ai.w || 400) + 'px');
         if (stack != was) ph.elFitHeight();
         ph.aiFitPanel();
+    };
+    // the Assistant is all this user has on this device: no event table, the panel is the page
+    obj.aiOnly = function () {
+        var ph = pluginHandler.eventlog;
+        return ph.elCan('assistant') && !ph.elCan('live') && !ph.elCan('history');
+    };
+    // Full width <-> docked beside the table (remembered per browser); Esc in the panel docks it again.
+    obj.aiFullToggle = function (on) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        a.full = (on == null) ? !a.full : !!on;
+        try { putstore('evl_ai_full', a.full ? '1' : ''); } catch (e) { }
+        ph.aiRenderPanel();
+        ph.elFitHeight();
+        var b = Q('evlAiFullBtn'); if (b) b.focus();
+        ph.aiSay(a.full ? 'The assistant uses the full width.' : 'The assistant is docked beside the table.');
+        return false;
+    };
+    obj.aiPanelKey = function (ev) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        if (ev.key != 'Escape' || ev.defaultPrevented || !a.full || ph.aiOnly()) return true;
+        var main = Q('evlMain');
+        if (main && main.classList.contains('evlStack')) return true;
+        ev.preventDefault();
+        ph.aiFullToggle(false);
+        return false;
     };
     // ---- Ask panel height -----------------------------------------------------------------------------------------
     // The panel's height does not follow the event table: by default it fits the window (docked: from its top edge to
@@ -1503,7 +1567,7 @@ module.exports.attach = function (obj) {
     };
     obj.aiFitPanel = function () {
         var ph = pluginHandler.eventlog, el = Q('evlAi');
-        if (!el || el.hidden) return;
+        if (!el || el.hidden || ph._aiDrag) return;   // while the grip is dragged, the pointer alone sets the height
         var fit = ph.aiFitH(), uh = ph.aiUserH();
         if (!fit) return;   // hidden tab: keep the last height, the ResizeObserver comes back when it is shown
         var h = uh ? Math.min(uh, fit) : fit;
@@ -1523,18 +1587,29 @@ module.exports.attach = function (obj) {
         el.style.height = h + 'px';
         if (stick && log) log.scrollTop = log.scrollHeight;
     };
+    // Dragging: the bottom edge follows the pointer, measured from the panel's top where it is now (the page may scroll
+    // meanwhile) and keeping where the grip was grabbed; nothing else sets the height until the pointer is released
+    // (layout and resize callbacks would put the stored height back mid-drag). Stored on release.
     obj.aiHGripDown = function (ev) {
         var ph = pluginHandler.eventlog, el = Q('evlAi'), g = ev.currentTarget || ev.target;
         if (!el || (ev.button != null && ev.button > 0)) return false;
         ev.preventDefault();
         try { g.setPointerCapture(ev.pointerId); } catch (e) { }
         g.classList.add('active');
-        var y0 = ev.clientY, h0 = el.getBoundingClientRect().height, fit = ph.aiFitH() || 1e6, h = 0;
-        var mv = function (e) { h = Math.round(Math.max(360, Math.min(fit, h0 + e.clientY - y0))); ph.aiApplyH(h); };
+        var r0 = el.getBoundingClientRect(), grab = r0.bottom - ev.clientY, h = 0;
+        ph._aiDrag = true;
+        var mv = function (e) {
+            var fit = ph.aiFitH() || 1e6, top = el.getBoundingClientRect().top;
+            h = Math.round(Math.max(360, Math.min(fit, e.clientY - top + grab)));
+            ph.aiApplyH(h);
+        };
         var up = function () {
             g.removeEventListener('pointermove', mv); g.removeEventListener('pointerup', up); g.removeEventListener('pointercancel', up);
             g.classList.remove('active');
+            ph._aiDrag = false;
+            var fit = ph.aiFitH() || 1e6;
             if (h) ph.aiSetUserH(h >= fit ? 0 : h);   // dragged all the way down: back to the automatic height
+            else ph.aiFitPanel();
         };
         g.addEventListener('pointermove', mv); g.addEventListener('pointerup', up); g.addEventListener('pointercancel', up);
         return false;
@@ -1544,7 +1619,8 @@ module.exports.attach = function (obj) {
         var d = { ArrowUp: -24, ArrowDown: 24, PageUp: -120, PageDown: 120 }[ev.key];
         if (!el || (d == null && ev.key != 'Home' && ev.key != 'End')) return true;
         ev.preventDefault();
-        var fit = ph.aiFitH() || 1e6, cur = Math.round(el.getBoundingClientRect().height) || Number(String(el.style.height).replace('px', '')) || fit;
+        if (ph._aiDrag) return false;
+        var fit = ph.aiFitH() || 1e6, cur = Number(String(el.style.height).replace('px', '')) || Math.round(el.getBoundingClientRect().height) || fit;
         if (ev.key == 'Home') ph.aiSetUserH(360);
         else if (ev.key == 'End') ph.aiSetUserH(0);
         else { var h = Math.max(360, Math.min(fit, cur + d)); ph.aiSetUserH(h >= fit ? 0 : h); }
@@ -1592,22 +1668,40 @@ module.exports.attach = function (obj) {
     obj.aiToggle = function () {
         var ph = pluginHandler.eventlog, a = ph.elState().ai;
         if (!ph.elCan('assistant')) return false;
-        a.open = !a.open;
+        a.open = ph.aiOnly() ? true : !a.open;
+        if (a.open) a.diagSetup = false;
         ph.aiRenderPanel();
         setTimeout(function () { try { var el = Q(pluginHandler.eventlog.elState().ai.open ? 'evlAiIn' : 'evlAiBtn'); if (el) el.focus(); } catch (e) { } }, 0);
         return false;
     };
     obj.aiClosePanel = function () {
         var ph = pluginHandler.eventlog, a = ph.elState().ai;
-        a.open = false;
+        if (ph.aiOnly()) return false;   // the panel is all there is
+        a.open = false; a.diagSetup = false;
         ph.aiRenderPanel();
         var b = Q('evlAiBtn'); if (b) b.focus();
         return false;
     };
+    // svg icons of the panel (16 px, stroke = currentColor)
+    obj.aiIcon = function (name) {
+        var d = ({
+            copy: '<rect x=5.5 y=5.5 width=8 height=8 rx=1.5 /><path d="M10.5 3.2H4.2a1 1 0 0 0-1 1v6.3"/>',
+            edit: '<path d="M3 13l.7-2.8 7.1-7.1a1.4 1.4 0 0 1 2 2l-7.1 7.1zM9.6 4.3l2 2"/>',
+            del: '<path d="M2.8 4.5h10.4M6.3 4.5V2.8h3.4v1.7M4.3 4.5l.7 8.7h6l.7-8.7M6.8 7v4M9.2 7v4"/>',
+            retry: '<path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.8v3.4H9.6"/>',
+            full: '<path d="M9.5 2.5h4v4M13.5 2.5L9.2 6.8M6.5 13.5h-4v-4M2.5 13.5l4.3-4.3"/>',
+            dock: '<rect x=2 y=3 width=12 height=10 rx=1.2 /><path d="M9.2 3v10M3.8 6h3.5M3.8 8.5h3.5"/>',
+            diag: '<path d="M1.5 8.5h2.8l1.6-4.2 2.8 8 1.7-5 1 1.2h3.1"/>',
+            x: '<path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/>'
+        })[name] || '';
+        return '<svg width=14 height=14 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 stroke-linecap=round stroke-linejoin=round aria-hidden=true>' + d + '</svg>';
+    };
     obj.aiRenderPanel = function () {
         var ph = pluginHandler.eventlog, st = ph.elState(), a = st.ai, el = Q('evlAi');
+        if (ph.aiOnly()) a.open = true;
         var btn = Q('evlAiBtn');
-        if (btn) { btn.setAttribute('aria-expanded', a.open ? 'true' : 'false'); btn.classList.toggle('on', a.open); }
+        if (btn) { btn.setAttribute('aria-expanded', a.open ? 'true' : 'false'); btn.classList.toggle('on', a.open && !a.diagSetup); }
+        var db = Q('evlAiDiagBtn'); if (db) db.classList.toggle('on', a.open && a.diagSetup);
         ph.aiBtnSync();
         if (!el) return;
         if (!a.open || !ph.elCan('assistant')) {
@@ -1617,7 +1711,7 @@ module.exports.attach = function (obj) {
         }
         el.hidden = false;
         if (!Q('evlAiLog')) {
-            el.innerHTML = '<div class=evlAiIn>' +
+            el.innerHTML = '<div class=evlAiIn onkeydown="return pluginHandler.eventlog.aiPanelKey(event)">' +
                 '<div class=evlAiSplit role=separator tabindex=0 aria-orientation=vertical aria-label="Resize the assistant panel" title="Drag to resize, double-click to reset"' +
                 ' onpointerdown="return pluginHandler.eventlog.aiSplitDown(event)" ondblclick="return pluginHandler.eventlog.aiSplitReset()" onkeydown="return pluginHandler.eventlog.aiSplitKey(event)"></div>' +
                 '<div class=evlAiHd id=evlAiHd></div><div class=evlAiStripSlot id=evlAiStripSlot></div>' +
@@ -1631,12 +1725,13 @@ module.exports.attach = function (obj) {
         QH('evlAiHd', ph.aiHeadHtml(c));
         QH('evlAiStripSlot', ph.aiStripHtml(c, c ? c.turns[c.turns.length - 1] : null));
         var log = Q('evlAiLog');
-        if (a.hist || a.opening) {   // the chat list, or a saved chat being loaded
+        if (a.hist || a.opening || a.diagSetup) {   // the chat list, a saved chat being loaded, or the diagnosis window choice
             log.setAttribute('aria-busy', a.opening ? 'true' : 'false');
-            log.setAttribute('aria-label', a.hist ? 'Saved chats' : 'Conversation');
-            log.innerHTML = a.hist ? ph.aiHistoryHtml() : '<p class=evlAiMuted>Opening the saved chat…</p>';
-            if (log._evlConv != 'hist') log.scrollTop = 0;
-            log._evlConv = 'hist';
+            log.setAttribute('aria-label', a.hist ? 'Saved chats' : (a.diagSetup ? 'Diagnose this device' : 'Conversation'));
+            log.innerHTML = a.hist ? ph.aiHistoryHtml() : (a.diagSetup ? ph.aiDiagSetupHtml() : '<p class=evlAiMuted>Opening the saved chat…</p>');
+            var mode = a.hist ? 'hist' : (a.diagSetup ? 'setup' : 'open');
+            if (log._evlConv != mode) log.scrollTop = 0;
+            log._evlConv = mode;
             ph.aiRenderComposer(); ph.aiLayout();
             return;
         }
@@ -1648,7 +1743,8 @@ module.exports.attach = function (obj) {
         log.setAttribute('aria-busy', ph.aiBusy(c) ? 'true' : 'false');
         log.innerHTML = ph.aiLogHtml(c);
         var turns = log.querySelectorAll('.evlAiTurn'), lastEl = turns.length ? turns[turns.length - 1] : null;
-        if (justDone && lastEl && log._evlConv == sig) log.scrollTop = Math.max(0, lastEl.offsetTop - 8);
+        if (a.act) log.scrollTop = top;   // an inline editor or confirmation: stay where the user is
+        else if (justDone && lastEl && log._evlConv == sig) log.scrollTop = Math.max(0, lastEl.offsetTop - 8);
         else log.scrollTop = stick ? log.scrollHeight : top;
         log._evlConv = sig;
         if (lt != null && lt.status == 'done') log._evlDone = sig;
@@ -1657,7 +1753,9 @@ module.exports.attach = function (obj) {
         ph.aiLayout();
     };
     obj.aiHeadHtml = function (c) {
-        var ph = pluginHandler.eventlog, line = ph.aiInfoLine(c), a = ph.elState().ai, sv = a.saved;
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, sv = a.saved, only = ph.aiOnly();
+        if (a.diagSetup) c = null;   // the window choice is about a new diagnosis, not the chat shown before
+        var line = ph.aiInfoLine(c);
         var hb = '';
         if (sv && sv.enabled) {
             var n = sv.chats.length;
@@ -1666,10 +1764,13 @@ module.exports.attach = function (obj) {
                  '<svg width=13 height=13 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 aria-hidden=true><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></svg>Chats' +
                  (n ? '<span class=evlAiN>' + n + '</span>' : '') + '</button>';
         }
-        return '<div class=evlAiTitle><h2>' + (a.hist ? 'Saved chats' : 'Ask') + '</h2>' + (line && !a.hist ? '<div class=evlAiSub>' + ph.aiEsc(line) + '</div>' : '') + (a.hist ? '' : ph.aiNotesHtml(c)) + '</div>' + hb +
-               '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiNewChat()"' + (c || a.hist ? '' : ' disabled') + '>New chat</button>' +
-               '<button class="evlBtn mini evlAiX" aria-label="Close the assistant" title="Close" onclick="return pluginHandler.eventlog.aiClosePanel()">' +
-               '<svg width=13 height=13 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.8 aria-hidden=true><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></button>';
+        var title = a.hist ? 'Saved chats' : (a.diagSetup ? 'Diagnose' : (c && c.mode == 'diagnose' ? 'Diagnosis' : 'Ask'));
+        // full width <-> docked beside the table (not offered stacked below the table, nor without a table)
+        var fb = only ? '' : '<button id=evlAiFullBtn class="evlBtn mini evlAiIco evlAiFullBtn" aria-pressed=' + (a.full ? 'true' : 'false') + ' aria-label="Full width"' +
+                 ' title="' + (a.full ? 'Dock beside the table (Esc)' : 'Full width') + '" onclick="return pluginHandler.eventlog.aiFullToggle()">' + ph.aiIcon(a.full ? 'dock' : 'full') + '</button>';
+        return '<div class=evlAiTitle><h2>' + title + '</h2>' + (line && !a.hist ? '<div class=evlAiSub>' + ph.aiEsc(line) + '</div>' : '') + (a.hist ? '' : ph.aiNotesHtml(c)) + '</div>' + hb +
+               '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiNewChat()"' + (c || a.hist || a.diagSetup ? '' : ' disabled') + '>New chat</button>' + fb +
+               (only ? '' : '<button class="evlBtn mini evlAiX" aria-label="Close the assistant" title="Close" onclick="return pluginHandler.eventlog.aiClosePanel()">' + ph.aiIcon('x') + '</button>');
     };
     // the starter questions the server chose for this device's OS (admin-editable), else the built-in Windows list
     obj.aiStarters = function () {
@@ -1682,11 +1783,11 @@ module.exports.attach = function (obj) {
         if (acc.assistantReason == 'noEndpoint') return '<div class=evlAiIntro><p>' + ph.aiEsc(ph.aiErrText('noEndpoint')) + ' An administrator can assign one in the plugin\'s Config Sets.</p></div>';
         var h = '<div class=evlAiIntro><p>Ask about this device in plain words. The assistant reads its stored events and device details. Answers point to the events they rely on, marked like <span class="evlCite static">E1</span>; select one to find it in the table.</p>';
         var st = ph.aiStarters();
-        if (st.length) {
-            h += '<div class=evlAiFollow role=group aria-label="Example questions">';
-            st.forEach(function (s, i) { h += '<button class=evlBtn onclick="return pluginHandler.eventlog.aiStarter(' + i + ')">' + ph.aiEsc(s) + '</button>'; });
-            h += '</div>';
-        }
+        h += '<div class=evlAiFollow role=group aria-label="Example questions">';
+        st.forEach(function (s, i) { h += '<button class=evlBtn onclick="return pluginHandler.eventlog.aiStarter(' + i + ')">' + ph.aiEsc(s) + '</button>'; });
+        h += '</div>';
+        h += '<div class=evlAiDgEntry><button id=evlAiDgEntry class="evlBtn evlAiDgGo" onclick="return pluginHandler.eventlog.aiDiagOpen()">' + ph.aiIcon('diag') + 'Diagnose this device</button>' +
+             '<span>Sorts out what happened in a time window you choose and suggests likely causes.</span></div>';
         var sv = ph.elState().ai.saved;
         if (sv && sv.enabled) {
             var n = sv.chats.length;
@@ -1703,19 +1804,23 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog;
         if (!c) return ph.aiIntroHtml();
         var h = '';
-        if (c.restored && c.created) h += '<p class=evlAiSaved>Saved chat from ' + ph.aiEsc(ph.aiWhen(c.created)) + '. A new question continues it; the assistant gets a recap of the answers so far.</p>';
+        if (c.restored && c.created) h += '<p class=evlAiSaved>' + (c.mode == 'diagnose' ? 'Saved diagnosis from ' + ph.aiEsc(ph.aiWhen(c.created)) + '. A question continues it; the assistant gets a recap of the diagnosis and the answers so far.'
+                                                                                         : 'Saved chat from ' + ph.aiEsc(ph.aiWhen(c.created)) + '. A new question continues it; the assistant gets a recap of the answers so far.') + '</p>';
         c.turns.forEach(function (t, i) { h += ph.aiTurnHtml(c, t, i == c.turns.length - 1); });
         if (c.ended && !ph.aiBusy(c) && !c.chatId) h += '<div class=evlAiNoteBox>This conversation ended on the server after a while without questions. <button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiNewChat()">New chat</button></div>';
         return h;
     };
     obj.aiTurnHtml = function (c, t, isLast) {
-        var ph = pluginHandler.eventlog, esc = ph.aiEsc, key = c.id + '-' + t.n;
-        var h = '<div class=evlAiTurn>';
+        var ph = pluginHandler.eventlog, esc = ph.aiEsc, key = c.id + '-' + t.n, a = ph.elState().ai;
+        var busy = ph.aiBusy(c) || !!(a.pend && a.pend.cid == c.id), act = (a.act && a.act.cid == c.id && a.act.n == t.n) ? a.act.kind : null;
+        var h = '<div class="evlAiTurn' + (isLast ? ' last' : '') + (act ? ' act' : '') + '" data-n=' + t.n + '>';
         if (t.cont) h += '<div class=evlAiSeg>Continued' + (t.at ? ' ' + esc(ph.aiWhen(t.at)) : '') + ' with a recap of the answers above</div>';
         if (t.segment && isLast && t.status == 'done') h += '<div class=evlAiSeg>Earlier answers were summarized to fit the model\'s context</div>';
-        h += '<div class=evlAiQ>' + esc(t.q).replace(/\n/g, '<br>') + '</div>';
+        if (act == 'edit') h += ph.aiEditHtml(c, t);
+        else h += '<div class=evlAiQW><div class="evlAiQ' + (t.diag ? ' dg' : '') + '">' + (t.diag ? ph.aiIcon('diag') : '') + esc(t.q).replace(/\n/g, '<br>') + '</div>' + ph.aiQActsHtml(c, t, busy) + '</div>';
+        if (act == 'del') h += ph.aiConfirmHtml(c, t, 'del');
         if (c.status == 'preview' && isLast) h += '<div class=evlAiNoteBox>Waiting for you to review what is sent. <button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiDlgOpen(\'' + c.id + '\')">Review</button></div>';
-        h += ph.aiStepsHtml(c, t);
+        if (!(t.diag && t.status == 'done')) h += ph.aiStepsHtml(c, t);   // a finished diagnosis has them in its footer
         if (t.status == 'done') h += ph.aiDoneBody(c, t, 'panel');
         else if (t.status == 'running') h += '<div class="evlAiA evlAiMd" data-t=' + key + ' data-p=a>' + (t.live || ph.aiWaitHtml(c, t)) + '</div>' + ph.aiLiveHtml(c, t);
         else if (t.live) h += '<div class="evlAiA evlAiMd">' + t.live + '</div>';
@@ -1723,10 +1828,9 @@ module.exports.attach = function (obj) {
         if (t.status == 'cancelled') h += '<p class=evlAiMuted>Cancelled. Nothing was sent to the model.</p>';
         if (t.status == 'error') h += ph.aiErrHtml(c, t);
         if (t.status == 'done') {
-            h += '<div class=evlAiActs><button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiCopyTurn(\'' + c.id + '\',' + t.n + ',this)">Copy</button>';
-            if (!(c.mode == 'diagnose' && t.n == 1)) h += ph.aiVoteHtml(c, t, (c.mode == 'explain' && t.n == 1) ? 'explain' : 'answer');
-            h += '</div>';
-            if (isLast && t.followups.length && c.mode == 'ask' && (!c.closed || c.chatId)) {
+            h += ph.aiAActsHtml(c, t, busy);
+            if (act == 'retry') h += ph.aiConfirmHtml(c, t, 'retry');
+            if (isLast && t.followups.length && ph.aiIsChat(c) && (!c.closed || c.chatId)) {
                 h += '<div class=evlAiFollow role=group aria-label="Suggested follow-up questions">';
                 t.followups.forEach(function (f, i) { h += '<button class=evlBtn onclick="return pluginHandler.eventlog.aiFollow(\'' + c.id + '\',' + t.n + ',' + i + ')">' + esc(ph.aiStripMarks(f)) + '</button>'; });
                 h += '</div>';
@@ -1737,13 +1841,179 @@ module.exports.attach = function (obj) {
     obj.aiDoneBody = function (c, t, surface) {
         var ph = pluginHandler.eventlog;
         if (c.mode == 'explain' && t.n == 1 && t.structured) return '<div class=evlAiA>' + ph.aiExplainBody(c, t) + '</div>';
-        if (c.mode == 'diagnose' && t.n == 1 && t.structured) {
-            return '<div class="evlAiA evlAiMd">' + ph.aiMd(t.structured.summary || '', c) + '</div>' +
-                   (surface == 'panel' ? '<p><button class=evlLinkBtn onclick="return pluginHandler.eventlog.elSetView(\'diag\')">Open the full diagnosis</button></p>' : '');
-        }
+        if (t.diag) return ph.aiDiagCard(c, t);
         if (!t.text.trim()) return '<p class=evlAiMuted>The model returned an empty answer.</p>';
         return '<div class="evlAiA evlAiMd">' + t.html + '</div>';
     };
+
+    // ---- message actions: copy, edit, delete (questions); copy, retry (answers) ----------------------------------------
+    // Edit, delete and retry change the chat on the server (aiChatEdit); the next question then runs in a new model
+    // session with a recap of what is left. A question that never got an answer is only removed here.
+    obj.aiCanEdit = function (c, t) {
+        return !!(c && t && pluginHandler.eventlog.aiIsChat(c) && t.status == 'done' && (c.chatId || (c.convId && !c.closed)));
+    };
+    obj.aiLaterN = function (c, t) {
+        var i = c.turns.indexOf(t);
+        return i < 0 ? 0 : c.turns.length - 1 - i;
+    };
+    // the message's index in the chat as the server holds it: the answered turns before it (saved chats: + the offset
+    // of the messages loaded)
+    obj.aiMsgIndex = function (c, t) {
+        var n = 0;
+        for (var i = 0; i < c.turns.length && c.turns[i] !== t; i++) { if (c.turns[i].status == 'done') n++; }
+        return (c.chatId ? (c.msgOff || 0) : 0) + n;
+    };
+    obj.aiActBtn = function (cid, n, kind, icon, label, dis) {
+        var wait = 'Wait until the answer is finished or stop it';
+        return '<button type=button class="evlBtn mini evlAiIco" data-act=' + kind + ' aria-label="' + label + '" title="' + (dis ? wait : label) + '"' + (dis ? ' disabled' : '') +
+               ' onclick="return pluginHandler.eventlog.aiMsgAct(\'' + cid + '\',' + n + ',\'' + kind + '\',this)">' + pluginHandler.eventlog.aiIcon(icon) + '</button>';
+    };
+    obj.aiQActsHtml = function (c, t, busy) {
+        var ph = pluginHandler.eventlog;
+        if (!ph.aiIsChat(c)) return '';
+        var can = ph.aiCanEdit(c, t), local = (t.status != 'done' && t.status != 'running' && c.status != 'preview');
+        var h = '<div class="evlAiMsgActs q" role=group aria-label="Question actions">' + ph.aiActBtn(c.id, t.n, 'copyq', 'copy', t.diag ? 'Copy' : 'Copy the question', false);
+        if (can && !t.diag) h += ph.aiActBtn(c.id, t.n, 'edit', 'edit', 'Edit the question', busy);
+        if (can || local) h += ph.aiActBtn(c.id, t.n, 'del', 'del', t.diag ? 'Delete the diagnosis' : 'Delete the question and its answer', busy && !local);
+        return h + '</div>';
+    };
+    obj.aiAActsHtml = function (c, t, busy) {
+        var ph = pluginHandler.eventlog;
+        var h = '<div class="evlAiMsgActs a" role=group aria-label="Answer actions">' + ph.aiActBtn(c.id, t.n, 'copya', 'copy', t.diag ? 'Copy the diagnosis' : 'Copy the answer', false);
+        if (ph.aiCanEdit(c, t)) h += ph.aiActBtn(c.id, t.n, 'retry', 'retry', t.diag ? 'Run the diagnosis again' : 'Retry: ask the same question again', busy);
+        return h + '</div>';
+    };
+    obj.aiEditHtml = function (c, t) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, later = ph.aiLaterN(c, t), v = (a.actDraft != null) ? a.actDraft : t.q;
+        return '<div class="evlAiQW edit" role=group aria-label="Edit the question"><label class=evlSr for=evlAiEd>Edit the question</label>' +
+               '<textarea id=evlAiEd class=evlAiEdIn rows=3 maxlength=4000 oninput="pluginHandler.eventlog.elState().ai.actDraft=String(this.value).slice(0,4000)" onkeydown="return pluginHandler.eventlog.aiEditKey(event,\'' + c.id + '\',' + t.n + ')">' + ph.aiEsc(v) + '</textarea>' +
+               '<p class=evlAiEdNote>' + (later ? 'Sending replaces its answer and removes the ' + (later == 1 ? 'later message' : later + ' later messages') + '.' : 'Sending replaces its answer.') + '</p>' +
+               '<div class=evlAiActs><button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiMsgCancel()">Cancel</button>' +
+               '<button class="evlBtn mini on" onclick="return pluginHandler.eventlog.aiEditSave(\'' + c.id + '\',' + t.n + ')">Save &amp; send</button></div></div>';
+    };
+    obj.aiConfirmHtml = function (c, t, kind) {
+        var ph = pluginHandler.eventlog, later = ph.aiLaterN(c, t), txt, yes;
+        var n = later == 1 ? 'the later message' : 'the ' + later + ' later messages';
+        if (kind == 'del') {
+            txt = t.diag ? (later ? 'Delete this diagnosis and its ' + (later == 1 ? 'follow-up question' : later + ' follow-up questions') + '? The whole chat goes.' : 'Delete this diagnosis?')
+                         : (t.status == 'done' ? 'Delete this question and its answer?' : 'Delete this question?');
+            yes = 'Delete';
+        } else {
+            txt = t.diag ? 'Run the diagnosis again and remove ' + (later == 1 ? 'the follow-up question' : 'the ' + later + ' follow-up questions') + '?' : 'Retry and remove ' + n + '?';
+            yes = 'Retry';
+        }
+        return '<div class=evlAiConfirm role=group aria-label="' + ph.aiEsc(txt) + '"><span>' + ph.aiEsc(txt) + '</span>' +
+               '<button class="evlBtn mini' + (kind == 'del' ? ' evlAiDanger' : ' on') + '" data-yes=1 onclick="return pluginHandler.eventlog.aiMsgYes(\'' + c.id + '\',' + t.n + ')">' + yes + '</button>' +
+               '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiMsgCancel()">Keep</button></div>';
+    };
+    obj.aiTurnOf = function (c, n) {
+        var t = null;
+        if (c) c.turns.forEach(function (x) { if (x.n == n) t = x; });
+        return t;
+    };
+    obj.aiMsgAct = function (cid, n, kind, btn) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[cid], t = ph.aiTurnOf(c, n);
+        if (!c || !t) return false;
+        if (kind == 'copyq') return ph.aiCopyText(String(t.q), btn);
+        if (kind == 'copya') return ph.aiCopyText(ph.aiTurnText(c, t), btn);
+        if (ph.aiBusy(c) || (a.pend && a.pend.cid == cid)) { if (!(kind == 'del' && t.status != 'done' && t.status != 'running')) { ph.aiSay('Wait until the answer is finished or stop it.'); return false; } }
+        if (kind == 'retry' && !ph.aiLaterN(c, t)) return ph.aiMsgRun(c, t, 'retry');
+        a.act = { cid: cid, n: n, kind: kind }; a.actDraft = (kind == 'edit') ? String(t.q) : null;
+        ph.aiRenderPanel();
+        if (kind == 'edit') { var ta = Q('evlAiEd'); if (ta) { ta.focus(); try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) { } } }
+        else { var y = document.querySelector('#evlAiLog .evlAiConfirm [data-yes]'); if (y) y.focus(); }
+        return false;
+    };
+    obj.aiMsgCancel = function () {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, x = a.act;
+        a.act = null; a.actDraft = null;
+        ph.aiRenderPanel();
+        if (x) { var b = document.querySelector('#evlAiLog .evlAiTurn[data-n="' + x.n + '"] [data-act=' + (x.kind == 'retry' ? 'retry' : x.kind) + ']'); if (b) b.focus(); }
+        return false;
+    };
+    obj.aiMsgYes = function (cid, n) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, x = a.act, c = a.convs[cid], t = ph.aiTurnOf(c, n);
+        if (!x || x.cid != cid || x.n != n || !t) return false;
+        a.act = null;
+        return ph.aiMsgRun(c, t, x.kind == 'del' ? 'delete' : 'retry');
+    };
+    obj.aiEditSave = function (cid, n) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[cid], t = ph.aiTurnOf(c, n), ta = Q('evlAiEd');
+        var text = String((ta ? ta.value : a.actDraft) || '').trim().slice(0, 4000);
+        if (!c || !t) return false;
+        if (!text) { if (ta) ta.focus(); return false; }
+        a.act = null; a.actDraft = null;
+        return ph.aiMsgRun(c, t, 'edit', text);
+    };
+    obj.aiEditKey = function (ev, cid, n) {
+        var ph = pluginHandler.eventlog;
+        if (ev.key == 'Escape') { ev.preventDefault(); if (ev.stopPropagation) ev.stopPropagation(); ph.aiMsgCancel(); return false; }
+        if (ev.key == 'Enter' && !ev.shiftKey && !ev.isComposing) { ev.preventDefault(); ph.aiEditSave(cid, n); return false; }
+        return true;
+    };
+    // remove turn t (op 'delete') or t and every later one ('truncate') here; the conversation goes when nothing is left
+    obj.aiTurnsCut = function (c, t, op) {
+        var a = pluginHandler.eventlog.elState().ai, i = c.turns.indexOf(t);
+        if (i < 0) return;
+        if (op == 'delete') c.turns.splice(i, 1); else c.turns.length = i;
+        c.turns.forEach(function (x) { x.sHtml = null; });
+        if (!c.turns.length) { pluginHandler.eventlog.aiCloseConv(c); delete a.convs[c.id]; if (a.chat == c.id) a.chat = null; }
+        if (a.focus == c.id) a.sel = null;
+        a.citeVer++;
+    };
+    // kind: 'delete' | 'retry' | 'edit' (text: the edited question)
+    obj.aiMsgRun = function (c, t, kind, text) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        var op = (kind == 'delete') ? 'delete' : 'truncate';
+        var then = (kind == 'edit') ? { text: text } : (kind == 'retry' ? (t.diag ? { diag: c.win || '24h' } : { text: String(t.q) }) : null);
+        if (!ph.aiCanEdit(c, t)) {   // a question the server never answered: only here
+            if (ph.aiBusy(c) && t === c.turns[c.turns.length - 1]) return false;
+            ph.aiTurnsCut(c, t, op);
+            if (then && then.text) ph.aiAsk(then.text);
+            else { ph.aiRenderPanel(); ph.elUpdate(); ph.aiSay('Question deleted.'); }
+            return false;
+        }
+        var m = { index: ph.aiMsgIndex(c, t), op: op, q: String(t.q).trim() };
+        if (c.chatId) m.chatId = c.chatId; else m.convId = c.convId;
+        a.pend = { cid: c.id, n: t.n, op: op, then: then, chatId: c.chatId || null, convId: c.chatId ? null : c.convId };
+        ph.aiSendMsg('aiChatEdit', m);
+        ph.aiRenderPanel();
+        return false;
+    };
+    obj.onAiChatEdited = function (server, m) {
+        var ph = pluginHandler.eventlog;
+        if (!ph.aiOk(m)) return;
+        var a = ph.st.ai, p = a.pend;
+        if (!p || (m.chatId || null) !== p.chatId || (!p.chatId && m.convId !== p.convId)) return;
+        a.pend = null;
+        var c = a.convs[p.cid], t = ph.aiTurnOf(c, p.n), sv = a.saved;
+        if (m.ok !== true) {
+            var code = String(m.code || '');
+            ph.aiSay(code == 'busy' ? 'Wait until the answer is finished or stop it.' : (code == 'changed' ? 'This chat changed meanwhile; it is shown again as it is saved.' : (code == 'notFound' ? 'This chat is no longer available.' : 'The chat could not be changed.')));
+            if (code == 'changed' && p.chatId && c && !ph.aiBusy(c)) { a.opening = p.chatId; a.openAuto = false; ph.aiHistoryGet('chat', p.chatId); }
+            ph.aiRenderPanel();
+            return;
+        }
+        if (m.deleted === true) {
+            if (sv && p.chatId) sv.chats = sv.chats.filter(function (x) { return x.id !== p.chatId; });
+            if (c) { ph.aiCloseConv(c); delete a.convs[c.id]; if (a.chat == c.id) a.chat = null; if (a.focus == c.id) { a.focus = null; a.sel = null; } }
+            a.citeVer++;
+        } else if (m.chat && typeof m.chat == 'object' && p.chatId) {
+            // the saved chat as the server holds it now: the next question continues it in a new session with a recap
+            var nc = ph.aiConvFromSaved('chat', Object.assign({}, m.chat, { id: p.chatId }));
+            if (c) { ph.aiCloseConv(c); delete a.convs[c.id]; }
+            if (nc && a.chat == p.cid) { a.chat = nc.id; if (a.focus == p.cid) a.focus = nc.id; }
+            if (sv) sv.chats.forEach(function (x) { if (x.id === p.chatId) x.count = nc ? nc.turns.length : x.count; });
+            a.citeVer++;
+        } else if (c && t) ph.aiTurnsCut(c, t, p.op);   // a conversation that is not saved: the server reset its session
+        if (p.then && p.then.diag) { ph.aiDiagnose(p.then.diag); return; }
+        if (p.then && p.then.text) { ph.aiAsk(p.then.text); ph.elUpdate(); return; }
+        ph.aiRenderPanel();
+        ph.elUpdate();
+        ph.aiSay('Deleted.');
+        var f = Q('evlAiIn'); if (f) f.focus();
+    };
+
     obj.aiRenderComposer = function () {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[a.chat], busy = ph.aiBusy(c), ft = Q('evlAiFt');
         if (!ft) return;
@@ -1753,13 +2023,17 @@ module.exports.attach = function (obj) {
                 '<div class=evlAiRow><textarea id=evlAiIn rows=2 maxlength=4000 onkeydown="return pluginHandler.eventlog.aiKey(event)" oninput="pluginHandler.eventlog.aiDraft(this)"></textarea>' +
                 '<button id=evlAiSend class="evlBtn on" onclick="return pluginHandler.eventlog.aiSubmit()">Send</button></div>' +
                 '<div class=evlAiDisc><span>Answers can be wrong. Check the cited events before acting.' + ((function (r) { var q = (typeof r == 'number') ? r : ((r != null && typeof r.questions == 'number') ? r.questions : null); return (q != null && q <= 10) ? ' ' + q + ' questions left today.' : ''; })(acc.remaining)) + '</span>' +
-                '<button id=evlAiHReset class=evlLinkBtn hidden title="Fit the panel to the window again" onclick="return pluginHandler.eventlog.aiHGripReset()">Reset height</button></div>';
+                '<button id=evlAiHReset class=evlLinkBtn hidden title="Fit the panel to the window again" onclick="return pluginHandler.eventlog.aiHGripReset()">Reset panel height</button></div>';
             Q('evlAiIn').value = a.draft || '';
         }
-        var b = Q('evlAiSend');
-        b.textContent = busy ? 'Stop' : 'Send';
-        b.classList.toggle('on', !busy);
-        b.setAttribute('aria-label', busy ? 'Stop the answer' : 'Send the question');
+        var b = Q('evlAiSend'), lt = (c && busy) ? c.turns[c.turns.length - 1] : null, want = lt ? 'stop:' + lt.t0 : 'send';
+        if (b._evlState !== want) {   // not rebuilt while it stays the same: the arc keeps turning smoothly
+            b._evlState = want;
+            b.innerHTML = lt ? ph.aiStopInner(lt) : 'Send';
+            b.classList.toggle('on', !lt);
+            b.classList.toggle('evlAiStop', !!lt);
+            b.setAttribute('aria-label', lt ? 'Stop' : 'Send the question');
+        }
         ph.aiRenderPeek();
     };
     obj.aiKey = function (ev) {
@@ -1781,17 +2055,20 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai;
         if (!ph.elCan('assistant')) return false;
         text = String(text).slice(0, 4000);
+        var c = a.convs[a.chat];
+        if (c && a.pend && a.pend.cid == c.id) { ph.aiSay('Wait until the chat is updated.'); return false; }
         a.draft = '';
         var ta = Q('evlAiIn'); if (ta) ta.value = '';
-        var c = a.convs[a.chat];
-        a.hist = false; a.delAsk = null;
-        if (c && c.mode == 'ask' && c.convId && !c.closed && !ph.aiBusy(c) && c.status != 'cancelled') {
+        a.hist = false; a.delAsk = null; a.diagSetup = false; a.act = null;
+        // a diagnosis chat takes questions once its diagnosis is there
+        var chat = ph.aiIsChat(c) && !(c.mode == 'diagnose' && c.turns[0].status != 'done');
+        if (chat && c.convId && !c.closed && !ph.aiBusy(c) && c.status != 'cancelled') {
             var last = c.turns[c.turns.length - 1];
             c.turns.push(ph.aiNewTurn((last ? last.n : 0) + 1, text));
             c.status = 'running'; c.last = Date.now();
             ph.aiSendMsg('aiSend', { convId: c.convId, text: text });
             ph.aiDogStart();
-        } else if (c && c.mode == 'ask' && c.chatId && !ph.aiBusy(c) && c.turns.length) {
+        } else if (chat && c.chatId && !ph.aiBusy(c) && c.turns.length) {
             // a saved chat (or one whose server conversation ended): a new conversation continues it with a recap
             var lt = c.turns[c.turns.length - 1];
             c.turns.forEach(function (x) { x.srvN = -1; });
@@ -1803,7 +2080,7 @@ module.exports.attach = function (obj) {
             ph.aiSendMsg('aiStart', { reqId: c.reqId, mode: 'ask', input: { text: text }, chatId: c.chatId });
             ph.aiDogStart();
         } else {
-            if (c && c.mode == 'ask') ph.aiCloseConv(c);
+            if (ph.aiIsChat(c)) ph.aiCloseConv(c);
             c = ph.aiNewConv('ask', { text: text }, text);
             a.chat = c.id;
             ph.aiStartConv(c);
@@ -1820,21 +2097,21 @@ module.exports.attach = function (obj) {
     };
     obj.aiNewChat = function () {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[a.chat];
-        if (c && c.mode == 'ask') { if (ph.aiBusy(c)) ph.aiStop(c.id); ph.aiCloseConv(c); delete a.convs[c.id]; }
+        if (ph.aiIsChat(c)) { if (ph.aiBusy(c)) ph.aiStop(c.id); ph.aiCloseConv(c); delete a.convs[c.id]; }
         if (c && a.focus == c.id) { a.focus = null; a.sel = null; }
-        a.chat = null; a.peek = null; a.citeVer++; a.hist = false; a.delAsk = null; a.opening = null;
+        a.chat = null; a.peek = null; a.citeVer++; a.hist = false; a.delAsk = null; a.opening = null; a.diagSetup = false; a.act = null; a.pend = null;
         a.open = true;
         ph.aiRenderPanel();
-        if (ph.elState().view != 'diag') ph.elUpdate();
+        ph.elUpdate();
         var ta = Q('evlAiIn'); if (ta) ta.focus();
         return false;
     };
     // Put a question into the composer without sending it (the user reviews and sends).
     obj.aiPrefill = function (text) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[a.chat];
-        if (c && c.mode != 'ask') a.chat = null;
+        if (c && !ph.aiIsChat(c)) a.chat = null;
         a.draft = String(text).slice(0, 4000);
-        a.open = true;
+        a.open = true; a.diagSetup = false; a.hist = false;
         ph.aiRenderPanel();
         var ta = Q('evlAiIn');
         if (ta) { ta.value = a.draft; ta.focus(); try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) { } }
@@ -1917,7 +2194,7 @@ module.exports.attach = function (obj) {
         }
         var t = c.turns[0], key = c.id + '-' + t.n, busy = ph.aiBusy(c);
         var h = '<section class=evlAiEx aria-label="Explanation" onclick="event.stopPropagation()">' + ph.aiStripHtml(c, t) + '<div class=evlAiExHd><h3>Explain this event</h3>';
-        if (busy) h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiStop(\'' + c.id + '\')">Stop</button>';
+        if (busy) h += '<button class="evlBtn mini evlAiStop" aria-label="Stop" onclick="return pluginHandler.eventlog.aiStop(\'' + c.id + '\')">' + ph.aiStopInner(t) + '</button>';
         else if (t.status == 'done') h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiExplainContinue(\'' + c.id + '\')">Continue in Ask</button>' +
                                         '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiCopyTurn(\'' + c.id + '\',1,this)">Copy</button>' +
                                         (c.restored ? '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiRetry(\'' + c.id + '\')">Explain again</button>' : '');
@@ -1931,7 +2208,7 @@ module.exports.attach = function (obj) {
             h += ph.aiExplainBody(c, t);
             var ref = t.steps.some(function (s) { return s && s.tool == 'lookup_event_id' && s.items > 0; });
             h += '<div class=evlAiExFt><span class=evlAiMuted>' + (ref ? 'Based on the built-in reference for ' + esc(c.evLabel || 'this event') + ' and this device’s events.' : 'Based on this device’s events.') +
-                 ' Answers can be wrong.</span>' + ph.aiVoteHtml(c, t, 'explain') + '</div>';
+                 ' Answers can be wrong.</span></div>';
         } else {
             h += ph.aiStepsHtml(c, t);
             if (t.status == 'running') h += '<div class="evlAiA evlAiMd" data-t=' + key + ' data-p=a>' + (t.live || ph.aiWaitHtml(c, t)) + '</div>' + ph.aiLiveHtml(c, t);
@@ -1952,7 +2229,7 @@ module.exports.attach = function (obj) {
         return ph.aiPrefill('About the ' + (c.evLabel || 'event') + ' event' + when + ': ');
     };
 
-    // ---- Diagnosis ------------------------------------------------------------------------------------------------
+    // ---- Diagnosis: a chat whose first answer is the diagnosis -------------------------------------------------------
     obj.aiWinText = function (w) {
         return ({ '24h': 'the last 24 hours', '7d': 'the last 7 days', restart: 'around the last restart' })[w] || 'the last 24 hours';
     };
@@ -1960,67 +2237,61 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai;
         if (['24h', '7d', 'restart'].indexOf(v) < 0) return false;
         a.diagWin = v; putstore('evl_diag_win', v);
-        ph.aiRenderDiag();
-        return false;
+        return true;
     };
-    obj.aiDiagnose = function () {
+    // Toolbar "Diagnose" and the entry in the empty panel: the panel in full width with the window choice; nothing
+    // runs before the Diagnose button (each run uses the model).
+    obj.aiDiagOpen = function () {
         var ph = pluginHandler.eventlog, a = ph.elState().ai;
         if (!ph.elCan('assistant')) return false;
-        var old = a.convs[a.diag];
-        if (old && ph.aiBusy(old)) return false;
-        if (old) ph.aiCloseConv(old);
-        var w = a.diagWin;
-        var c = ph.aiNewConv('diagnose', { window: w }, 'Diagnose ' + ph.aiWinText(w));
-        c.win = w;
-        a.diag = c.id;
-        ph.aiStartConv(c);
-        ph.aiRenderDiag();
-        ph.aiSay('Diagnosis started.');
+        a.open = true; a.full = true; a.diagSetup = true; a.hist = false; a.act = null;
+        ph.aiRenderPanel();
+        ph.elFitHeight();
+        setTimeout(function () { try { var r = document.querySelector('#evlAiLog .evlDgWin input:checked') || document.querySelector('#evlAiLog .evlDgWin input'); if (r) r.focus(); } catch (e) { } }, 0);
         return false;
     };
-    obj.aiDiagTbHtml = function () {
-        var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[a.diag], esc = ph.aiEsc;
-        if (ph.aiBusy(c)) return '<button class=evlBtn onclick="return pluginHandler.eventlog.aiStop(\'' + c.id + '\')">Stop</button><span class=evlLbl>' + (c.status == 'preview' ? 'Waiting for your review' : 'Diagnosing…') + '</span>';
-        var done = (c && c.status == 'done');
-        var h = '<button class="evlBtn on" onclick="return pluginHandler.eventlog.aiDiagnose()">' + (done ? 'Diagnose again' : 'Diagnose') + '</button>';
-        if (done) { var line = ph.aiInfoLine(c, true).replace(/ \([^)]*\)$/, ''); h += '<span class=evlLbl>Generated ' + esc(ph.aiWhen(c.doneAt)) + (line ? ' by ' + esc(line) : '') + '</span>'; }
-        return h;
+    obj.aiDiagCancel = function () {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        a.diagSetup = false;
+        ph.aiRenderPanel();
+        var f = Q('evlAiIn'); if (f) f.focus();
+        return false;
     };
-    obj.aiRenderDiag = function () {
-        var ph = pluginHandler.eventlog, st = ph.elState(), el = Q('evlDiag');
-        var tb = Q('evlDiagTb'); if (tb) tb.innerHTML = ph.aiDiagTbHtml();
-        if (!el) return;
-        var on = (st.view == 'diag');
-        el.hidden = !on;
-        var b = Q('evlBody'); if (b) b.hidden = on;
-        var ch = Q('evlChips'); if (ch) ch.hidden = on;
-        if (!on) { if (el.innerHTML) el.innerHTML = ''; return; }
-        el.innerHTML = ph.aiDiagHtml();
-        ph.aiRenderPeek();
-        ph.aiApplySel();
-        ph.aiLayout();
+    obj.aiDiagSetupHtml = function () {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, acc = ph.elAccess || {}, esc = ph.aiEsc, line = ph.aiInfoLine(null), cur = a.convs[a.chat];
+        var opts = [['24h', 'Last 24 hours', 'Everything stored since yesterday at this time.'], ['7d', 'Last 7 days', 'For problems that come and go.'],
+                    ['restart', 'Around the last restart', 'From 6 hours before the most recent restart to 1 hour after it.']];
+        var h = '<section class=evlDgSetup aria-labelledby=evlDgSetupT><h3 id=evlDgSetupT>Diagnose this device</h3>' +
+                '<p>The assistant reads the events stored for this device in the window you choose, sorts out what happened and suggests likely causes, with the events it relied on. The result opens as a chat: ask follow-up questions about it.</p>' +
+                '<fieldset class=evlDgWin><legend>Time window</legend>';
+        opts.forEach(function (o) {
+            h += '<label class=evlDgOpt><input type=radio name=evlDgWin value=' + o[0] + (a.diagWin == o[0] ? ' checked' : '') + ' onchange="return pluginHandler.eventlog.aiSetWin(this.value)">' +
+                 '<span><b>' + o[1] + '</b><small>' + o[2] + '</small></span></label>';
+        });
+        h += '</fieldset>';
+        if (acc.assistantReason == 'noEndpoint') h += '<p>' + esc(ph.aiErrText('noEndpoint')) + '</p>';
+        var busy = ph.aiBusy(cur);
+        h += '<div class=evlAiActs><button id=evlDgRun class="evlBtn on evlDgRun" onclick="return pluginHandler.eventlog.aiDiagnose()"' + (busy ? ' disabled title="Wait until the answer is finished or stop it"' : '') + '>' + ph.aiIcon('diag') + 'Diagnose</button>' +
+             '<button class=evlBtn onclick="return pluginHandler.eventlog.aiDiagCancel()">Cancel</button>' + (line ? '<span class=evlAiMuted>' + esc(line) + '</span>' : '') + '</div>';
+        if (cur && ph.aiIsChat(cur) && !cur.chatId) h += '<p class=evlAiMuted>The current chat is not saved and closes when the diagnosis starts.</p>';
+        return h + '</section>';
     };
-    obj.aiDiagHtml = function () {
-        var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[a.diag], esc = ph.aiEsc, acc = ph.elAccess || {};
-        if (!c && a.diagLoading) return '<div class=evlDiagEmpty aria-busy=true><h2>Diagnose this device</h2><p class=evlAiMuted>Loading the last diagnosis…</p></div>';
-        if (!c) {
-            var line = ph.aiInfoLine(null);
-            return '<div class=evlDiagEmpty><h2>Diagnose this device</h2>' +
-                   '<p>The assistant reads the events stored for this device in the chosen window, sorts out what happened and suggests likely causes, with the events it relied on. It runs only when you start it, because each run uses the model.</p>' +
-                   (acc.assistantReason == 'noEndpoint' ? '<p>' + esc(ph.aiErrText('noEndpoint')) + '</p>' : (line ? '<p class=evlAiMuted>' + esc(line) + '</p>' : '')) +
-                   '<p><button class="evlBtn on" onclick="return pluginHandler.eventlog.aiDiagnose()">Diagnose ' + esc(ph.aiWinText(a.diagWin)) + '</button></p></div>';
-        }
-        var t = c.turns[0], key = c.id + '-' + t.n;
-        if (t.status == 'done') return ph.aiDiagDone(c, t);
-        var h = '<div class=evlDiagRun>' + ph.aiStripHtml(c, t) + '<h2>' + (t.status == 'error' ? 'The diagnosis did not finish' : 'Diagnosing ' + esc(ph.aiWinText(c.win))) + '</h2>' + ph.aiNotesHtml(c);
-        if (c.status == 'preview') h += '<div class=evlAiNoteBox>Waiting for you to review what is sent. <button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiDlgOpen(\'' + c.id + '\')">Review</button></div>';
-        h += ph.aiStepsHtml(c, t);
-        if (t.status == 'running') h += '<div class="evlAiA evlAiMd evlDiagStream" data-t=' + key + ' data-p=a>' + (t.live || ph.aiWaitHtml(c, t)) + '</div>' + ph.aiLiveHtml(c, t);
-        else if (t.live) h += '<div class="evlAiA evlAiMd evlDiagStream">' + t.live + '</div>';
-        if (t.status == 'error') h += ph.aiErrHtml(c, t);
-        if (t.status == 'stopped') h += '<p class=evlAiMuted>Stopped. Start it again with Diagnose.</p>';
-        if (t.status == 'cancelled') h += '<p class=evlAiMuted>Cancelled. Nothing was sent to the model.</p>';
-        return h + '</div>';
+    // Start a diagnosis chat for window w (default: the one chosen).
+    obj.aiDiagnose = function (w) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        if (!ph.elCan('assistant')) return false;
+        if (['24h', '7d', 'restart'].indexOf(w) < 0) w = a.diagWin;
+        var cur = a.convs[a.chat];
+        if (cur && ph.aiBusy(cur)) { ph.aiSay('Wait until the answer is finished, or stop it first.'); return false; }
+        if (ph.aiIsChat(cur)) { ph.aiCloseConv(cur); delete a.convs[cur.id]; }
+        var c = ph.aiNewConv('diagnose', { window: w }, 'Diagnose ' + ph.aiWinText(w));
+        c.win = w;
+        a.chat = c.id; a.diagSetup = false; a.hist = false; a.act = null; a.open = true; a.focus = c.id; a.sel = null; a.peek = null; a.citeVer++;
+        ph.aiStartConv(c);
+        ph.aiRenderPanel();
+        ph.elUpdate();
+        ph.aiSay('Diagnosis started.');
+        return false;
     };
     obj.aiStatusWord = function (s) {
         return ({ likely: 'Likely', possible: 'Possible', ruled_out: 'Ruled out' })[s] || 'Possible';
@@ -2032,25 +2303,29 @@ module.exports.attach = function (obj) {
         if (asText) return out.join(', ');
         return out.map(function (r) { return ph.aiChipHtml(c.id, r); }).join(' ');
     };
-    obj.aiDiagDone = function (c, t) {
+    // The diagnosis as the first answer of its chat: summary, timeline, possible causes, next steps, evidence, what is
+    // not explained, the steps. Laid out for the chat's width (one column when docked, two in full width).
+    obj.aiDiagCard = function (c, t) {
         var ph = pluginHandler.eventlog, st = ph.elState(), a = st.ai, s = t.structured, esc = ph.aiEsc;
         if (t.sHtml) return t.sHtml;
         var md = function (x) { return ph.aiMd(x, c); };
         var title = (c.win == 'restart') ? 'What happened around the last restart' : 'What happened in ' + ph.aiWinText(c.win);
-        var h = '<div class=evlDiagHead><h2>' + title + '</h2>';
+        var when = t.at || c.doneAt, line = ph.aiInfoLine(c, true).replace(/ \([^)]*\)$/, '');
+        var h = '<article class=evlDgCard aria-label="Diagnosis"><header class=evlDgHd><h3>' + esc(title) + '</h3>' +
+                '<p class=evlDgMeta>' + (when ? 'Generated ' + esc(ph.aiWhen(when)) : 'Generated now') + (line ? ' by ' + esc(line) : '') + '</p>';
         if (!s) {
-            h += '<div class="evlAiMd evlDiagSum">' + (t.text.trim() ? t.html : '<p>The model returned an empty answer.</p>') + '</div></div>';
-            h += '<div class=evlDiagFoot>' + ph.aiStepsHtml(c, t) + '</div>';
+            h += '<div class="evlAiMd evlDgSum">' + (t.text.trim() ? t.html : '<p>The model returned an empty answer.</p>') + '</div></header>';
+            h += '<footer class=evlDgFoot>' + ph.aiStepsHtml(c, t) + '</footer></article>';
             t.sHtml = h;
             return h;
         }
-        if (s.summary) h += '<div class="evlAiMd evlDiagSum">' + md(s.summary) + '</div>';
-        h += '</div>';
+        if (s.summary) h += '<div class="evlAiMd evlDgSum">' + md(s.summary) + '</div>';
+        h += '</header><div class=evlDgBody>';
         if (Array.isArray(s.lanes) && s.lanes.some(function (l) { return l && Array.isArray(l.markers) && l.markers.length; })) h += ph.aiTimelineHtml(c, s);
-        h += '<div class=evlDiagCols><section class=evlDiagMain aria-label="Possible causes and next steps">';
+        h += '<div class=evlDgCols><section class=evlDgMain aria-label="Possible causes and next steps">';
         var hyps = Array.isArray(s.hypotheses) ? s.hypotheses : [];
         if (hyps.length) {
-            h += '<h3>Possible causes</h3>';
+            h += '<h4>Possible causes</h4>';
             hyps.forEach(function (hy) {
                 var hid = (typeof hy.id == 'string' && /^[\w-]{1,20}$/.test(hy.id)) ? hy.id : null;
                 var fb = hid ? a.hyp[c.id + ':' + hid] : null, status = (['likely', 'possible', 'ruled_out'].indexOf(hy.status) >= 0) ? hy.status : 'possible';
@@ -2078,7 +2353,7 @@ module.exports.attach = function (obj) {
         }
         var steps = Array.isArray(s.nextSteps) ? s.nextSteps : [], anyCmd = false;
         if (steps.length) {
-            h += '<h3>Next steps</h3><ol class=evlNext>';
+            h += '<h4>Next steps</h4><ol class=evlNext>';
             steps.forEach(function (n, i) {
                 h += '<li>' + (n.text ? '<div class=evlAiMd>' + md(n.text) + '</div>' : '');
                 if (n.command && n.command.text) {
@@ -2093,12 +2368,11 @@ module.exports.attach = function (obj) {
             if (anyCmd) h += '<p class=evlAiCmdNote>Commands are suggestions. Run them yourself in Terminal; the assistant can only read.</p>';
         }
         if (t.text && t.text.trim()) h += '<details class=evlAiMore><summary>More from the assistant</summary><div class=evlAiMd>' + t.html + '</div></details>';
-        h += '</section><aside class=evlDiagSide aria-label="Evidence">';
+        h += '</section><aside class=evlDgSide aria-label="Evidence">';
         var evid = (Array.isArray(s.evidence) ? s.evidence : []).filter(function (e) { return e && ph.aiCite(c, e.cite); });
         if (!evid.length) { var all = ph.aiCitesOf(c); evid = Object.keys(all).sort(function (x, y) { return Number(x.slice(1)) - Number(y.slice(1)); }).map(function (r) { return { cite: r, note: '' }; }); }
-        h += '<div id=evlDiagPeekSlot></div>';
         if (evid.length) {
-            h += '<h3>Evidence</h3>';
+            h += '<h4>Evidence</h4>';
             evid.forEach(function (e) {
                 var ev = ph.aiCite(c, e.cite).ev;
                 h += '<div class=evlEv>' + ph.aiChipHtml(c.id, e.cite) + '<div><div><span class=evlMono>' + esc(ph.elFmtTime(ev.time)) + '</span> ' + esc(ev.source) + ' ' + esc(ev.id) + '</div>' +
@@ -2110,11 +2384,11 @@ module.exports.attach = function (obj) {
         }
         var unx = Array.isArray(s.unexplained) ? s.unexplained : [];
         if (unx.length) {
-            h += '<h3>Not explained</h3><ul class=evlUnx>';
+            h += '<h4>Not explained</h4><ul class=evlUnx>';
             unx.forEach(function (u) { var ch = ph.aiChips(c, u.cites); h += '<li><div class=evlAiMd>' + md(u.text || '') + '</div>' + (ch ? '<div class=evlHypEv>' + ch + '</div>' : '') + '</li>'; });
             h += '</ul>';
         }
-        h += '<div class=evlDiagFoot>' + ph.aiStepsHtml(c, t) + '</div></aside></div>';
+        h += '</aside></div></div><footer class=evlDgFoot>' + ph.aiStepsHtml(c, t) + '</footer></article>';
         t.sHtml = h;
         return h;
     };
@@ -2180,7 +2454,7 @@ module.exports.attach = function (obj) {
         if (!c || !c.turns[0].structured) return false;
         (c.turns[0].structured.hypotheses || []).forEach(function (x) { if (x.id === hid) hy = x; });
         if (!hy) return false;
-        return ph.aiPrefill('The diagnosis of ' + ph.aiWinText(c.win) + ' says: "' + ph.aiStripMarks(hy.title) + '". How sure is that, and how can I confirm it?');
+        return ph.aiPrefill('The diagnosis says: "' + ph.aiStripMarks(hy.title) + '". How sure is that, and how can I confirm it?');
     };
     obj.aiCopyCmd = function (cid, idx, btn) {
         var ph = pluginHandler.eventlog, c = ph.elState().ai.convs[cid];
@@ -2324,7 +2598,15 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlMain.evlStack { flex-direction:column; align-items:stretch; }
 #pluginEventLog .evlMain.evlStack .evlCol { align-self:stretch; }
 #pluginEventLog .evlMain.evlStack .evlAi { flex:none; align-self:stretch; max-width:none; margin:10px 0 0; }
-#pluginEventLog .evlMain.evlDiagOn:not(.evlStack) .evlAi { position:sticky; top:0; }
+/* full width: the panel takes the table's place (the toolbar stays); the conversation keeps a readable measure */
+#pluginEventLog .evlMain.evlAiFull:not(.evlStack) .evlCol, #pluginEventLog .evlMain.evlAiOnly .evlCol { display:none; }
+#pluginEventLog .evlMain.evlAiFull:not(.evlStack) .evlAi, #pluginEventLog .evlMain.evlAiOnly .evlAi { flex:1 1 auto; max-width:none; margin-left:0; }
+#pluginEventLog .evlMain.evlAiOnly.evlStack .evlAi { margin-top:0; }
+#pluginEventLog .evlAiFull .evlAiSplit, #pluginEventLog .evlAiOnly .evlAiSplit, #pluginEventLog .evlStack .evlAiFullBtn { display:none; }
+#pluginEventLog .evlAiFull .evlAiLog, #pluginEventLog .evlAiFull .evlAiFt { padding-left:max(13px, calc((100% - 1040px) / 2)); padding-right:max(13px, calc((100% - 1040px) / 2)); }
+#pluginEventLog .evlAiIco { display:inline-flex; align-items:center; justify-content:center; padding:3px 5px; min-width:26px; }
+#pluginEventLog .evlAiIco svg { margin:0; }
+#pluginEventLog .evlAiFullBtn[aria-pressed=true] { color:var(--evl-acc); }
 #pluginEventLog .evlAiHGrip { flex:none; position:relative; height:9px; cursor:row-resize; touch-action:none; user-select:none; background:var(--evl-bg); border-top:1px solid var(--evl-line2); border-radius:0 0 3px 3px; outline:none; }
 #pluginEventLog .evlAiHGrip::after { content:""; position:absolute; left:50%; top:3px; width:34px; height:1px; margin-left:-17px; background:var(--evl-line); box-shadow:0 2px 0 var(--evl-line); }
 #pluginEventLog .evlAiHGrip:hover, #pluginEventLog .evlAiHGrip.active, #pluginEventLog .evlAiHGrip:focus-visible { background:var(--evl-sel); }
@@ -2342,7 +2624,43 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlAiX { display:inline-flex; align-items:center; padding:3px 6px; }
 #pluginEventLog .evlAiLog { position:relative; flex:1 1 auto; overflow-y:auto; padding:12px 13px; display:flex; flex-direction:column; gap:14px; min-height:0; overscroll-behavior:contain; }
 #pluginEventLog .evlAiTurn { display:flex; flex-direction:column; gap:9px; }
-#pluginEventLog .evlAiQ { align-self:flex-end; max-width:88%; background:var(--evl-bubble); border:1px solid var(--evl-bubble-line); border-radius:6px; padding:7px 10px; line-height:1.45; overflow-wrap:anywhere; }
+#pluginEventLog .evlAiQW { align-self:flex-end; max-width:88%; display:flex; flex-direction:column; align-items:flex-end; gap:2px; min-width:0; }
+#pluginEventLog .evlAiQ { background:var(--evl-bubble); border:1px solid var(--evl-bubble-line); border-radius:6px; padding:7px 10px; line-height:1.45; overflow-wrap:anywhere; max-width:100%; box-sizing:border-box; }
+#pluginEventLog .evlAiQ.dg { display:inline-flex; align-items:center; gap:6px; font-weight:bold; }
+#pluginEventLog .evlAiQ.dg svg { color:var(--evl-acc); flex:none; }
+/* message actions: on hover or focus; always on touch screens, stacked and narrow */
+#pluginEventLog .evlAiMsgActs { display:flex; gap:2px; opacity:0; transition:opacity .12s ease-out; }
+#pluginEventLog .evlAiMsgActs .evlBtn.evlAiIco { border-color:transparent; background:transparent; color:var(--evl-muted); min-height:24px; }
+#pluginEventLog .evlAiMsgActs .evlBtn.evlAiIco:hover:not([disabled]) { border-color:var(--evl-line); color:var(--evl-ink); background:var(--evl-hover); }
+#pluginEventLog .evlAiMsgActs .evlBtn.evlAiIco[data-act=del]:hover:not([disabled]) { color:var(--evl-err); border-color:var(--evl-err); }
+#pluginEventLog .evlAiMsgActs .evlBtn.ok { color:var(--evl-ok); opacity:1; }
+#pluginEventLog .evlAiTurn:hover .evlAiMsgActs, #pluginEventLog .evlAiMsgActs:focus-within, #pluginEventLog .evlAiTurn.last .evlAiMsgActs.a, #pluginEventLog .evlAiTurn.act .evlAiMsgActs { opacity:1; }
+#pluginEventLog .evlStack .evlAiMsgActs { opacity:1; }
+@media (hover: none), (max-width: 700px) { #pluginEventLog .evlAiMsgActs { opacity:1; } }
+#pluginEventLog .evlAiMsgActs.a { margin-top:-4px; }
+#pluginEventLog .evlAiQW.edit { align-self:stretch; max-width:none; align-items:stretch; gap:6px; }
+#pluginEventLog .evlAiEdIn { font:inherit; border:1px solid var(--evl-acc); background:var(--evl-input); color:var(--evl-ink); border-radius:6px; padding:7px 10px; line-height:1.45; resize:vertical; min-height:60px; max-height:260px; box-sizing:border-box; width:100%; }
+#pluginEventLog .evlAiEdIn:focus-visible { outline:2px solid var(--evl-acc); outline-offset:1px; }
+#pluginEventLog .evlAiEdNote { margin:0; font-size:12px; color:var(--evl-muted); }
+#pluginEventLog .evlAiQW.edit .evlAiActs { justify-content:flex-end; }
+#pluginEventLog .evlAiConfirm { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; padding:7px 10px; background:var(--evl-alt); border-left:3px solid var(--evl-err); border-radius:0 3px 3px 0; font-size:12px; }
+#pluginEventLog .evlAiConfirm span { flex:1 1 220px; line-height:1.4; }
+/* Stop with progress: a turning arc around the stop mark and the elapsed time */
+#pluginEventLog .evlBtn.evlAiStop { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+#pluginEventLog .evlAiRow .evlBtn.evlAiStop { min-width:0; padding-left:9px; padding-right:10px; }
+#pluginEventLog .evlAiRing { flex:none; margin:0 !important; vertical-align:middle; }
+#pluginEventLog .evlAiRing circle { fill:none; stroke-width:1.8; }
+#pluginEventLog .evlAiRing .trk { stroke:var(--evl-line); }
+#pluginEventLog .evlAiRing .arc { stroke:var(--evl-acc); stroke-linecap:round; stroke-dasharray:11 30; transform-origin:8px 8px; animation:evlSpin 1.1s linear infinite; }
+#pluginEventLog .evlAiRing rect { fill:currentColor; }
+#pluginEventLog .evlAiStopT { padding-left:6px; border-left:1px solid var(--evl-line); font-size:11px; color:var(--evl-muted); }
+@keyframes evlSpin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { #pluginEventLog .evlAiRing .arc { animation:none; stroke-dasharray:22 19; } }
+/* the steps list: notes the model wrote between its lookups */
+#pluginEventLog .evlAiStep.note { grid-template-columns:16px minmax(0,1fr); color:var(--evl-muted); }
+#pluginEventLog .evlAiStep.note .t { line-height:1.4; overflow-wrap:anywhere; }
+#pluginEventLog .evlAiStep.note b { font-weight:normal; color:var(--evl-ink); }
+#pluginEventLog .evlAiStep.note .n::before { content:""; display:block; width:5px; height:5px; margin:5px auto 0; border-radius:50%; border:1px solid var(--evl-muted); }
 #pluginEventLog .evlAiSeg { align-self:stretch; text-align:center; font-size:11px; color:var(--evl-muted); border-top:1px dashed var(--evl-line); padding-top:4px; }
 #pluginEventLog .evlAiIntro p { margin:0 0 10px; line-height:1.5; color:var(--evl-ink); }
 #pluginEventLog .evlAiFollow { display:flex; flex-wrap:wrap; gap:6px; }
@@ -2357,7 +2675,7 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlAiWait { color:var(--evl-muted); margin:0; }
 #pluginEventLog .evlAiNoteBox { border:1px solid var(--evl-line2); background:var(--evl-alt); border-radius:3px; padding:7px 10px; font-size:12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
 #pluginEventLog .evlAiHistBtn { display:inline-flex; align-items:center; gap:2px; }
-#pluginEventLog .evlAiHistBtn.on { background:var(--evl-sel); border-color:var(--evl-acc); }
+#pluginEventLog .evlBtn.evlAiHistBtn.on, #pluginEventLog .evlBtn.evlAiHistBtn.on:hover { background:var(--evl-sel); border-color:var(--evl-acc); color:var(--evl-ink); filter:none; }
 #pluginEventLog .evlAiN { display:inline-block; min-width:16px; margin-left:5px; padding:0 4px; border-radius:8px; background:var(--evl-acc); color:var(--evl-acc-ink); font-size:10px; line-height:15px; text-align:center; font-variant-numeric:tabular-nums; font-weight:bold; }
 #pluginEventLog .evlAiHist { display:flex; flex-direction:column; }
 #pluginEventLog .evlAiHistDay { margin:12px 0 2px; font-size:12px; font-weight:bold; color:var(--evl-muted); }
@@ -2371,6 +2689,12 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlAiHistOpen .t { line-height:1.35; overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow-wrap:anywhere; }
 #pluginEventLog .evlAiHistRow.cur .evlAiHistOpen .t { font-weight:bold; }
 #pluginEventLog .evlAiHistOpen .m { font-size:11px; color:var(--evl-muted); font-variant-numeric:tabular-nums; }
+#pluginEventLog .evlAiDgMark { display:inline-block; margin-right:6px; padding:0 5px; border:1px solid var(--evl-acc); border-radius:3px; color:var(--evl-acc); font-size:10.5px; line-height:15px; font-weight:bold; white-space:nowrap; }
+#pluginEventLog .evlAiDgEntry { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; margin-top:12px; padding-top:12px; border-top:1px dashed var(--evl-line); }
+#pluginEventLog .evlAiDgEntry span { flex:1 1 200px; font-size:12px; color:var(--evl-muted); line-height:1.4; }
+#pluginEventLog .evlAiDgGo, #pluginEventLog .evlAiDgBtn, #pluginEventLog .evlDgRun { display:inline-flex; align-items:center; gap:6px; }
+#pluginEventLog .evlAiDgGo svg, #pluginEventLog .evlAiDgBtn svg, #pluginEventLog .evlDgRun svg { margin:0; }
+#pluginEventLog .evlAiDgGo svg { color:var(--evl-acc); }
 #pluginEventLog .evlAiHistDel { align-self:center; flex:none; margin:0 4px; padding:4px 5px; display:inline-flex; color:var(--evl-muted); }
 #pluginEventLog .evlAiHistDel:hover:not([disabled]), #pluginEventLog .evlAiHistDel:focus-visible { color:var(--evl-err); border-color:var(--evl-err); }
 #pluginEventLog .evlAiHistDel svg { margin:0; }
@@ -2411,7 +2735,6 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlAiStripSlot .evlAiStrip { position:absolute; left:0; right:0; top:-1px; }
 #pluginEventLog .evlAiEx { position:relative; }
 #pluginEventLog .evlAiEx > .evlAiStrip { position:absolute; top:-1px; left:-1px; right:-1px; border-radius:3px 3px 0 0; }
-#pluginEventLog .evlDiagRun > .evlAiStrip { margin:6px 0 -6px; border-radius:1px; }
 #pluginEventLog .evlAiStrip.on { background:var(--evl-line2); }
 #pluginEventLog .evlAiStrip i { position:absolute; top:0; bottom:0; left:0; width:100%; background:linear-gradient(90deg, transparent 0, transparent 20%, var(--evl-acc) 34%, var(--evl-acc) 54%, transparent 64%, transparent 100%); transform:translateX(-64%); animation:evlSweep 1.8s cubic-bezier(.5,0,.3,1) infinite; }
 @keyframes evlSweep { from { transform:translateX(-64%); } to { transform:translateX(82%); } }
@@ -2499,18 +2822,31 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlDBodyEx .evlKv { margin-top:10px; }
 #pluginEventLog .evlDBodyEx .evlAiEx { margin-top:0; }
 #pluginEventLog tr.evlExpand td > .evlAiEx { max-width:min(110ch, calc(100cqw - 44px)); }
-/* Diagnosis */
-#pluginEventLog .evlDiag { padding:2px 2px 14px; }
-#pluginEventLog .evlDiag h2 { font-size:18px; font-weight:bold; margin:8px 0 4px; color:var(--evl-ink); }
-#pluginEventLog .evlDiag h3 { font-size:15px; font-weight:bold; margin:18px 0 6px; color:var(--evl-ink); }
-#pluginEventLog .evlDiagTb { display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; }
-#pluginEventLog .evlDiagEmpty { max-width:76ch; padding:8px 0; }
-#pluginEventLog .evlDiagEmpty p, #pluginEventLog .evlDiagRun > p { line-height:1.5; margin:0 0 10px; }
-#pluginEventLog .evlDiagRun { max-width:90ch; display:flex; flex-direction:column; gap:10px; }
-#pluginEventLog .evlDiagSum { font-size:14px; max-width:76ch; margin:0 0 12px; }
+/* Diagnosis: the window choice, and the diagnosis as the first answer of its chat */
+#pluginEventLog .evlDgSetup { border:1px solid var(--evl-line2); border-radius:4px; background:var(--evl-bg); padding:12px 14px 14px; max-width:76ch; }
+#pluginEventLog .evlDgSetup h3 { margin:0 0 6px; font-size:15px; font-weight:bold; color:var(--evl-ink); }
+#pluginEventLog .evlDgSetup p { margin:0 0 10px; line-height:1.5; }
+#pluginEventLog .evlDgWin { border:0; margin:0 0 12px; padding:0; min-width:0; display:grid; grid-template-columns:repeat(auto-fit, minmax(170px, 1fr)); gap:6px; }
+#pluginEventLog .evlDgWin legend { padding:0; margin:0 0 6px; font-size:12px; font-weight:bold; color:var(--evl-muted); border:0; width:auto; }
+#pluginEventLog .evlDgOpt { display:flex; gap:8px; align-items:flex-start; margin:0; padding:8px 10px; border:1px solid var(--evl-line); border-radius:4px; cursor:pointer; font-weight:normal; background:var(--evl-input); }
+#pluginEventLog .evlDgOpt:hover { border-color:var(--evl-acc); }
+#pluginEventLog .evlDgOpt:has(input:checked) { border-color:var(--evl-acc); background:var(--evl-sel); box-shadow:inset 0 0 0 1px var(--evl-acc); }
+#pluginEventLog .evlDgOpt input { margin:2px 0 0; accent-color:var(--evl-acc); flex:none; }
+#pluginEventLog .evlDgOpt input:focus-visible { outline:2px solid var(--evl-acc); outline-offset:2px; }
+#pluginEventLog .evlDgOpt span { display:flex; flex-direction:column; gap:2px; line-height:1.35; }
+#pluginEventLog .evlDgOpt small { font-size:11px; color:var(--evl-muted); }
+#pluginEventLog .evlDgCard { container:evldg / inline-size; border:1px solid var(--evl-line2); border-radius:4px; background:var(--evl-bg); min-width:0; }
+#pluginEventLog .evlDgHd { padding:11px 13px 4px; }
+#pluginEventLog .evlDgHd h3 { margin:0; font-size:15px; font-weight:bold; line-height:1.35; color:var(--evl-ink); }
+#pluginEventLog .evlDgMeta { margin:2px 0 8px; font-size:11px; color:var(--evl-muted); }
+#pluginEventLog .evlDgSum { font-size:13.5px; max-width:76ch; margin:0 0 8px; }
+#pluginEventLog .evlDgBody { padding:0 13px 4px; }
+#pluginEventLog .evlDgBody h4 { font-size:13px; font-weight:bold; margin:16px 0 4px; color:var(--evl-ink); }
+#pluginEventLog .evlDgFoot { padding:8px 13px 11px; border-top:1px solid var(--evl-line2); background:var(--evl-panel); border-radius:0 0 4px 4px; }
+#pluginEventLog .evlDgCard .evlAiCmdNote { margin-top:0; }
 #pluginEventLog .evlTl { overflow-x:auto; border:1px solid var(--evl-line2); border-radius:4px; padding:6px 12px 2px; }
-#pluginEventLog .evlTlIn { min-width:640px; }
-#pluginEventLog .evlLane { display:grid; grid-template-columns:180px minmax(0,1fr); align-items:center; min-height:30px; border-bottom:1px solid var(--evl-line2); font-size:12px; }
+#pluginEventLog .evlTlIn { min-width:0; }
+#pluginEventLog .evlLane { display:grid; grid-template-columns:150px minmax(0,1fr); align-items:center; min-height:30px; border-bottom:1px solid var(--evl-line2); font-size:12px; }
 #pluginEventLog .evlLane:last-child { border-bottom:0; }
 #pluginEventLog .evlLane.evlAxis { min-height:18px; border-bottom:0; }
 #pluginEventLog .evlLane .lbl { padding-right:10px; overflow-wrap:anywhere; line-height:1.3; }
@@ -2535,10 +2871,10 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlMk .tip mark.evlPs { background:transparent; color:inherit; text-decoration:underline dotted; }
 #pluginEventLog .evlMk:hover .tip { display:block; }
 #pluginEventLog .evlMk:hover { filter:brightness(1.15); }
-#pluginEventLog .evlDiagCols { display:flex; flex-wrap:wrap; gap:0 28px; }
-#pluginEventLog .evlDiagMain { flex:999 1 520px; min-width:0; }
-#pluginEventLog .evlDiagSide { flex:1 1 300px; min-width:0; }
-#pluginEventLog .evlHyp { display:grid; grid-template-columns:110px minmax(0,1fr); gap:6px 18px; padding:12px 0; border-bottom:1px solid var(--evl-line2); }
+#pluginEventLog .evlDgCols { display:flex; flex-wrap:wrap; gap:0 28px; }
+#pluginEventLog .evlDgMain { flex:999 1 480px; min-width:0; }
+#pluginEventLog .evlDgSide { flex:1 1 260px; min-width:0; }
+#pluginEventLog .evlHyp { display:grid; grid-template-columns:100px minmax(0,1fr); gap:6px 16px; padding:10px 0; border-bottom:1px solid var(--evl-line2); }
 #pluginEventLog .evlHypSt .st { font-weight:bold; font-size:13px; }
 #pluginEventLog .evlHypSt .st.likely { color:var(--evl-crit); }
 #pluginEventLog .evlHypSt .st.possible { color:var(--evl-warn); }
@@ -2555,10 +2891,14 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlEv { display:grid; grid-template-columns:40px minmax(0,1fr); gap:2px 8px; padding:7px 0; border-bottom:1px solid var(--evl-line2); font-size:12px; align-items:start; }
 #pluginEventLog .evlEv .evlCite { justify-self:start; }
 #pluginEventLog .evlEv .m { color:var(--evl-muted); line-height:1.4; overflow-wrap:anywhere; }
-#pluginEventLog .evlDiagFoot { margin-top:18px; }
-@media (max-width: 640px) {
-  #pluginEventLog .evlHyp { grid-template-columns:1fr; }
-  #pluginEventLog .evlLane { grid-template-columns:120px minmax(0,1fr); }
+/* the chat's width, not the window's: docked (about 400 px) the timeline puts each lane's label above its track */
+@container evldg (max-width: 560px) {
+  #pluginEventLog .evlLane { grid-template-columns:minmax(0,1fr); align-items:stretch; }
+  #pluginEventLog .evlLane .lbl { padding:5px 0 0; font-size:11px; color:var(--evl-muted); }
+  #pluginEventLog .evlLane.evlAxis > span:first-child { display:none; }
+  #pluginEventLog .evlTl { padding:4px 10px 2px; }
+  #pluginEventLog .evlHyp { grid-template-columns:minmax(0,1fr); gap:4px; }
+  #pluginEventLog .evlHypSt { display:flex; gap:8px; align-items:baseline; }
 }
 @media (max-width: 1000px) { #pluginEventLog .evlDBody.evlDBodyEx { grid-template-columns:minmax(0,1fr); } }
 /* data preview dialog: appended to <body>, so it carries its own tokens */
@@ -2614,23 +2954,26 @@ body.night #evlAiDlg {
     // ---- exports --------------------------------------------------------------------------------------------------
     var NAMES = [
         'aiEsc', 'aiStripMarks', 'aiPlain', 'aiTint', 'aiNetWord', 'aiCounts', 'aiTimeShort', 'aiWhen', 'aiBusy', 'aiReqId', 'aiSendMsg', 'aiSay', 'aiCopyText',
-        'aiNewState', 'aiStashSave', 'aiAbortAll', 'aiNewTurn', 'aiNewConv', 'aiPrune', 'aiStartConv', 'aiCloseConv', 'aiOk', 'aiFind', 'aiTurn', 'aiCitesOf', 'aiCite',
+        'aiNewState', 'aiStashSave', 'aiAbortAll', 'aiNewTurn', 'aiIsChat', 'aiToolSteps', 'aiNewConv', 'aiPrune', 'aiStartConv', 'aiCloseConv', 'aiOk', 'aiFind', 'aiTurn', 'aiCitesOf', 'aiCite',
         'aiDogStart', 'aiDog',
-        'onAiStarted', 'onAiPreview', 'onAiStep', 'onAiThinking', 'onAiDelta', 'onAiDone', 'onAiError',
+        'onAiStarted', 'onAiPreview', 'onAiStep', 'onAiNote', 'onAiThinking', 'onAiDelta', 'onAiDone', 'onAiError',
         'aiCitesIn', 'aiHistoryInit', 'aiHistoryGet', 'onAiHistory', 'aiConvFromSaved', 'onAiHistoryItem', 'onAiHistoryDeleted', 'aiHistoryTouch',
-        'aiHistoryToggle', 'aiHistoryHtml', 'aiSavedNote', 'aiHistoryOpen', 'aiHistoryDel', 'aiHistoryDelYes', 'aiHistoryDelNo',
+        'aiHistoryToggle', 'aiHistoryHtml', 'aiWinShort', 'aiDiagTitle', 'aiSavedNote', 'aiHistoryOpen', 'aiHistoryDel', 'aiHistoryDelYes', 'aiHistoryDelNo',
         'aiRefresh', 'aiSchedule', 'aiFlush', 'aiVisible',
         'aiMdInit', 'aiMd', 'aiChipHtml', 'aiMdFallback', 'aiMdPost', 'aiCopyCode',
-        'aiUnavailText', 'aiErrText', 'aiErrHtml', 'aiArgsShort', 'aiStepResult', 'aiUsageText', 'aiStepsHtml', 'aiStepsClick', 'aiWaitHtml', 'aiInfoLine', 'aiNotesHtml', 'aiVoteHtml',
-        'aiToolWords', 'aiThinkCount', 'aiPhase', 'aiElapsed', 'aiLiveHtml', 'aiStripHtml', 'aiCaret', 'aiAnnounce', 'aiTickStart', 'aiTick', 'aiTimersStop', 'aiBtnSync',
+        'aiUnavailText', 'aiErrText', 'aiErrHtml', 'aiArgsShort', 'aiStepResult', 'aiUsageText', 'aiStepsHtml', 'aiStepsClick', 'aiWaitHtml', 'aiInfoLine', 'aiNotesHtml',
+        'aiToolWords', 'aiThinkCount', 'aiPhase', 'aiElapsed', 'aiLiveHtml', 'aiStripHtml', 'aiStopInner', 'aiCaret', 'aiAnnounce', 'aiTickStart', 'aiTick', 'aiTimersStop', 'aiBtnSync',
         'aiTurnText', 'aiCopyTurn', 'aiVote', 'aiRetry', 'aiStop',
         'aiCiteMap', 'aiRecId', 'aiRowCites', 'aiGutterW', 'aiGutterTd', 'aiApplySel', 'aiGutter', 'aiGutterMore',
         'aiOccShow', 'aiOccOf', 'aiOccBarHtml', 'aiOccClear', 'aiOccTimesHtml', 'aiGotoCite', 'aiReveal', 'aiAfterLoad', 'aiFlashRow', 'aiNoticeHtml', 'aiNoteClose', 'aiShowAnyway',
         'aiOpenCited', 'aiPeekHtml', 'aiRenderPeek', 'aiPeekClose',
-        'aiLayout', 'aiUserH', 'aiSetUserH', 'aiFitH', 'aiFitPanel', 'aiApplyH', 'aiHGripDown', 'aiHGripKey', 'aiHGripReset', 'aiSplitDown', 'aiSplitKey', 'aiSplitReset', 'aiToggle', 'aiClosePanel', 'aiRenderPanel', 'aiHeadHtml', 'aiStarters', 'aiIntroHtml', 'aiStarter', 'aiLogHtml',
-        'aiTurnHtml', 'aiDoneBody', 'aiRenderComposer', 'aiKey', 'aiDraft', 'aiSubmit', 'aiAsk', 'aiFollow', 'aiNewChat', 'aiPrefill',
+        'aiLayout', 'aiOnly', 'aiFullToggle', 'aiPanelKey', 'aiUserH', 'aiSetUserH', 'aiFitH', 'aiFitPanel', 'aiApplyH', 'aiHGripDown', 'aiHGripKey', 'aiHGripReset', 'aiSplitDown', 'aiSplitKey', 'aiSplitReset', 'aiToggle', 'aiClosePanel', 'aiIcon', 'aiRenderPanel', 'aiHeadHtml', 'aiStarters', 'aiIntroHtml', 'aiStarter', 'aiLogHtml',
+        'aiTurnHtml', 'aiDoneBody',
+        'aiCanEdit', 'aiLaterN', 'aiMsgIndex', 'aiActBtn', 'aiQActsHtml', 'aiAActsHtml', 'aiEditHtml', 'aiConfirmHtml', 'aiTurnOf', 'aiMsgAct', 'aiMsgCancel', 'aiMsgYes',
+        'aiEditSave', 'aiEditKey', 'aiTurnsCut', 'aiMsgRun', 'onAiChatEdited',
+        'aiRenderComposer', 'aiKey', 'aiDraft', 'aiSubmit', 'aiAsk', 'aiFollow', 'aiNewChat', 'aiPrefill',
         'aiExplainConv', 'aiExplainBtn', 'aiExplainSaved', 'aiExplain', 'aiVerdict', 'aiExplainBody', 'aiExplainMeta', 'aiExplainHtml', 'aiExplainContinue',
-        'aiWinText', 'aiSetWin', 'aiDiagnose', 'aiDiagTbHtml', 'aiRenderDiag', 'aiDiagHtml', 'aiStatusWord', 'aiChips', 'aiDiagDone', 'aiTlRange', 'aiLaneClusters', 'aiTimelineHtml',
+        'aiWinText', 'aiSetWin', 'aiDiagOpen', 'aiDiagCancel', 'aiDiagSetupHtml', 'aiDiagnose', 'aiStatusWord', 'aiChips', 'aiDiagCard', 'aiTlRange', 'aiLaneClusters', 'aiTimelineHtml',
         'aiAskAbout', 'aiCopyCmd',
         'aiDlgOpen', 'aiDlgHtml', 'aiDlgPvHtml', 'aiDlgTab', 'aiDlgCat', 'aiDlgRem', 'aiDlgKey', 'aiDlgCancel', 'aiDlgSend', 'aiDlgClose',
         'aiInjectStyles'

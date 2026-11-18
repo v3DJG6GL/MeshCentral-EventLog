@@ -463,6 +463,38 @@ function validateDiagnosis(json, opts) {
     return out;
 }
 
+// A diagnosis as plain text for a later recap (the model continues the chat with follow-up questions in a new
+// session): the summary, the possible causes with status, confidence and evidence refs, the next steps and what was
+// not explained. d: a validated diagnosis (validateDiagnosis) or the same shape as saved; strings are used as they
+// are (the caller pseudonymizes them for the session). At most maxChars (default 3000) characters.
+function diagnosisText(d, maxChars) {
+    if (!isObj(d)) return '';
+    const max = Number(maxChars) > 0 ? Number(maxChars) : 3000;
+    const str = (v) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : '');
+    const refs = (l) => (Array.isArray(l) ? l.filter((r) => typeof r === 'string' && /^E\d{1,6}$/.test(r)) : []);
+    const lines = [];
+    if (str(d.summary)) lines.push('Diagnosis summary: ' + str(d.summary));
+    const hyps = Array.isArray(d.hypotheses) ? d.hypotheses.filter(isObj) : [];
+    if (hyps.length) {
+        lines.push('Possible causes:');
+        hyps.forEach((h) => {
+            const conf = typeof h.confidence === 'number' ? ', about ' + Math.round(h.confidence * 100) + '%' : '';
+            const ev = refs(h.evidence), ag = refs(h.against);
+            lines.push('- ' + str(h.title) + ' (' + (STATUS[String(h.status || '')] || 'possible').replace('_', ' ') + conf + ')' + (str(h.why) ? ': ' + str(h.why) : '') +
+                (ev.length ? ' Evidence: ' + ev.join(', ') + '.' : '') + (ag.length ? ' Against: ' + ag.join(', ') + '.' : ''));
+        });
+    }
+    const steps = Array.isArray(d.nextSteps) ? d.nextSteps.filter(isObj) : [];
+    if (steps.length) {
+        lines.push('Next steps suggested:');
+        steps.forEach((x, i) => { lines.push((i + 1) + '. ' + str(x.text) + (isObj(x.command) && str(x.command.text) ? ' (command: ' + str(x.command.text) + ')' : '')); });
+    }
+    const unx = Array.isArray(d.unexplained) ? d.unexplained.filter(isObj) : [];
+    if (unx.length) lines.push('Not explained: ' + unx.map((u) => str(u.text) + (refs(u.cites).length ? ' [' + refs(u.cites).join(', ') + ']' : '')).join('; '));
+    const t = lines.join('\n');
+    return t.length > max ? t.slice(0, max) + '…' : t;
+}
+
 const VERDICTS = new Set(['usually', 'sometimes', 'rarely', 'unknown']);
 function validateExplain(json) {
     if (!isObj(json)) return null;
@@ -505,6 +537,6 @@ function parseFollowups(text) {
 }
 
 module.exports = {
-    newNonce, fence, stripFences, suspicious, system, render, fill, values, checkTemplates, parseBlock, validateDiagnosis, validateExplain, parseFollowups,
+    newNonce, fence, stripFences, suspicious, system, render, fill, values, checkTemplates, parseBlock, validateDiagnosis, validateExplain, parseFollowups, diagnosisText,
     TOOL_NAMES, FACTORY, FACTORY_HASH, PARTS, PLACEHOLDERS, MAX_TEMPLATE, MAX_EXTRA
 };

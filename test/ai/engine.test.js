@@ -212,3 +212,62 @@ test('long answers are split into onAiDelta messages of at most 16 KB', async fu
     assert.strictEqual(deltas.map(function (d) { return d.text; }).join(''), long);
     t.close();
 });
+
+test('interim text: what the model writes in rounds with tool calls becomes notes in the steps, never part of the answer', async function () {
+    let refs = [];
+    mock.script(CHAT,
+        { sse: chatSse({ text: 'I\'ll start with a broad look at the device HOST_1.', calls: [{ id: 'c1', name: 'event_facets', args: { window: { since: '24h' } } }] }) },
+        function (rec) { refs = refsIn(rec.bodyText); return { sse: chatSse({ text: 'Now let me look at the errors. <followups>["x?"]</followups>', calls: [{ id: 'c2', name: 'get_events', args: { filters: { levels: ['err'] }, limit: 3 } }] }) }; },
+        function (rec) { refs = refsIn(rec.bodyText); return { sse: chatSse({ text: 'The spooler crashes [' + refs[0] + '].\n<followups>["Why?"]</followups>' }) }; });
+    const t = F.setup({ mock: mock });
+    await t.start('ask', { text: 'What is wrong?' });
+    const done = t.last('onAiDone');
+    assert.ok(done, t.ws.sent.map(function (m) { return m.method; }).join(','));
+    assert.ok(done.text.indexOf('The spooler crashes') === 0, done.text);
+    assert.ok(done.text.indexOf('broad look') < 0 && done.text.indexOf('let me look') < 0, 'no interim text in the answer');
+    assert.deepStrictEqual(done.followups, ['Why?'], 'followups from the final round only');
+    const notes = t.of('onAiNote');
+    assert.strictEqual(notes.length, 2);
+    assert.deepStrictEqual(notes.map(function (n) { return [n.turn, n.i, n.round]; }), [[1, 0, 1], [1, 2, 2]], 'notes take their place among the steps, before the lookups of their round');
+    assert.ok(notes[0].text.indexOf(M_OPEN + 'host' + M_MID + 'PC-ALICE01' + M_CLOSE) >= 0, 'restored with markers: ' + notes[0].text);
+    assert.strictEqual(notes[1].text, 'Now let me look at the errors.', 'blocks removed from a note');
+    const steps = t.of('onAiStep').map(function (s) { return s.i; });
+    assert.deepStrictEqual(Array.from(new Set(steps)), [1, 3]);
+    // deltas carry the round, so the browser can drop a round's text when it turns out to be a note
+    const deltas = t.of('onAiDelta');
+    assert.ok(deltas.every(function (d) { return typeof d.round === 'number'; }));
+    assert.ok(deltas.filter(function (d) { return d.round === 3; }).map(function (d) { return d.text; }).join('').indexOf('The spooler crashes') === 0);
+    assert.ok(deltas.filter(function (d) { return d.round === 1; }).map(function (d) { return d.text; }).join('').indexOf('broad look') >= 0);
+    // the audit keeps the tool steps only
+    const a = t.store.audits.find(function (x) { return x.kind !== 'feedback'; });
+    assert.deepStrictEqual(a.steps.map(function (s) { return s.tool; }), ['event_facets', 'get_events']);
+    t.close();
+});
+
+test('interim text: the <diagnosis> block comes from the final round; a final round without text falls back to the last note', async function () {
+    let refs = [];
+    mock.script(CHAT,
+        { sse: chatSse({ text: 'I will look at the restarts first.', calls: [{ id: 'c1', name: 'get_events', args: { filters: { levels: ['crit', 'err'] }, limit: 5 } }] }) },
+        function (rec) {
+            refs = refsIn(rec.bodyText);
+            const d = { v: 1, summary: 'Power loss [' + refs[0] + '].', hypotheses: [{ id: 'h1', title: 'Power loss', status: 'likely', confidence: 0.7, why: 'Kernel-Power 41.', evidence: [refs[0]] }] };
+            return { sse: chatSse({ text: 'Summary.\n<diagnosis>' + JSON.stringify(d) + '</diagnosis>' }) };
+        });
+    const t = F.setup({ mock: mock });
+    await t.start('diagnose', { window: '24h' });
+    const done = t.last('onAiDone');
+    assert.ok(done && done.structured, JSON.stringify(t.ws.sent.map(function (m) { return m.method; })));
+    assert.ok(done.structured.summary.indexOf('Power loss') === 0);
+    assert.strictEqual(done.text, 'Summary.');
+    assert.strictEqual(t.of('onAiNote')[0].text, 'I will look at the restarts first.');
+    t.close();
+
+    mock.reset();
+    mock.script(CHAT,
+        { sse: chatSse({ text: 'The answer is in the events.', calls: [{ id: 'c1', name: 'event_facets', args: { window: { since: '24h' } } }] }) },
+        { sse: chatSse({ text: '' }) });
+    const u = F.setup({ mock: mock });
+    await u.start('ask', { text: 'q' });
+    assert.strictEqual(u.last('onAiDone').text, 'The answer is in the events.');
+    u.close();
+});

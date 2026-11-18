@@ -350,13 +350,21 @@ test('Ollama behind the OpenAI-compatible API: detected, no tools -> summary mod
 test('aiFeedback is audited (not counted); close() aborts running turns and refuses new ones', async function () {
     mock.script(CHAT, { sse: chatSse({ text: 'x' }), hang: true });
     const t = F.setup({ mock: mock });
-    await t.ai.handle(t.cmd('aiFeedback', { convId: 'abc', turn: 1, target: 'hyp', hid: 'h1', vote: 'down' }), t.myparent, {});
+    await t.ai.handle(t.cmd('aiFeedback', { convId: 'abc', turn: 1, target: 'hyp', hid: 'h1', vote: 'wrong' }), t.myparent, {});
     const fb = t.store.audits[0];
     assert.strictEqual(fb.kind, 'feedback');
     assert.strictEqual(fb.counted, false);
-    assert.strictEqual(fb.vote, 'down');
-    await t.ai.handle(t.cmd('aiFeedback', { target: 'evil' }), t.myparent, {});
-    assert.strictEqual(t.last('onAiError').code, 'invalid');
+    assert.deepStrictEqual([fb.target, fb.hid, fb.vote], ['hyp', 'h1', 'wrong']);
+    await t.ai.handle(t.cmd('aiFeedback', { convId: 'abc', turn: 1, target: 'hyp', hid: 'h1', vote: 'reopen' }), t.myparent, {});
+    assert.strictEqual(t.store.audits[1].vote, 'reopen');
+    // Helpful / Not helpful are gone: up/down votes and answer/explain targets are refused
+    for (const bad of [{ target: 'answer', vote: 'up' }, { target: 'explain', vote: 'down' }, { target: 'hyp', hid: 'h1', vote: 'up' }, { target: 'hyp', vote: 1 }, { target: 'evil' }]) {
+        const n = t.of('onAiError').length;
+        await t.ai.handle(t.cmd('aiFeedback', Object.assign({ convId: 'abc', turn: 1 }, bad)), t.myparent, {});
+        assert.strictEqual(t.of('onAiError').length, n + 1, JSON.stringify(bad));
+        assert.strictEqual(t.last('onAiError').code, 'invalid');
+    }
+    assert.strictEqual(t.store.audits.length, 2, 'nothing audited for a refused vote');
     const p = t.start('ask', { text: 'q' });
     await F.waitFor(t.ws, 'onAiDelta');
     t.ai.close();

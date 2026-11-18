@@ -17,7 +17,7 @@
 //   when assistant is false for a reason other than 'permission': canManage (full administrator) and, for
 //   'noEndpoint', configSetName (the device's config set; null when none was found)
 // handle(command, myparent, grandparent) -> Promise (never rejects) for pluginaction aiStart / aiConfirm / aiSend /
-//   aiFeedback / aiHistoryList / aiHistoryGet / aiHistoryDelete (device rights and the permission were checked by
+//   aiFeedback / aiHistoryList / aiHistoryGet / aiHistoryDelete / aiChatEdit (device rights and the permission were checked by
 //   eventlog.js; command._node / _rights are set) and
 //   aiStop / aiClose (authorized here by session ownership: same user and same connection).
 //   Every failure is answered with onAiError { nodeid, convId|null, reqId, code, message, retryable, phase? } (phase on
@@ -28,7 +28,18 @@
 //   aiHistoryGet {kind, id}       -> onAiHistoryItem { nodeid, kind, id, item|null }
 //   aiHistoryDelete {kind, id}    -> onAiHistoryDeleted { nodeid, kind, id, ok }
 //   aiStart {mode:'ask', chatId}  continues a saved chat in a new session with a recap (an unknown id starts a new chat);
-//   onAiStarted / onAiDone of Ask carry the chatId the turn is saved under.
+//   onAiStarted / onAiDone of Ask and Diagnose carry the chatId the turn is saved under.
+//   A diagnosis is a chat: its first answer is the diagnosis, aiSend continues it with follow-up questions (mode 'ask'
+//   from then on, the same model session).
+//   aiChatEdit {chatId|convId, index, op:'delete'|'truncate', q?} -> onAiChatEdited { nodeid, chatId|null, convId|null,
+//     ok, deleted?, chat? (the saved chat as it is now), count? (messages left in a conversation that is not saved),
+//     code? ('busy'|'notFound'|'changed'|'invalid') }: removes message index (op 'delete') or it and every later one
+//     ('truncate') of the caller's saved chat on this device, or of the caller's open conversation when results are
+//     not saved (the server keeps its messages for the conversation's lifetime). The next question runs in a new
+//     model session whose recap is built from the messages left (a saved chat: aiStart with chatId; a conversation:
+//     aiSend, the recap goes along); the events they cite keep their refs. Never while a request of that chat runs.
+//   aiFeedback {convId, turn, target:'hyp', hid, vote:'wrong'|'reopen'}: a possible cause of a diagnosis marked as
+//     wrong or reopened (audited, not counted); anything else is refused.
 // onAgentData(command, agentObj) -> bool   agent 'software' replies for get_installed_software
 // close()                                   aborts every conversation (plugin reload / shutdown)
 
@@ -464,7 +475,10 @@ function create(o) {
             if (!S.chatId) return;
             p = history.saveChatTurn(Object.assign(base, { chatId: S.chatId, question: S.pendingQ || '', cont: S.contPending === true }));
             S.contPending = false;
-        } else if (S.mode === 'diagnose' && S.turn === 1) p = history.saveDiagnosis(Object.assign(base, { window: S.windowKey, range: S.window }));
+        } else if (S.mode === 'diagnose' && S.turn === 1) {
+            if (!S.chatId) return;
+            p = history.saveChatTurn(Object.assign(base, { chatId: S.chatId, question: historyMod.diagQuestion(S.windowKey), type: 'diagnosis', window: S.windowKey, range: S.window }));
+        }
         else if (S.mode === 'explain' && S.turn === 1 && S.event) p = history.saveExplain(Object.assign(base, { eventId: String(S.event._id) }));
         if (p) Promise.resolve(p).then(function (ok) { if (ok === false) log('EVENTLOG AI: the result was not saved'); }, function (e) { log('EVENTLOG AI: saving the result failed (' + ((e && e.message) || e) + ')'); });
     }
@@ -493,7 +507,7 @@ function create(o) {
             const ev = freshById.get(String(st._id)) || st;
             if (S.refs.addAs(ev, r)) { S.refs.mark(r); if (lines.length < 60) lines.push(r + ': ' + clipS(S.redactor.redact(eventLabel(ev)), 160)); }
         }
-        S.answers = msgs.map(function (m) { return { q: S.redactor.redact(stripMarks(m.q)), a: S.redactor.redact(stripMarks(m.a)) }; });
+        S.answers = msgs.map(function (m) { return { q: S.redactor.redact(stripMarks(m.q)), a: S.redactor.redact(stripMarks(savedAnswerText(m))) }; });
         const maxChars = Math.max(2000, Math.floor((S.budget && S.budget.input ? S.budget.input : 8192) * 0.25 * 3));
         const last = msgs.length ? Number(msgs[msgs.length - 1].time) : 0;
         S.recap = engine.recapText(S.answers, {
@@ -503,6 +517,39 @@ function create(o) {
         });
     }
     function clipS(s, n) { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n) + '…' : s; }
+    // the recap's text of a saved answer: a diagnosis by its structured parts too
+    function savedAnswerText(m) {
+        const d = isObj(m.structured) && (Array.isArray(m.structured.hypotheses) || typeof m.structured.summary === 'string') && !('meaning' in m.structured) ? prompts.diagnosisText(m.structured) : '';
+        return d ? d + (m.a ? '\n\n' + m.a : '') : m.a;
+    }
+    // After each answer: what a later recap of this conversation needs (as sent to the model) and the events the
+    // answer cited, kept for the conversation's lifetime (the message actions work on it when nothing is saved).
+    function logAnswer(S, done) {
+        const last = S.answers[S.answers.length - 1];
+        if (!last) return;
+        if (S.mode === 'ask') last.q = S.redactor.redact(S.pendingQ || '');
+        else if (S.mode === 'diagnose') last.q = historyMod.diagQuestion(S.windowKey);
+        if (S.mode === 'explain') return;
+        S.log.push({ q: S.mode === 'diagnose' ? historyMod.diagQuestion(S.windowKey) : (S.pendingQ || ''), diag: S.mode === 'diagnose', refs: Object.keys((done && done.citations) || {}).filter(function (r) { return /^E\d{1,6}$/.test(r); }) });
+        if (S.log.length > 200) S.log.shift();
+    }
+    // A new model session in the same conversation (an edited, deleted or retried message): the transcript starts
+    // over with a recap of the messages left; the refs they cite stay registered and count as seen.
+    function resetSession(S) {
+        const refs = [];
+        S.log.forEach(function (x) { x.refs.forEach(function (r) { if (refs.indexOf(r) < 0 && S.refs.has(r)) refs.push(r); }); });
+        S.refs.returned.clear();
+        const lines = [];
+        refs.slice(-150).forEach(function (r) { S.refs.mark(r); const ev = S.refs.get(r); if (ev && lines.length < 60) lines.push(r + ': ' + clipS(S.redactor.redact(eventLabel(ev)), 160)); });
+        S.transcript = { system: S.transcript.system, items: [] };
+        S.segment = 0;
+        const maxChars = Math.max(2000, Math.floor((S.budget && S.budget.input ? S.budget.input : 8192) * 0.25 * 3));
+        S.recap = engine.recapText(S.answers, {
+            intro: 'Recap of this chat: the technician\'s earlier questions and your answers. The chat continues now.',
+            max: 8, maxChars: maxChars,
+            refsLine: lines.length ? 'Events cited earlier (their refs are still valid):\n' + lines.join('\n') : ''
+        });
+    }
 
     // ---- running a turn ------------------------------------------------------------------------------------------------
     async function startTurn(S, text) {
@@ -525,7 +572,7 @@ function create(o) {
                 epCall: function () { return Object.assign({}, epBase, { quirks: S.ep.quirks || null, apiKey: key || null }); },
                 net: S.net, tools: S.tools, budget: S.budget, timeouts: tmo, flushMs: o.flushMs,
                 send: function (m, obj) { if (m === 'onAiDone' && S.chatId) obj.chatId = S.chatId; return sendS(S, m, obj); },
-                onDone: function (done, info) { saveResult(S, done, info); },
+                onDone: function (done, info) { try { logAnswer(S, done); } catch (e) { } saveResult(S, done, info); },
                 authorize: function () { return authorize(S); },
                 closeSession: function (reason) { sessions.close(S, reason); },
                 getEventsByIds: function (ids) { return dbEventsByIds(S.nodeid, ids); },
@@ -602,7 +649,7 @@ function create(o) {
         if (mode === 'ask' && historyOn) {
             if (command.chatId) { try { prior = await history.get(userid, nodeid, 'chat', command.chatId); } catch (e) { prior = null; } }
             chatId = prior ? prior.id : history.newChatId();
-        }
+        } else if (mode === 'diagnose' && historyOn) chatId = history.newChatId();   // a diagnosis is a chat too
 
         const enabled = redactionFor(network, settings.redact);
         const redacted = anyOn(enabled);
@@ -617,7 +664,8 @@ function create(o) {
             domain: (myparent.domain && myparent.domain.id) || node.domain || '', nodeid: nodeid, meshid: node.meshid, node: node, rights: rights,
             mode: mode, ep: epSafe, net: net, redactor: redactor, redacted: redacted, settings: settings, reqId: reqId, os: os, histOpts: histOpts,
             nonce: prompts.newNonce(), answers: [], suspicious: new Set(), event: ev, question: question,
-            historyOn: historyOn, chatId: chatId, pendingQ: question, contPending: !!prior, windowKey: windowKey, tz: tzOf(command)
+            historyOn: historyOn, chatId: chatId, pendingQ: question, contPending: !!prior, windowKey: windowKey, tz: tzOf(command),
+            kind: mode === 'diagnose' ? 'diagnosis' : (mode === 'ask' ? (prior && prior.type === 'diagnosis' ? 'diagnosis' : 'chat') : 'explain'), log: []
         });
         if (!opened.ok) return fail('busy', 'Too many conversations are open', true);
         const S = opened.S;
@@ -678,7 +726,8 @@ function create(o) {
         const S = sessions.owned(command.convId, myparent);
         if (!S) return sendError(myparent, command.nodeid, command.convId, null, 'invalid', 'This conversation is no longer open');
         if (command._node == null || command._node._id !== S.nodeid) return sendError(myparent, command.nodeid, S.convId, null, 'denied', 'Wrong device');
-        if (S.mode !== 'ask') return sendError(myparent, S.nodeid, S.convId, null, 'invalid', 'Follow-up questions are only possible in Ask');
+        // a diagnosis continues as a chat once its answer is there
+        if (S.mode !== 'ask' && !(S.mode === 'diagnose' && S.answers.length)) return sendError(myparent, S.nodeid, S.convId, null, 'invalid', 'Follow-up questions are only possible in Ask');
         if (S.previewPending) return sendError(myparent, S.nodeid, S.convId, null, 'invalid', 'Confirm the data preview first');
         if (S.busy) return sendError(myparent, S.nodeid, S.convId, null, 'busy', 'The previous answer is still running', true);
         if (S.turn >= sessions.maxTurns) return sendError(myparent, S.nodeid, S.convId, null, 'invalid', 'This conversation is at its limit of ' + sessions.maxTurns + ' questions; start a new chat');
@@ -690,6 +739,10 @@ function create(o) {
         const q = await quota(S.userid, S.settings);
         if (!q.ok) return sendError(myparent, S.nodeid, S.convId, null, 'quota', 'Your daily Assistant limit is used up');
         const tz = tzOf(command); if (tz) S.tz = tz;
+        if (S.mode === 'diagnose') {   // follow-up questions in a diagnosis chat: the Ask task, the same model session
+            S.mode = 'ask';
+            S.transcript.system = systemPrompt(S, S.toolMode === 'tools' ? S.tools.names : []);
+        }
         S.pendingQ = command.text.trim();
         let text = S.redactor.redact(S.pendingQ);
         // the first question of a continued chat failed: the recap was rolled back with it and goes along again
@@ -730,9 +783,50 @@ function create(o) {
         return send(myparent, 'onAiHistoryDeleted', { nodeid: nodeid, kind: kind, id: kind === 'diagnosis' ? null : key, ok: ok });
     }
 
+    // aiChatEdit: the message actions (edit, delete, retry) of the caller's chat on this device
+    async function aiChatEdit(command, myparent) {
+        const node = command._node, user = myparent && myparent.user;
+        if (!node || !user || typeof user._id !== 'string') return sendError(myparent, command.nodeid, null, null, 'denied', 'No access to this device');
+        let perm = false;
+        try { perm = typeof plugin.hasPerm === 'function' && plugin.hasPerm(user, 'deviceAssistant', node) === true; } catch (e) { perm = false; }
+        if (!perm || !rightsAllowDetails(command._rights)) return sendError(myparent, node._id, null, null, 'denied', REASON_MSG[perm ? 'deviceRights' : 'permission']);
+        const userid = user._id, nodeid = node._id;
+        const op = command.op === 'delete' || command.op === 'truncate' ? command.op : null;
+        const index = Number.isInteger(command.index) && command.index >= 0 && command.index <= 100000 ? command.index : null;
+        const q = typeof command.q === 'string' && command.q.length <= MAX_TEXT + 100 ? command.q : null;
+        const chatId = typeof command.chatId === 'string' && historyMod.CHAT_ID_RE.test(command.chatId) ? command.chatId : null;
+        const convId = typeof command.convId === 'string' && command.convId.length <= 64 ? command.convId : null;
+        const reply = function (o) { return send(myparent, 'onAiChatEdited', Object.assign({ nodeid: nodeid, chatId: chatId, convId: chatId ? null : convId }, o)); };
+        if (op == null || index == null || (!chatId && !convId)) return reply({ ok: false, code: 'invalid' });
+        if (chatId) {
+            if (!history || closed) return reply({ ok: false, code: 'notFound' });
+            const mine = sessions.forUser(userid).filter(function (S) { return S.chatId === chatId && S.nodeid === nodeid; });
+            if (mine.some(function (S) { return S.busy || S.previewPending; })) return reply({ ok: false, code: 'busy' });
+            let r = null;
+            try { r = await history.editChat(userid, nodeid, chatId, index, op, q); } catch (e) { r = { ok: false, code: 'invalid' }; }
+            if (!r || !r.ok) return reply({ ok: false, code: (r && r.code) || 'invalid' });
+            // the next question starts a new model session with a recap of what is left (aiStart with the chat id)
+            for (const S of sessions.forUser(userid)) if (S.chatId === chatId && S.nodeid === nodeid) sessions.close(S, 'edited');
+            return reply({ ok: true, deleted: r.deleted === true, chat: r.deleted ? null : r.item });
+        }
+        const S = sessions.owned(convId, myparent);
+        if (!S || S.nodeid !== nodeid || S.mode === 'explain') return reply({ ok: false, code: 'notFound' });
+        if (S.chatId) return reply({ ok: false, code: 'invalid' });   // a saved chat is changed by its chat id
+        if (S.busy || S.previewPending) return reply({ ok: false, code: 'busy' });
+        const L = S.log || [];
+        if (index >= L.length || L.length !== S.answers.length) return reply({ ok: false, code: 'changed' });
+        if (q != null && clipS(L[index].q, MAX_TEXT) !== clipS(q, MAX_TEXT)) return reply({ ok: false, code: 'changed' });
+        if ((L[index].diag && index === 0) || L.length === 1) { sessions.close(S, 'deleted'); return reply({ ok: true, deleted: true }); }
+        if (op === 'delete') { L.splice(index, 1); S.answers.splice(index, 1); }
+        else { L.length = index; S.answers.length = index; }
+        resetSession(S);
+        return reply({ ok: true, count: L.length });
+    }
+
     function aiFeedback(command, myparent) {
-        const target = ['answer', 'explain', 'hyp'].indexOf(command.target) >= 0 ? command.target : null;
-        const vote = typeof command.vote === 'string' ? command.vote.replace(/[^\w-]/g, '').slice(0, 20) : (typeof command.vote === 'number' ? String(Math.max(-1, Math.min(1, Math.round(command.vote)))) : null);
+        // only the possible causes of a diagnosis take feedback ("This is wrong" / "Reopen")
+        const target = command.target === 'hyp' ? 'hyp' : null;
+        const vote = command.vote === 'wrong' || command.vote === 'reopen' ? command.vote : null;
         if (!target || !vote || !command._node) return sendError(myparent, command.nodeid, command.convId || null, null, 'invalid', 'Bad feedback');
         const rec = {
             time: now(), kind: 'feedback', userid: myparent.user._id, username: myparent.user.name || null, nodeid: command._node._id,
@@ -763,6 +857,7 @@ function create(o) {
                 case 'aiStop': return aiStop(command, myparent);
                 case 'aiClose': return aiClose(command, myparent);
                 case 'aiHistoryList': case 'aiHistoryGet': case 'aiHistoryDelete': return await aiHistory(command, myparent);
+                case 'aiChatEdit': return await aiChatEdit(command, myparent);
                 default: return;
             }
         } catch (e) {

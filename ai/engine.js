@@ -21,6 +21,11 @@
 //     onDone(doneMsg, { steps })                          optional: after onAiDone was sent (saving the result)
 //     timeouts { idleMs, totalMs, connectMs }, flushMs (75), maxCallsPerRound (4), maxCalls (settings.limits.maxCalls, else 3 x maxRounds)
 //   }
+// Text the model writes in a round that also calls tools ("I'll start with a broad look at the device") is not part of
+// the answer: it is sent as onAiNote { turn, i, round, text } (i = its place in the steps, round = the model call) and
+// kept with the steps; onAiDelta { turn, seq, round, text } carries the round, so the browser can drop the text of a
+// round that turned out to be such a note. The answer (and the <diagnosis> / <explain> / <followups> blocks) is the
+// text of the last round only (the last note's text when the last round wrote nothing).
 // While the model reasons, onAiThinking { turn, round, chars } is sent (at most every 500 ms per model call; round
 // counts the model calls of the turn, chars the reasoning characters of that call so far): a count only, never the
 // reasoning text, and nothing once the call's answer text has started.
@@ -118,6 +123,7 @@ async function turn(S, userText, deps) {
     const saved = { transcript: S.transcript, len: S.transcript.items.length, segment: S.segment || 0 };
     const steps = [];
     const texts = [];
+    let finalText = null;
     let rounds = 0, calls = 0, bytesSent = 0, bytesRecv = 0, dataBytes = bytes(userText);
     let tokIn = 0, tokOut = 0, estimated = false, stopReason = 'end';
     let ignoredNone = false, fellBack = false, segRetried = false;
@@ -133,7 +139,7 @@ async function turn(S, userText, deps) {
 
     // ---- streaming to the browser ------------------------------------------------------------------------------
     const rs = R.restorer({ mark: true });
-    let outBuf = '', seq = 0, timer = null, roundHasText = false;
+    let outBuf = '', seq = 0, timer = null, roundHasText = false, deltaRound = 0;
     function flush() {
         if (timer) { clearTimeout(timer); timer = null; }
         while (outBuf) {
@@ -141,7 +147,7 @@ async function turn(S, userText, deps) {
             if (n < outBuf.length) { const c = outBuf.charCodeAt(n - 1); if (c >= 0xD800 && c <= 0xDBFF) n--; }
             const chunk = outBuf.slice(0, n);
             outBuf = outBuf.slice(n);
-            deps.send('onAiDelta', { turn: turnNo, seq: ++seq, text: chunk });
+            deps.send('onAiDelta', { turn: turnNo, seq: ++seq, round: deltaRound, text: chunk });
         }
     }
     function emit(text) {
@@ -170,8 +176,19 @@ async function turn(S, userText, deps) {
         if (abortReason) return;
         stopThinking();
         S.lastActive = now();
-        if (!roundHasText) { roundHasText = true; if (texts.some(Boolean)) emit(rs.push('\n\n')); }
+        if (!roundHasText) { roundHasText = true; flush(); deltaRound = callNo; }
         emit(rs.push(d));
+    }
+    // the text of a round that also called tools: a note in the steps, not part of the answer
+    function addNote(text) {
+        emit(rs.flush()); flush();
+        let t = prompts.parseFollowups(String(text || '')).text;
+        t = prompts.parseBlock(prompts.parseBlock(t, 'diagnosis').text, 'explain').text.trim();
+        if (!t || steps.length >= 64) return;
+        const note = clip(R.restore(t, { mark: true }), 2000);
+        const i = steps.length;
+        steps.push({ note: note });
+        deps.send('onAiNote', { turn: turnNo, i: i, round: callNo, text: note });
     }
 
     function newSegment(text) {
@@ -239,19 +256,22 @@ async function turn(S, userText, deps) {
             const rcalls = Array.isArray(res.calls) ? res.calls : [];
             S.transcript.items.push({ role: 'assistant', text: res.text || '', calls: rcalls, raw: res.raw || null });
             stopReason = res.stopReason || 'end';
-            if (!rcalls.length) return;
+            if (!rcalls.length) { finalText = res.text || ''; return; }
 
             if (stopReason === 'length' || stopReason === 'refusal') {
                 S.transcript.items.push({ role: 'tool', results: rcalls.map(function (c) { return errorResult(c, 'Not executed: the answer was cut off'); }) });
+                finalText = res.text || '';
                 return;
             }
             if (closed) {
                 // tool use is over for this turn (limits); a model that still calls tools gets one more chance to answer
                 S.transcript.items.push({ role: 'tool', results: rcalls.map(function (c) { return errorResult(c, 'Tool use has ended for this question. Answer now with the data you already have.'); }) });
-                if (ignoredNone) return;
+                if (ignoredNone) { finalText = res.text || ''; return; }
                 ignoredNone = true;
+                addNote(res.text);
                 continue;
             }
+            addNote(res.text);
             const results = [];
             for (let i = 0; i < rcalls.length; i++) {
                 const c = rcalls[i];
@@ -334,7 +354,7 @@ async function turn(S, userText, deps) {
         deps.send('onAiDone', doneMsg);
         // the caller saves the result (ai/history.js); what it does never changes this turn
         if (typeof deps.onDone === 'function') {
-            try { deps.onDone(doneMsg, { steps: steps.map(function (x) { return { tool: x.tool, args: x.args, ms: x.ms, items: x.items, status: x.status === 'running' ? 'error' : x.status }; }) }); }
+            try { deps.onDone(doneMsg, { steps: steps.map(function (x) { return x.note != null ? { note: x.note } : { tool: x.tool, args: x.args, ms: x.ms, items: x.items, status: x.status === 'running' ? 'error' : x.status }; }) }); }
             catch (e) { log('EVENTLOG AI: saving the result failed (' + ((e && e.name) || 'Error') + ')'); }
         }
     } else {
@@ -356,7 +376,7 @@ async function turn(S, userText, deps) {
             time: t0, userid: S.userid, username: S.username || null, nodeid: S.nodeid, nodename: (S.node && S.node.name) || null,
             endpointId: S.ep.id || null, endpointName: S.ep.name || null, host: hostOf(S.ep.baseUrl), model: S.ep.model || null, format: S.ep.format || null,
             mode: S.mode, convId: S.convId, turn: turnNo, toolMode: S.toolMode,
-            steps: steps.map(function (s) { return { tool: s.tool, args: s.args, ms: s.ms, items: s.items, bytes: s.bytes, status: s.status === 'running' ? 'error' : s.status }; }),
+            steps: steps.filter(function (s) { return s.note == null; }).map(function (s) { return { tool: s.tool, args: s.args, ms: s.ms, items: s.items, bytes: s.bytes, status: s.status === 'running' ? 'error' : s.status }; }),
             rounds: rounds + (result === 'answered' ? 1 : 0), bytesSent: bytesSent, bytesRecv: bytesRecv,
             redactionOn: !!S.redacted, redactionCounts: R.counts(), tokensIn: tokIn, tokensOut: tokOut, estimated: estimated,
             durationMs: durationMs, result: result, error: errCode, counted: true
@@ -369,7 +389,8 @@ async function turn(S, userText, deps) {
 
     async function finalize() {
         emit(rs.flush());
-        let body = texts.filter(Boolean).join('\n\n');
+        // the answer is the last round's text; notes written between lookups are not part of it
+        let body = (finalText != null && finalText.trim()) ? finalText : (texts.filter(function (x) { return x && x.trim(); }).pop() || '');
         let structured = null;
         const pf = prompts.parseFollowups(body);
         body = pf.text;
@@ -378,6 +399,8 @@ async function turn(S, userText, deps) {
             const pb = prompts.parseBlock(body, 'diagnosis'); body = pb.text;
             structured = prompts.validateDiagnosis(pb.json, { windowFrom: S.window && S.window.from, windowTo: S.window && S.window.to, validRefs: S.refs.returned, os: S.os });
         }
+        // what a later recap says about this answer (as sent to the model): a diagnosis also by its structured parts
+        const recapExtra = (S.mode === 'diagnose' && structured) ? prompts.diagnosisText(structured) : '';
         const invalid = new Set();
         const cv = citations.validate(body, S.refs.returned);
         cv.invalid.forEach(function (r) { invalid.add(r); });
@@ -403,7 +426,7 @@ async function turn(S, userText, deps) {
             const byId = new Map((recs || []).map(function (e) { return [String(e._id), e]; }));
             for (const r of refs) { const rec = byId.get(S.refs.idOf(r)); if (rec) cites[r] = rec; }
         }
-        S.answers.push({ q: clip(userText, 2000), a: answerRedacted });
+        S.answers.push({ q: clip(userText, 2000), a: recapExtra ? recapExtra + (answerRedacted ? '\n\n' + answerRedacted : '') : answerRedacted });
         return {
             turn: turnNo, text: text, structured: structured, citations: cites, invalidCitations: Array.from(invalid),
             suspicious: Array.from(S.suspicious).filter(function (r) { return S.refs.returned.has(r); }),

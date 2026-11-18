@@ -702,7 +702,7 @@ body.night #pluginEventLog {
             ph.aiAbortAll();
             ph.aiDlgClose(true);
             ph.st.ai.open = false;
-            if (ph.st.view == 'diag') ph.st.view = a.history ? 'history' : 'live';
+            if (ph.st.view == 'ai') ph.st.view = a.history ? 'history' : 'live';
         }
         if (Q('evlWrap')) QH('pluginEventLog', '');   // rebuild the shell with the views this user may use
         if (ph.elEnsureShell()) {
@@ -730,15 +730,16 @@ body.night #pluginEventLog {
         if (!Q('pluginEventLog')) return false;
         if (!ph.elAccessGate()) return false;
         if (!Q('evlWrap')) {
-            var st0 = ph.elState();   // open on a view this user is allowed to see (Diagnosis when the Assistant is all they have)
+            var st0 = ph.elState();   // open on a view this user is allowed to see ('ai': the Assistant is all they have)
             var canL = ph.elCan('live'), canH = ph.elCan('history'), canA = ph.elCan('assistant');
-            if (st0.view == 'live' && !canL) st0.view = canH ? 'history' : (canA ? 'diag' : 'live');
-            else if (st0.view == 'history' && !canH) st0.view = canL ? 'live' : (canA ? 'diag' : 'history');
-            else if (st0.view == 'diag' && !canA) st0.view = canL ? 'live' : 'history';
-            // #evlCol holds the table (or the Diagnosis view) and its status line; the Ask panel #evlAi docks beside it
-            // (or below it on narrow screens). Both render from state: MeshCentral rebuilds this DOM on every refresh.
+            if (st0.view == 'live' && !canL) st0.view = canH ? 'history' : (canA ? 'ai' : 'live');
+            else if (st0.view == 'history' && !canH) st0.view = canL ? 'live' : (canA ? 'ai' : 'history');
+            else if (st0.view == 'ai' && (canL || canH || !canA)) st0.view = canL ? 'live' : 'history';
+            // #evlCol holds the table and its status line; the Assistant panel #evlAi docks beside it (or below it on
+            // narrow screens, or takes its place in full width). Both render from state: MeshCentral rebuilds this DOM
+            // on every refresh.
             QH('pluginEventLog', '<div id=evlWrap><div id=evlToolbar></div><div id=evlMain class=evlMain><div id=evlCol class=evlCol>' +
-                '<div id=evlChips class=evlChips></div><div id=evlBody></div><div id=evlDiag class=evlDiag hidden></div><div id=evlStatus class=evlStatus></div></div>' +
+                '<div id=evlChips class=evlChips></div><div id=evlBody></div><div id=evlStatus class=evlStatus></div></div>' +
                 '<aside id=evlAi class=evlAi aria-label="Ask about this device" hidden></aside></div>' +
                 '<div id=evlAiSay class=evlSr role=status aria-live=polite></div></div>');
             ph.elRenderShell();
@@ -759,12 +760,9 @@ body.night #pluginEventLog {
         var seg = function(id, v, perm, label) {
             return '<button id=' + id + (ph.elCan(perm) ? '' : ' hidden') + ' class="' + (st.view == v ? 'on' : '') + '" aria-pressed=' + (st.view == v ? 'true' : 'false') + ' onclick="return pluginHandler.eventlog.elSetView(\'' + v + '\')">' + label + '</button>';
         };
-        h += '<div class=evlSeg role=group aria-label="View">' + seg('evlVLive', 'live', 'live', '&#9679; Live') + seg('evlVHist', 'history', 'history', 'History') + seg('evlVDiag', 'diag', 'assistant', 'Diagnosis') + '</div>';
-        if (st.view == 'diag') {
-            // Diagnosis: a time window and an explicit Diagnose button (it never runs by itself: it uses the model)
-            h += '<label class=evlLbl for=evlDiagWin>Window</label> <select id=evlDiagWin class=evlSel onchange="return pluginHandler.eventlog.aiSetWin(this.value)">';
-            [['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['restart', 'Around the last restart']].forEach(function(o) { h += '<option value=' + o[0] + (st.ai.diagWin == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
-            h += '</select><span id=evlDiagTb class=evlDiagTb></span>';
+        if (st.view != 'ai') h += '<div class=evlSeg role=group aria-label="View">' + seg('evlVLive', 'live', 'live', '&#9679; Live') + seg('evlVHist', 'history', 'history', 'History') + '</div>';
+        if (st.view == 'ai') {
+            // the Assistant only: no event list, so no filters
         } else {
         if (st.os == 'linux') {
             h += '<span class=evlLbl>View</span> <select id=evlLxSel class=evlSel title="Log view - in Live view this is queried from journalctl directly (Kernel = -k, Security = auth facilities, This boot = -b)" onchange="return pluginHandler.eventlog.elSelCat(this.value)">';
@@ -795,8 +793,10 @@ body.night #pluginEventLog {
              '<button class="' + (st.layout == 'viewer' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetLayout(\'viewer\')">Viewer</button></div>';
         }
         if (ph.elCan('assistant')) {
-            h += '<button id=evlAiBtn class="evlBtn evlAiBtn' + (st.ai.open ? ' on' : '') + '" aria-expanded=' + (st.ai.open ? 'true' : 'false') + ' aria-controls=evlAi onclick="return pluginHandler.eventlog.aiToggle()">' +
+            // Ask opens the chat panel; Diagnose opens it in full width with the time window (it never runs by itself)
+            if (st.view != 'ai') h += '<button id=evlAiBtn class="evlBtn evlAiBtn' + (st.ai.open ? ' on' : '') + '" aria-expanded=' + (st.ai.open ? 'true' : 'false') + ' aria-controls=evlAi onclick="return pluginHandler.eventlog.aiToggle()">' +
                  '<svg width=14 height=14 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 aria-hidden=true><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/></svg>Ask about this device<span class=evlAiDot aria-hidden=true></span></button>';
+            h += '<button id=evlAiDiagBtn class="evlBtn evlAiDgBtn' + (st.view == 'ai' ? ' evlAiBtn' : '') + '" aria-controls=evlAi title="Diagnose this device: choose a time window, then start" onclick="return pluginHandler.eventlog.aiDiagOpen()">' + ph.aiIcon('diag') + 'Diagnose</button>';
         } else {   // say why the Assistant is not offered here (nothing for users without its permission)
             var why = ph.aiUnavailText(ph.elAccess);
             if (why) h += '<span id=evlAiWhy class=evlAiWhy role=note>' + esc(why) + '</span>';
@@ -804,7 +804,6 @@ body.night #pluginEventLog {
         h += '</div>';
         QH('evlToolbar', h);
         ph.elUpdate();
-        ph.aiRenderDiag();
         ph.aiRenderPanel();
     };
 
@@ -812,10 +811,10 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         if (!Q('evlWrap')) return;
         var fr = ph.elFiltered();
-        // Diagnosis replaces the table; it is re-rendered by its own events only (live ticks must not touch it)
-        var diag = (st.view == 'diag'), b0 = Q('evlBody'), d0 = Q('evlDiag'), c0 = Q('evlChips');
-        if (b0) b0.hidden = diag; if (d0) d0.hidden = !diag; if (c0) c0.hidden = diag;
-        if (diag) { ph.elRenderStatus(); return; }
+        // the Assistant only: no event table (the panel takes the page)
+        var only = (st.view == 'ai'), b0 = Q('evlBody'), c0 = Q('evlChips'), s0 = Q('evlStatus');
+        if (b0) b0.hidden = only; if (c0) c0.hidden = only; if (s0) s0.hidden = only;
+        if (only) return;
         ph.elRenderChips(fr);
         ph.elRenderBody(fr);
         ph.elRenderStatus();
@@ -980,7 +979,6 @@ body.night #pluginEventLog {
 
     obj.elEmptyText = function() {
         var st = pluginHandler.eventlog.elState();
-        if (st.view == 'diag') return 'Choose a window and select Diagnose.';
         if (st.view == 'history') {
             if (st.hist.loading) return 'Loading history&hellip;';
             if (st.hist.recIds != null && st.hist.recIds.length) return 'None of the cited events is stored any more. Retention may have removed them. Clear the &quot;Cited by the assistant&quot; filter to see the history again.';
@@ -1022,13 +1020,7 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         if (!Q('evlStatus')) return;
         var h = '';
-        if (st.view == 'diag') {
-            h += '<span>Diagnosis of the events stored for this device</span>';
-            if (st.hist.lastCollected) h += '<span>Last collected: <span class=evlMono>' + ph.elFmtTime(st.hist.lastCollected) + '</span></span>';
-            QH('evlStatus', h);
-            ph.elFitHeight();
-            return;
-        }
+        if (st.view == 'ai') { QH('evlStatus', ''); return; }
         if (st.view == 'live') {
             if (ph.livelog == null) h += '<span class=warn>&#9679; Agent not connected &mdash; live view resumes when it reconnects</span>';
             else if (st.paused) h += '<span class=warn>&#10074;&#10074; Paused' + (st.pending.length ? ' &middot; ' + st.pending.length + ' new buffered' : '') + '</span>';
@@ -1051,7 +1043,7 @@ body.night #pluginEventLog {
         }
         var parts = [];
         if (Object.keys(st.cols[st.layout] || {}).length > 0) parts.push('column widths');
-        if (st.heights[st.layout]) parts.push('height');
+        if (st.heights[st.layout]) parts.push('table height');
         if (st.layout == 'viewer' && st.sideW) parts.push('sidebar width');
         if (parts.length) h += '<span class=evlLink title="Back to the automatic sizes" onclick="return pluginHandler.eventlog.elResetSizes()">Reset ' + (parts.length > 2 ? 'sizes' : parts.join(' &amp; ')) + '</span>';
         QH('evlStatus', h);
@@ -1061,8 +1053,8 @@ body.night #pluginEventLog {
     // ---- interactions ----
     obj.elSetView = function(v) {
         var ph = pluginHandler.eventlog, st = ph.elState();
-        if (v != 'live' && v != 'history' && v != 'diag') return false;
-        if (!ph.elCan(v == 'diag' ? 'assistant' : v)) return false;
+        if (v != 'live' && v != 'history') return false;
+        if (!ph.elCan(v)) return false;
         st.view = v;
         st.ai.notice = null; st.ai.peek = null;
         if (v == 'history' && !st.hist.loaded && !st.hist.loading) ph.elLoadHistory(true);
@@ -1507,7 +1499,7 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         if (st.view == 'live') ph.elRequestLive(null);
         else if (st.view == 'history') ph.elLoadHistory(true);
-        return false;   // Diagnosis: nothing to refresh (a new run uses the model, so it needs the Diagnose button)
+        return false;
     };
     obj.elTogglePause = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
@@ -2016,12 +2008,12 @@ body.night #pluginEventLog {
     // device actions only from a user session, after the user's rights on that device are confirmed.
     obj.AGENT_ACTIONS = { sendlog: true, gatherlogs: true };
     obj.NODE_ACTIONS = { checkAccess: true, getNodeHistory: true, collectNow: true, aiStart: true, aiConfirm: true, aiSend: true, aiFeedback: true,
-                         aiHistoryList: true, aiHistoryGet: true, aiHistoryDelete: true };
+                         aiHistoryList: true, aiHistoryGet: true, aiHistoryDelete: true, aiChatEdit: true };
     // Device actions that need a plugin permission, and device actions that need MeshCentral device rights on top.
     obj.ACTION_PERMISSION = { getNodeHistory: 'deviceHistoryTab', collectNow: 'deviceHistoryTab', aiStart: 'deviceAssistant', aiConfirm: 'deviceAssistant', aiSend: 'deviceAssistant', aiFeedback: 'deviceAssistant',
-                              aiHistoryList: 'deviceAssistant', aiHistoryGet: 'deviceAssistant', aiHistoryDelete: 'deviceAssistant' };
+                              aiHistoryList: 'deviceAssistant', aiHistoryGet: 'deviceAssistant', aiHistoryDelete: 'deviceAssistant', aiChatEdit: 'deviceAssistant' };
     obj.ACTION_RIGHTS = { aiStart: obj.MESHRIGHT_DEVICEDETAILS, aiConfirm: obj.MESHRIGHT_DEVICEDETAILS, aiSend: obj.MESHRIGHT_DEVICEDETAILS, aiFeedback: obj.MESHRIGHT_DEVICEDETAILS,
-                          aiHistoryList: obj.MESHRIGHT_DEVICEDETAILS, aiHistoryGet: obj.MESHRIGHT_DEVICEDETAILS, aiHistoryDelete: obj.MESHRIGHT_DEVICEDETAILS };
+                          aiHistoryList: obj.MESHRIGHT_DEVICEDETAILS, aiHistoryGet: obj.MESHRIGHT_DEVICEDETAILS, aiHistoryDelete: obj.MESHRIGHT_DEVICEDETAILS, aiChatEdit: obj.MESHRIGHT_DEVICEDETAILS };
     // Assistant actions authorized by conversation ownership inside ai/index.js (same user and connection), so Stop
     // and Close keep working after a permission was revoked; and the Assistant admin actions (full administrators).
     obj.AI_SESSION_ACTIONS = { aiStop: true, aiClose: true };
@@ -2209,6 +2201,7 @@ body.night #pluginEventLog {
       switch (command.pluginaction) {
         case 'aiStart': case 'aiConfirm': case 'aiSend': case 'aiFeedback':   // device rights + permission checked in serveraction
         case 'aiHistoryList': case 'aiHistoryGet': case 'aiHistoryDelete':     // the same, and scoped to this user in ai/index.js
+        case 'aiChatEdit':                                                      // the same (edit / delete / retry of a message)
         case 'aiStop': case 'aiClose': {                                      // ownership checked in ai/index.js
             obj.aiDeviceAction(command, myparent, grandparent);
             break;
