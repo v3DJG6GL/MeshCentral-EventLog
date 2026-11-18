@@ -516,3 +516,108 @@ test('device change stops running requests and restores the chat on return', { s
     assert.strictEqual(ph.st.ai.convs[ph.st.ai.chat].turns[0].q, 'q');
     if (ph._aiDog) w.clearInterval(ph._aiDog);
 });
+
+test('aiToolWords: tool calls in plain words with a short argument summary', { skip: SKIP }, function () {
+    var p = makeDom().ph;
+    assert.strictEqual(p.aiToolWords('get_device_info', {}), 'reading device details');
+    assert.strictEqual(p.aiToolWords('event_facets', { window: '24h', filters: { level: 'warning' } }), 'counting events (24h, level: warning)');
+    assert.strictEqual(p.aiToolWords('lookup_event_id', { provider: 'BugCheck', id: 1001 }), 'looking up event 1001 (BugCheck)');
+    assert.strictEqual(p.aiToolWords('get_installed_software', { x: 1 }), 'asking the agent for installed software');
+    assert.strictEqual(p.aiToolWords('get_device_events', {}), 'reading MeshCentral device events');
+    assert.strictEqual(p.aiToolWords('new_tool', {}), 'using new tool');
+    assert.strictEqual(p.aiElapsed(0), '0:00');
+    assert.strictEqual(p.aiElapsed(83500), '1:23');
+    assert.strictEqual(p.aiElapsed(3723000), '1:02:03');
+});
+
+test('running state: strip, status line phases, elapsed time, caret; everything settles on done and stop', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w); loadHistory(w);
+    var live = function () { var e = doc.querySelector('#evlAiLog .evlAiLive'); return e ? e.textContent : null; };
+    ph.aiAsk('Why did it restart?');
+    var s = sentOf(w, 'aiStart')[0];
+    assert.ok(doc.querySelector('#evlAiStripSlot .evlAiStrip.on'), 'the strip runs while the request is pending');
+    assert.ok(/^Preparing…0:0\d$/.test(live()), live());
+    assert.ok(ph._aiTick, 'the elapsed-time counter runs');
+    ph.onAiStarted(null, { nodeid: NODE, reqId: s.reqId, convId: 'cv1', mode: 'ask', model: 'qwen3:14b', endpointName: 'gpu-01.lan', network: 'private' });
+    assert.ok(live().indexOf('Preparing…') == 0);
+    ph.onAiStep(null, { nodeid: NODE, convId: 'cv1', turn: 1, i: 0, tool: 'get_device_info', args: {}, status: 'done', items: 1 });
+    ph.onAiStep(null, { nodeid: NODE, convId: 'cv1', turn: 1, i: 1, tool: 'event_facets', args: { window: '24h' }, status: 'running' });
+    await sleep(200);
+    assert.ok(live().indexOf('Step 2: counting events (24h)') == 0, live());
+    assert.strictEqual(doc.getElementById('evlAiSay').textContent, 'Step 2: counting events (24h)', 'the phase change is announced');
+    // the counter moves once a second
+    var c = ph.st.ai.convs[ph.st.ai.chat];
+    c.turns[0].t0 = Date.now() - 65000;
+    doc.querySelector('#evlAiLog .evlAiClock').setAttribute('data-t0', String(c.turns[0].t0));
+    await sleep(1100);
+    assert.ok(/^1:0[56]$/.test(doc.querySelector('#evlAiLog .evlAiClock').textContent), 'the counter was updated by the tick');
+    ph.onAiDelta(null, { nodeid: NODE, convId: 'cv1', turn: 1, seq: 1, text: 'The drive **stalls**' });
+    await sleep(200);
+    assert.ok(live().indexOf('Writing the answer…') == 0, live());
+    var caret = doc.querySelector('#evlAiLog [data-p=a] .evlAiCaret');
+    assert.ok(caret, 'a caret follows the streaming text');
+    assert.strictEqual(caret.parentNode.nodeName, 'P');
+    assert.strictEqual(doc.getElementById('evlAiSay').textContent, 'Step 2: counting events (24h)', 'announcements are throttled');
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cv1', turn: 1, text: 'The drive stalls.', citations: {}, usage: {} });
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiLive'), null);
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiCaret'), null);
+    assert.strictEqual(doc.querySelector('#pluginEventLog .evlAiStrip.on'), null);
+    assert.ok(!ph._aiTick && !ph._aiDog, 'no timer left after done');
+    // Stop: the same
+    ph.aiAsk('And now?');
+    assert.ok(ph._aiTick && ph._aiDog);
+    ph.onAiDelta(null, { nodeid: NODE, convId: 'cv1', turn: 2, seq: 1, text: 'Partial' });
+    await sleep(200);
+    ph.aiSubmit();
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiLive'), null);
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiCaret'), null, 'no caret on a stopped answer');
+    assert.strictEqual(doc.querySelector('#pluginEventLog .evlAiStrip.on'), null);
+    assert.ok(!ph._aiTick && !ph._aiDog, 'no timer left after stop');
+    // New chat while running
+    ph.aiAsk('Third');
+    assert.ok(ph._aiTick);
+    ph.aiNewChat();
+    assert.ok(!ph._aiTick && !ph._aiDog, 'no timer left after New chat');
+});
+
+test('running state: dot on the Ask button while the panel is closed; Explain and Diagnosis show strip and status', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w); loadHistory(w);
+    ph.aiAsk('q');
+    var s = sentOf(w, 'aiStart')[0], btn = doc.getElementById('evlAiBtn');
+    assert.ok(!btn.classList.contains('busy'), 'no dot while the panel is open');
+    ph.aiClosePanel();
+    btn = doc.getElementById('evlAiBtn');
+    assert.ok(btn.classList.contains('busy'));
+    assert.ok(btn.querySelector('.evlAiDot'));
+    assert.strictEqual(btn.getAttribute('aria-label'), 'Ask about this device (answering…)');
+    ph.onAiStarted(null, { nodeid: NODE, reqId: s.reqId, convId: 'cv1' });
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cv1', turn: 1, text: 'Done.', citations: {}, usage: {} });
+    assert.ok(!btn.classList.contains('busy'));
+    assert.strictEqual(btn.getAttribute('aria-label'), null);
+    // Explain
+    var key = ph.elNormalize(REC).key;
+    ph.st.expanded[key] = true; ph.elUpdate();
+    ph.aiExplain(key);
+    var ex = doc.querySelector('.evlAiEx');
+    assert.ok(ex.querySelector('.evlAiStrip.on'));
+    assert.ok(ex.querySelector('.evlAiLive').textContent.indexOf('Preparing…') == 0);
+    var s2 = sentOf(w, 'aiStart')[1];
+    ph.onAiStarted(null, { nodeid: NODE, reqId: s2.reqId, convId: 'cv2' });
+    ph.onAiStep(null, { nodeid: NODE, convId: 'cv2', turn: 1, i: 0, tool: 'lookup_event_id', args: { provider: 'stornvme', id: 129 }, status: 'running' });
+    await sleep(200);
+    assert.ok(doc.querySelector('.evlAiEx .evlAiLive').textContent.indexOf('Step 1: looking up event 129 (stornvme)') == 0);
+    ph.onAiError(null, { nodeid: NODE, convId: 'cv2', turn: 1, code: 'timeout', message: '' });
+    assert.strictEqual(doc.querySelector('.evlAiEx .evlAiStrip.on'), null);
+    assert.strictEqual(doc.querySelector('.evlAiEx .evlAiLive'), null);
+    assert.ok(!ph._aiTick && !ph._aiDog, 'no timer left after an error');
+    // Diagnosis, ended by the watchdog
+    ph.elSetView('diag'); ph.aiDiagnose();
+    assert.ok(doc.querySelector('#evlDiag .evlAiStrip.on'));
+    assert.ok(doc.querySelector('#evlDiag .evlAiLive').textContent.indexOf('Preparing…') == 0);
+    ph.st.ai.convs[ph.st.ai.diag].last = Date.now() - 91000;
+    ph.aiDog();
+    assert.strictEqual(doc.querySelector('#evlDiag .evlAiStrip.on'), null);
+    assert.ok(!ph._aiTick && !ph._aiDog, 'no timer left after the watchdog ended it');
+});

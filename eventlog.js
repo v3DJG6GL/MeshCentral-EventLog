@@ -791,7 +791,7 @@ body.night #pluginEventLog {
         }
         if (ph.elCan('assistant')) {
             h += '<button id=evlAiBtn class="evlBtn evlAiBtn' + (st.ai.open ? ' on' : '') + '" aria-expanded=' + (st.ai.open ? 'true' : 'false') + ' aria-controls=evlAi onclick="return pluginHandler.eventlog.aiToggle()">' +
-                 '<svg width=14 height=14 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 aria-hidden=true><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/></svg>Ask about this device</button>';
+                 '<svg width=14 height=14 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 aria-hidden=true><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/></svg>Ask about this device<span class=evlAiDot aria-hidden=true></span></button>';
         } else {   // say why the Assistant is not offered here (nothing for users without its permission)
             var why = ph.aiUnavailText(ph.elAccess);
             if (why) h += '<span id=evlAiWhy class=evlAiWhy role=note>' + esc(why) + '</span>';

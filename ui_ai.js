@@ -128,6 +128,7 @@ module.exports.attach = function (obj) {
             if (t && t.status == 'running') t.status = 'stopped';
             c.status = 'stopped';
         }
+        ph.aiTimersStop();
     };
     obj.aiNewTurn = function (n, q) {
         return { n: n, srvN: null, q: q, status: 'running', steps: [], text: '', live: '', html: '', sHtml: null, structured: null, cites: {}, invalid: [],
@@ -197,12 +198,13 @@ module.exports.attach = function (obj) {
     // ---- watchdog: 90 s without any reply for a running request ends it with a Retry ---------------------------------
     obj.aiDogStart = function () {
         var ph = pluginHandler.eventlog;
+        ph.aiTickStart();
         if (ph._aiDog) return;
         ph._aiDog = setInterval(function () { try { pluginHandler.eventlog.aiDog(); } catch (e) { } }, 5000);
     };
     obj.aiDog = function () {
         var ph = pluginHandler.eventlog, st = ph.st, any = false, now = Date.now();
-        if (st == null || st.ai == null) { clearInterval(ph._aiDog); ph._aiDog = null; return; }
+        if (st == null || st.ai == null) { clearInterval(ph._aiDog); ph._aiDog = null; ph.aiTimersStop(); return; }
         for (var id in st.ai.convs) {
             var c = st.ai.convs[id];
             if (c.status != 'starting' && c.status != 'running' && c.status != 'stopping') continue;
@@ -263,6 +265,7 @@ module.exports.attach = function (obj) {
         var t = ph.aiTurn(c, m.turn), i = Number(m.i);
         if (!t || !(i >= 0 && i < 64) || Math.floor(i) !== i) return;
         t.steps[i] = { tool: String(m.tool || '').slice(0, 60), args: m.args, status: String(m.status || ''), items: Number(m.items) || 0, ms: Number(m.ms) || 0 };
+        t.ph = 'step';
         c.last = Date.now();
         if (c.status == 'starting') c.status = 'running';
         ph.aiSchedule(c, t);
@@ -275,6 +278,7 @@ module.exports.attach = function (obj) {
         if (!t || t.status != 'running' || !(seq > t.lastSeq)) return;
         if (seq !== t.lastSeq + 1) t.gap = true;   // a lost chunk: keep what we have, the final text replaces it
         else if (!t.gap && t.text.length < 400000) t.text += String(m.text == null ? '' : m.text);
+        if (m.text != null && String(m.text) !== '') t.ph = 'write';
         t.lastSeq = seq;
         c.last = Date.now();
         if (c.status == 'starting') c.status = 'running';
@@ -344,6 +348,8 @@ module.exports.attach = function (obj) {
         if (a.diag == c.id) ph.aiRenderDiag();
         if (st.view != 'diag' && (c.mode == 'explain' || (done && a.focus == c.id))) ph.elUpdate();
         else ph.aiApplySel();
+        ph.aiBtnSync();
+        ph.aiTick();
     };
     // Streaming: re-render at most every 120 ms (300 ms for long answers), only the parts that changed.
     obj.aiSchedule = function (c, t) {
@@ -361,14 +367,16 @@ module.exports.attach = function (obj) {
         var c = st.ai.convs[cid]; if (!c) return;
         var t = null; c.turns.forEach(function (x) { if (x.n == n) t = x; });
         if (!t || t.status != 'running') return;
-        t.live = t.text ? ph.aiMd(ph.aiVisible(t.text), c, { streaming: true }) : '';
+        t.live = t.text ? ph.aiMd(ph.aiVisible(t.text), c, { streaming: true, caret: true }) : '';
         var log = Q('evlAiLog'), stick = log ? (log.scrollHeight - log.scrollTop - log.clientHeight < 48) : false;
         var nodes = document.querySelectorAll('#pluginEventLog [data-t="' + cid + '-' + n + '"]');
         for (var i = 0; i < nodes.length; i++) {
             var p = nodes[i].getAttribute('data-p');
             if (p == 'a') nodes[i].innerHTML = t.live || ph.aiWaitHtml(c, t);
             else if (p == 's') nodes[i].outerHTML = ph.aiStepsHtml(c, t);
+            else if (p == 'l') nodes[i].outerHTML = ph.aiLiveHtml(c, t);
         }
+        ph.aiAnnounce(c, t);
         if (log && stick && st.ai.chat == cid) log.scrollTop = log.scrollHeight;
         var lb = Q('evlAiLog'); if (lb) lb.setAttribute('aria-busy', ph.aiBusy(st.ai.convs[st.ai.chat]) ? 'true' : 'false');
     };
@@ -457,10 +465,12 @@ module.exports.attach = function (obj) {
                 ph.aiMdPost(frag, vals, cites, cid, opts.streaming === true);
                 var div = document.createElement('div');
                 div.appendChild(frag);
+                if (opts.caret === true) ph.aiCaret(div);
                 return div.innerHTML;
             } catch (e) { }
         }
-        return ph.aiMdFallback(src, vals, cites, cid, opts.streaming === true);
+        var fb = ph.aiMdFallback(src, vals, cites, cid, opts.streaming === true);
+        return (opts.caret === true) ? fb.replace(/<\/p>$/, '<span class=evlAiCaret aria-hidden=true></span></p>') : fb;
     };
     obj.aiChipHtml = function (cid, ref, cls, label) {
         return '<button type=button class="evlCite' + (cls ? ' ' + cls : '') + '" data-c=' + cid + ' data-r=' + ref + ' aria-label="' + (label || ('Show cited event ' + ref)) + '"' +
@@ -644,7 +654,7 @@ module.exports.attach = function (obj) {
         var running = (t.status == 'running');
         var open = (t.stepsOpen != null) ? t.stepsOpen : running;
         var h = '<details class=evlAiSteps data-t=' + key + ' data-p=s' + (open ? ' open' : '') + '><summary onclick="return pluginHandler.eventlog.aiStepsClick(\'' + c.id + '\',' + t.n + ',this)">' +
-                (running ? 'Reading data, step ' + steps.length : esc(ph.aiUsageText(t))) + '</summary><div class=evlAiStepL>';
+                (running ? steps.length + (steps.length == 1 ? ' step' : ' steps') + ' so far' : esc(ph.aiUsageText(t))) + '</summary><div class=evlAiStepL>';
         t.steps.forEach(function (s, i) {
             if (s == null) return;
             var r = ph.aiStepResult(s);
@@ -657,15 +667,114 @@ module.exports.attach = function (obj) {
         if (c) c.turns.forEach(function (t) { if (t.n == n) t.stepsOpen = !(el && el.parentNode && el.parentNode.open); });
         return true;
     };
+    // The answer area before any text: empty (the status line below it says what is going on); the review note
+    // has its own box.
     obj.aiWaitHtml = function (c, t) {
-        var txt;
-        if (c.status == 'preview') txt = 'Waiting for you to review what is sent.';
-        else if (t.steps.length && t.steps[t.steps.length - 1] && t.steps[t.steps.length - 1].status == 'running') txt = 'Reading this device’s data…';
-        else if (c.mode == 'explain') txt = 'Writing the explanation…';
-        else if (c.mode == 'diagnose') txt = 'Working through the events…';
-        else if (c.status == 'starting') txt = 'Sending the question…';
-        else txt = 'Writing the answer…';
-        return '<p class=evlAiWait>' + txt + '</p>';
+        return '';
+    };
+
+    // ---- running state: activity strip, status line, elapsed time, streaming caret, toolbar dot -------------------
+    // A tool call in plain words, with a short summary of its arguments ("counting events (24h, level: warning)").
+    obj.aiToolWords = function (tool, args) {
+        var ph = pluginHandler.eventlog, a = (args && typeof args == 'object') ? args : {};
+        var w = ({ get_device_info: 'reading device details', event_facets: 'counting events', event_groups: 'grouping events', get_events: 'reading events',
+                   get_event: 'reading one event', get_device_events: 'reading MeshCentral device events', get_installed_software: 'asking the agent for installed software' })[tool];
+        if (tool == 'lookup_event_id') {
+            var id = (a.id != null && typeof a.id != 'object') ? String(a.id).slice(0, 12) : '';
+            var pr = (typeof a.provider == 'string') ? ph.aiStripMarks(a.provider).slice(0, 40) : '';
+            return 'looking up event' + (id ? ' ' + id : '') + (pr ? ' (' + pr + ')' : '');
+        }
+        if (!w) return 'using ' + String(tool || 'a tool').replace(/_/g, ' ').slice(0, 40);
+        if (tool == 'get_device_info' || tool == 'get_event' || tool == 'get_installed_software') return w;
+        var x = ph.aiStripMarks(ph.aiArgsShort(args));
+        if (x.length > 48) x = x.slice(0, 47) + '…';
+        return w + (x ? ' (' + x + ')' : '');
+    };
+    // What a running turn is doing right now: { key, text, step, clock } or null when it is not running.
+    obj.aiPhase = function (c, t) {
+        var ph = pluginHandler.eventlog;
+        if (!c || !t || t.status != 'running' || !ph.aiBusy(c)) return null;
+        if (c.status == 'preview') return { key: 'review', text: 'Waiting for your review', step: '', clock: false };
+        if (c.status == 'stopping') return { key: 'stop', text: 'Stopping…', step: '', clock: true };
+        if (t.ph == 'write') return { key: 'write', text: ({ explain: 'Writing the explanation…', diagnose: 'Writing the diagnosis…' })[c.mode] || 'Writing the answer…', step: '', clock: true };
+        var n = 0, s = null;
+        for (var i = t.steps.length - 1; i >= 0; i--) { if (t.steps[i]) { n = i + 1; s = t.steps[i]; break; } }
+        if (s) return { key: 'step' + n, text: ph.aiToolWords(s.tool, s.args), step: 'Step ' + n, clock: true };
+        return { key: 'prep', text: 'Preparing…', step: '', clock: true };
+    };
+    obj.aiElapsed = function (ms) {
+        var s = Math.max(0, Math.floor((Number(ms) || 0) / 1000)), m = Math.floor(s / 60);
+        if (m >= 60) return Math.floor(m / 60) + ':' + ('0' + (m % 60)).slice(-2) + ':' + ('0' + (s % 60)).slice(-2);
+        return m + ':' + ('0' + (s % 60)).slice(-2);
+    };
+    // The status line under a running answer. Visual only: phase changes reach screen readers through aiAnnounce.
+    obj.aiLiveHtml = function (c, t) {
+        var ph = pluginHandler.eventlog, esc = ph.aiEsc, key = c.id + '-' + t.n, p = ph.aiPhase(c, t);
+        if (!p) return '<div data-t=' + key + ' data-p=l hidden></div>';
+        var t0 = Number(t.t0) || Date.now();
+        return '<div class=evlAiLive data-t=' + key + ' data-p=l aria-hidden=true><span class=evlAiLiveT>' + (p.step ? '<b>' + p.step + ':</b> ' : '') + esc(p.text) + '</span>' +
+               (p.clock ? '<span class=evlAiClock data-t0=' + t0 + '>' + ph.aiElapsed(Date.now() - t0) + '</span>' : '') + '</div>';
+    };
+    // The thin progress strip. The sweep starts at the phase it would have reached since t0, so re-rendering
+    // the surrounding view does not make it jump back to the start.
+    obj.aiStripHtml = function (c, t) {
+        var ph = pluginHandler.eventlog, on = !!(c && t && t.status == 'running' && ph.aiBusy(c) && c.status != 'preview');
+        if (!on) return '<div class=evlAiStrip aria-hidden=true></div>';
+        var d = (Date.now() - (Number(t.t0) || Date.now())) % 1800;
+        return '<div class="evlAiStrip on" aria-hidden=true><i style="animation-delay:-' + Math.max(0, Math.floor(d)) + 'ms"></i></div>';
+    };
+    // Streaming caret: after the last text of the answer so far (not after a command's note).
+    obj.aiCaret = function (root) {
+        var el = root, k;
+        for (;;) {
+            k = el.lastElementChild;
+            if (k && k.classList && k.classList.contains('evlAiCmdNote')) k = k.previousElementSibling;
+            if (!k || !/^(P|H[1-6]|LI|TD|TH|BLOCKQUOTE|UL|OL|TABLE|THEAD|TBODY|TR|DIV|PRE)$/.test(k.nodeName)) break;
+            el = k;
+            if (k.nodeName == 'PRE') { el = k.querySelector('code') || k; break; }
+        }
+        var c = (root.ownerDocument || document).createElement('span');
+        c.className = 'evlAiCaret'; c.setAttribute('aria-hidden', 'true');
+        el.appendChild(c);
+        return root;
+    };
+    // Screen readers hear phase changes (a new step, writing started), at most one every 2.5 s, never the clock.
+    obj.aiAnnounce = function (c, t) {
+        var ph = pluginHandler.eventlog, p = ph.aiPhase(c, t), now = Date.now();
+        if (!p || p.key == 'prep' || p.key == 'review' || t._said == p.key) return;
+        if (now - (ph._aiSaidAt || 0) < 2500) return;
+        t._said = p.key; ph._aiSaidAt = now;
+        ph.aiSay((p.step ? p.step + ': ' : '') + p.text.replace(/…$/, '.'));
+    };
+    // One 1 s interval for every visible elapsed-time counter; it ends itself when nothing runs any more.
+    obj.aiTickStart = function () {
+        var ph = pluginHandler.eventlog;
+        if (ph._aiTick) return;
+        ph._aiTick = setInterval(function () { try { pluginHandler.eventlog.aiTick(); } catch (e) { } }, 1000);
+    };
+    obj.aiTick = function () {
+        var ph = pluginHandler.eventlog, st = ph.st, any = false, now = Date.now();
+        if (st != null && st.ai != null) { for (var id in st.ai.convs) { if (ph.aiBusy(st.ai.convs[id])) { any = true; break; } } }
+        if (!any) { ph.aiTimersStop(); return; }
+        var ks = document.querySelectorAll('#pluginEventLog .evlAiClock[data-t0]');
+        for (var i = 0; i < ks.length; i++) ks[i].textContent = ph.aiElapsed(now - Number(ks[i].getAttribute('data-t0')));
+    };
+    // Clock and watchdog off (nothing runs any more, device change, permission revoked).
+    obj.aiTimersStop = function () {
+        var ph = pluginHandler.eventlog;
+        if (ph._aiTick) { clearInterval(ph._aiTick); ph._aiTick = null; }
+        var st = ph.st, busy = false;
+        if (st != null && st.ai != null) { for (var id in st.ai.convs) { if (ph.aiBusy(st.ai.convs[id])) busy = true; } }
+        if (!busy && ph._aiDog) { clearInterval(ph._aiDog); ph._aiDog = null; }
+    };
+    // The toolbar button shows a dot while an Ask answer runs in the closed panel.
+    obj.aiBtnSync = function () {
+        var ph = pluginHandler.eventlog, st = ph.st, btn = Q('evlAiBtn');
+        if (!btn || st == null || st.ai == null) return;
+        var a = st.ai, c = a.convs[a.chat], run = !a.open && ph.aiBusy(c) && c.status != 'preview', rev = !a.open && c != null && c.status == 'preview';
+        btn.classList.toggle('busy', run || rev);
+        if (run || rev) { var l = 'Ask about this device (' + (rev ? 'waiting for your review' : 'answering…') + ')'; btn.setAttribute('aria-label', l); btn.setAttribute('title', l); }
+        else { btn.removeAttribute('aria-label'); btn.removeAttribute('title'); }
     };
     // "qwen3:14b on gpu-01.lan (local, personal values replaced)"
     obj.aiInfoLine = function (c, short) {
@@ -1021,6 +1130,7 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, st = ph.elState(), a = st.ai, el = Q('evlAi');
         var btn = Q('evlAiBtn');
         if (btn) { btn.setAttribute('aria-expanded', a.open ? 'true' : 'false'); btn.classList.toggle('on', a.open); }
+        ph.aiBtnSync();
         if (!el) return;
         if (!a.open || !ph.elCan('assistant')) {
             if (!el.hidden) { el.hidden = true; el.innerHTML = ''; }
@@ -1032,12 +1142,13 @@ module.exports.attach = function (obj) {
             el.innerHTML = '<div class=evlAiIn>' +
                 '<div class=evlAiSplit role=separator tabindex=0 aria-orientation=vertical aria-label="Resize the assistant panel" title="Drag to resize, double-click to reset"' +
                 ' onpointerdown="return pluginHandler.eventlog.aiSplitDown(event)" ondblclick="return pluginHandler.eventlog.aiSplitReset()" onkeydown="return pluginHandler.eventlog.aiSplitKey(event)"></div>' +
-                '<div class=evlAiHd id=evlAiHd></div>' +
+                '<div class=evlAiHd id=evlAiHd></div><div class=evlAiStripSlot id=evlAiStripSlot></div>' +
                 '<div class=evlAiLog id=evlAiLog role=log aria-live=polite aria-busy=false aria-label="Conversation"></div>' +
                 '<div class=evlAiFt id=evlAiFt></div></div>';
         }
         var c = a.convs[a.chat] || null;
         QH('evlAiHd', ph.aiHeadHtml(c));
+        QH('evlAiStripSlot', ph.aiStripHtml(c, c ? c.turns[c.turns.length - 1] : null));
         var log = Q('evlAiLog'), lt = c ? c.turns[c.turns.length - 1] : null, sig = c ? c.id + ':' + c.turns.length : '';
         var stick = (log.scrollHeight - log.scrollTop - log.clientHeight < 48) || log._evlConv != sig;
         var justDone = (lt != null && lt.status == 'done' && log._evlDone != sig);   // a finished answer: show it from its start
@@ -1091,7 +1202,7 @@ module.exports.attach = function (obj) {
         if (c.status == 'preview' && isLast) h += '<div class=evlAiNoteBox>Waiting for you to review what is sent. <button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiDlgOpen(\'' + c.id + '\')">Review</button></div>';
         h += ph.aiStepsHtml(c, t);
         if (t.status == 'done') h += ph.aiDoneBody(c, t, 'panel');
-        else if (t.status == 'running') h += '<div class="evlAiA evlAiMd" data-t=' + key + ' data-p=a>' + (t.live || ph.aiWaitHtml(c, t)) + '</div>';
+        else if (t.status == 'running') h += '<div class="evlAiA evlAiMd" data-t=' + key + ' data-p=a>' + (t.live || ph.aiWaitHtml(c, t)) + '</div>' + ph.aiLiveHtml(c, t);
         else if (t.live) h += '<div class="evlAiA evlAiMd">' + t.live + '</div>';
         if (t.status == 'stopped') h += '<p class=evlAiMuted>Stopped.</p>';
         if (t.status == 'cancelled') h += '<p class=evlAiMuted>Cancelled. Nothing was sent to the model.</p>';
@@ -1264,7 +1375,7 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, c = ph.aiExplainConv(ev), esc = ph.aiEsc;
         if (!c) return '';
         var t = c.turns[0], key = c.id + '-' + t.n, busy = ph.aiBusy(c);
-        var h = '<section class=evlAiEx aria-label="Explanation" onclick="event.stopPropagation()"><div class=evlAiExHd><h3>Explain this event</h3>';
+        var h = '<section class=evlAiEx aria-label="Explanation" onclick="event.stopPropagation()">' + ph.aiStripHtml(c, t) + '<div class=evlAiExHd><h3>Explain this event</h3>';
         if (busy) h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiStop(\'' + c.id + '\')">Stop</button>';
         else if (t.status == 'done') h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiExplainContinue(\'' + c.id + '\')">Continue in Ask</button>' +
                                         '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiCopyTurn(\'' + c.id + '\',1,this)">Copy</button>';
@@ -1281,7 +1392,7 @@ module.exports.attach = function (obj) {
                  ' Answers can be wrong.</span>' + ph.aiVoteHtml(c, t, 'explain') + '</div>';
         } else {
             h += ph.aiStepsHtml(c, t);
-            if (t.status == 'running') h += '<div class="evlAiA evlAiMd" data-t=' + key + ' data-p=a>' + (t.live || ph.aiWaitHtml(c, t)) + '</div>';
+            if (t.status == 'running') h += '<div class="evlAiA evlAiMd" data-t=' + key + ' data-p=a>' + (t.live || ph.aiWaitHtml(c, t)) + '</div>' + ph.aiLiveHtml(c, t);
             else if (t.live) h += '<div class="evlAiA evlAiMd">' + t.live + '</div>';
             if (t.status == 'error') h += ph.aiErrHtml(c, t);
             if (t.status == 'stopped') h += '<p class=evlAiMuted>Stopped.</p>';
@@ -1358,10 +1469,10 @@ module.exports.attach = function (obj) {
         }
         var t = c.turns[0], key = c.id + '-' + t.n;
         if (t.status == 'done') return ph.aiDiagDone(c, t);
-        var h = '<div class=evlDiagRun><h2>' + (t.status == 'error' ? 'The diagnosis did not finish' : 'Diagnosing ' + esc(ph.aiWinText(c.win))) + '</h2>' + ph.aiNotesHtml(c);
+        var h = '<div class=evlDiagRun>' + ph.aiStripHtml(c, t) + '<h2>' + (t.status == 'error' ? 'The diagnosis did not finish' : 'Diagnosing ' + esc(ph.aiWinText(c.win))) + '</h2>' + ph.aiNotesHtml(c);
         if (c.status == 'preview') h += '<div class=evlAiNoteBox>Waiting for you to review what is sent. <button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiDlgOpen(\'' + c.id + '\')">Review</button></div>';
         h += ph.aiStepsHtml(c, t);
-        if (t.status == 'running') h += '<div class="evlAiA evlAiMd evlDiagStream" data-t=' + key + ' data-p=a>' + (t.live || ph.aiWaitHtml(c, t)) + '</div>';
+        if (t.status == 'running') h += '<div class="evlAiA evlAiMd evlDiagStream" data-t=' + key + ' data-p=a>' + (t.live || ph.aiWaitHtml(c, t)) + '</div>' + ph.aiLiveHtml(c, t);
         else if (t.live) h += '<div class="evlAiA evlAiMd evlDiagStream">' + t.live + '</div>';
         if (t.status == 'error') h += ph.aiErrHtml(c, t);
         if (t.status == 'stopped') h += '<p class=evlAiMuted>Stopped. Start it again with Diagnose.</p>';
@@ -1718,6 +1829,34 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlAiPeekH .evlBtn { margin-left:auto; }
 #pluginEventLog .evlAiPeekM { padding:6px 8px; white-space:pre-wrap; max-height:150px; overflow:auto; overflow-wrap:anywhere; line-height:1.4; }
 #pluginEventLog .evlAiUnv { color:var(--evl-muted); font-size:11px; }
+/* running state: progress strip, status line with elapsed time, streaming caret, dot on the Ask button */
+#pluginEventLog .evlAiStripSlot { position:relative; height:0; z-index:1; }
+#pluginEventLog .evlAiStrip { position:relative; height:2px; overflow:hidden; pointer-events:none; flex:none; }
+#pluginEventLog .evlAiStripSlot .evlAiStrip { position:absolute; left:0; right:0; top:-1px; }
+#pluginEventLog .evlAiEx { position:relative; }
+#pluginEventLog .evlAiEx > .evlAiStrip { position:absolute; top:-1px; left:-1px; right:-1px; border-radius:3px 3px 0 0; }
+#pluginEventLog .evlDiagRun > .evlAiStrip { margin:6px 0 -6px; border-radius:1px; }
+#pluginEventLog .evlAiStrip.on { background:var(--evl-line2); }
+#pluginEventLog .evlAiStrip i { position:absolute; top:0; bottom:0; left:0; width:100%; background:linear-gradient(90deg, transparent 0, transparent 20%, var(--evl-acc) 34%, var(--evl-acc) 54%, transparent 64%, transparent 100%); transform:translateX(-64%); animation:evlSweep 1.8s cubic-bezier(.5,0,.3,1) infinite; }
+@keyframes evlSweep { from { transform:translateX(-64%); } to { transform:translateX(82%); } }
+#pluginEventLog .evlAiA:empty { display:none; }
+#pluginEventLog .evlAiLive { display:flex; align-items:baseline; gap:12px; font-size:12px; line-height:1.4; color:var(--evl-muted); border-left:2px solid var(--evl-acc); padding:1px 0 1px 8px; }
+#pluginEventLog .evlAiEx .evlAiLive { margin-top:9px; }
+#pluginEventLog .evlAiLiveT { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; }
+#pluginEventLog .evlAiLiveT b { color:var(--evl-ink); font-weight:bold; }
+#pluginEventLog .evlAiClock { flex:none; font-family:Consolas,"DejaVu Sans Mono",monospace; font-size:11px; font-variant-numeric:tabular-nums; }
+#pluginEventLog .evlAiCaret { display:inline-block; width:.48em; height:1.05em; margin-left:2px; vertical-align:-.17em; background:var(--evl-acc); border-radius:1px; animation:evlBlink 1.06s steps(1) infinite; }
+@keyframes evlBlink { 50% { opacity:0; } }
+#pluginEventLog .evlAiBtn { position:relative; }
+#pluginEventLog .evlAiDot { display:none; position:absolute; top:-4px; right:-4px; width:8px; height:8px; border-radius:50%; background:var(--evl-acc); box-shadow:0 0 0 2px var(--evl-bg); }
+#pluginEventLog .evlAiBtn.busy .evlAiDot { display:block; }
+#pluginEventLog .evlAiDot::after { content:""; position:absolute; top:0; right:0; bottom:0; left:0; border-radius:50%; background:var(--evl-acc); animation:evlPulse 1.8s ease-out infinite; }
+@keyframes evlPulse { 0% { transform:scale(1); opacity:.55; } 70%, 100% { transform:scale(2.6); opacity:0; } }
+@media (prefers-reduced-motion: reduce) {
+  #pluginEventLog .evlAiStrip i { animation:none; transform:none; background:repeating-linear-gradient(90deg, var(--evl-acc) 0 8px, transparent 8px 12px); opacity:.8; }
+  #pluginEventLog .evlAiCaret { animation:none; }
+  #pluginEventLog .evlAiDot::after { animation:none; display:none; }
+}
 /* model text: Markdown, with MeshCentral's Bootstrap defaults (default3) reset */
 #pluginEventLog .evlAiMd { line-height:1.5; overflow-wrap:anywhere; color:var(--evl-ink); }
 #pluginEventLog .evlAiMd p, #pluginEventLog .evlAiMd ul, #pluginEventLog .evlAiMd ol, #pluginEventLog .evlAiMd blockquote { margin:0 0 8px; }
@@ -1894,6 +2033,7 @@ body.night #evlAiDlg {
         'aiRefresh', 'aiSchedule', 'aiFlush', 'aiVisible',
         'aiMdInit', 'aiMd', 'aiChipHtml', 'aiMdFallback', 'aiMdPost', 'aiCopyCode',
         'aiUnavailText', 'aiErrText', 'aiErrHtml', 'aiArgsShort', 'aiStepResult', 'aiUsageText', 'aiStepsHtml', 'aiStepsClick', 'aiWaitHtml', 'aiInfoLine', 'aiNotesHtml', 'aiVoteHtml',
+        'aiToolWords', 'aiPhase', 'aiElapsed', 'aiLiveHtml', 'aiStripHtml', 'aiCaret', 'aiAnnounce', 'aiTickStart', 'aiTick', 'aiTimersStop', 'aiBtnSync',
         'aiTurnText', 'aiCopyTurn', 'aiVote', 'aiRetry', 'aiStop',
         'aiCiteMap', 'aiRowRefs', 'aiGutterTd', 'aiApplySel', 'aiGutter', 'aiGotoCite', 'aiReveal', 'aiAfterLoad', 'aiFlashRow', 'aiNoticeHtml', 'aiNoteClose', 'aiShowAnyway',
         'aiOpenCited', 'aiPeekHtml', 'aiRenderPeek', 'aiPeekClose',

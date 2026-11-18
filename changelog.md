@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 ### Changed
 - Event Log tab: when the Assistant is not available on a device, users with the Assistant permission see why (for example no endpoint assigned to the device's config set, or the Assistant turned off)
+- Assistant: while an answer is being prepared, a progress strip, the current step in plain words, an elapsed-time counter and a streaming cursor show what is happening; the Ask button shows a dot when an answer is running in the closed panel
 
 ## [0.3.2] - 2026-11-18
 ### Changed
