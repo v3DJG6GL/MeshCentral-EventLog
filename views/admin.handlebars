@@ -439,7 +439,9 @@
         edit: null,           // endpoint form state { id, hasKey, keyHint, removeKey, caps }
         models: [],           // last Fetch models result [{id, ctx, tools}]
         audit: { skip: 0, limit: 50, total: 0, since: null, until: null },
-        cfgValue: ''          // aiEndpointId of the config set in the editor
+        cfgValue: '',         // aiEndpointId of the config set in the editor
+        factory: {}, factoryHash: {}, placeholders: {},   // system prompt templates (aiAdminData)
+        promptsBuilt: false, promptEdit: false, promptPart: 'base', factoryOpen: {}
       };
       var EL_AI_PRESETS = {
         ollama: 'http://localhost:11434/v1', vllm: 'http://localhost:8000/v1', lmstudio: 'http://localhost:1234/v1',
@@ -487,7 +489,7 @@
       function elAiNetLabel(n) { return (n == 'loopback') ? 'This server' : (n == 'private') ? 'Local network' : (n == 'public') ? 'Cloud' : 'Unknown'; }
 
       // ---- requests: every reply carries the reqId it answers; replies to anything else are stale and ignored ----
-      var EL_AI_LATEST_ONLY = { get: 1, audit: 1, test: 1, models: 1 };
+      var EL_AI_LATEST_ONLY = { get: 1, audit: 1, test: 1, models: 1, preview: 1 };
       function elAiSend(kind, action, payload, timeoutMs, onTimeout) {
         var reqId = 'r' + (++elAi.seq) + '_' + Math.random().toString(36).slice(2, 8);
         if (EL_AI_LATEST_ONLY[kind]) Object.keys(elAi.reqs).forEach(function(k) { if (elAi.reqs[k].kind == kind) { clearTimeout(elAi.reqs[k].t); delete elAi.reqs[k]; } });
@@ -743,6 +745,8 @@
         var tm = (ep && (ep.toolMode == 'tools' || ep.toolMode == 'summary')) ? ep.toolMode : 'auto';
         document.querySelectorAll('input[name="elAiToolMode"]').forEach(function(r) { r.checked = (r.value == tm); });
         Q('elAiLinkLocal').checked = !!(ep && ep.allowLinkLocal);
+        Q('elAiEpExtra').value = (ep && typeof ep.extraInstructions == 'string') ? ep.extraInstructions : '';
+        elAiCount('elAiEpExtraCount', Q('elAiEpExtra').value.length, EL_AI_EXTRA_MAX);
         elAi.edit.capsFor = ep ? elAiFormTarget(true) : null;
         elAi.edit.modelsFor = null;
         Q('elAiTestOut').hidden = true; Q('elAiTestOut').textContent = '';
@@ -813,7 +817,8 @@
         var ep = {
           name: name, format: fk.format, preset: fk.preset, baseUrl: url, model: model,
           contextTokens: ctx, numCtx: numCtx, maxOutputTokens: maxOut, timeoutSec: timeout,
-          toolMode: tm ? tm.value : 'auto', allowLinkLocal: Q('elAiLinkLocal').checked
+          toolMode: tm ? tm.value : 'auto', allowLinkLocal: Q('elAiLinkLocal').checked,
+          extraInstructions: Q('elAiEpExtra').value
         };
         if (elAi.edit && elAi.edit.id) ep.id = elAi.edit.id;
         var out = { endpoint: ep, keyAction: elAiKeyAction() };
@@ -936,6 +941,7 @@
         elAiCapPlaceholders();
         Q('elAiRetention').value = num(s.retentionDays, 90);
         Q('elAiTranscripts').checked = (s.storeTranscripts === true);
+        elAiRenderPrompts();
         elAi.settingsDirty = false;
       }
       // empty cap fields show what applies (the server derives the same values)
@@ -967,8 +973,210 @@
         s.limits.maxRounds = rounds; s.limits.maxCalls = calls; s.limits.maxSentKB = sentKB;
         s.retentionDays = ret;
         s.storeTranscripts = Q('elAiTranscripts').checked;
+        s.prompts = elAiPromptDraft();   // the server records who edited which part
+        s.extraInstructions = Q('elAiExtra').value;
         setStatus('elAiSetStatus', 'pending', 'Saving\u2026', 'elAiSetBtn');
         elAiSend('settings', 'aiAdminSaveSettings', { settings: s }, 10000, elAiNoAnswer('elAiSetStatus', 'elAiSetBtn', 'the settings are not confirmed as saved.'));
+        return false;
+      }
+
+      // ---- Assistant behaviour: additional instructions and the system prompt templates ----
+      // The templates and the placeholder list come from the server (aiAdminData: factory, factoryHash, placeholders).
+      // Placeholder text is built with elAiPh(): this file is a Handlebars template, so it never spells out two braces.
+      var EL_AI_PARTS = [['base', 'Base instructions'], ['ask', 'Ask'], ['explain', 'Explain'], ['diagnose', 'Diagnosis']];
+      var EL_AI_BLOCKS = { explain: ['explain', 'Explain'], diagnose: ['diagnosis', 'Diagnosis'], ask: ['followups', 'follow-up questions'] };
+      var EL_AI_TPL_MAX = 20000, EL_AI_EXTRA_MAX = 4000;
+      var EL_AI_CHANGED = {
+        'prompts.base': 'Base instructions', 'prompts.ask': 'Ask instructions', 'prompts.explain': 'Explain instructions', 'prompts.diagnose': 'Diagnosis instructions',
+        extraInstructions: 'Additional instructions', 'endpoint.extraInstructions': 'Model-specific instructions'
+      };
+      function elAiPh(name) { return '{' + '{' + name + '}' + '}'; }
+      function elAiPartLabel(p) { var x = EL_AI_PARTS.filter(function(a) { return a[0] == p; })[0]; return x ? x[1] : p; }
+      function elAiFmtDate(t) { var d = new Date(Number(t)); return isNaN(d.getTime()) ? '' : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }); }
+      function elAiCount(elId, n, max) {
+        var c = Q(elId); if (c == null) return;
+        c.textContent = elAiFmtNum(n) + ' / ' + elAiFmtNum(max) + ' characters';
+        c.classList.toggle('over', n > max);
+      }
+      function elAiSavedPart(p) { var sp = (elAi.settings && elAi.settings.prompts) || {}; return (typeof sp[p] == 'string') ? sp[p] : null; }
+      // a textarea's text as it will be saved: null = factory default (empty or identical to the factory text)
+      function elAiPartValue(p) {
+        var t = Q('elAiTpl_' + p); if (t == null) return elAiSavedPart(p);
+        var v = String(t.value).replace(/\r\n?/g, '\n');
+        return (v.trim() === '' || v === elAi.factory[p]) ? null : v;
+      }
+      function elAiPromptDraft() { var o = {}; EL_AI_PARTS.forEach(function(x) { o[x[0]] = elAiPartValue(x[0]); }); return o; }
+      // mirror of checkTemplates in ai/prompts.js, shown while editing (the server sends the same notes with the preview)
+      function elAiTplChecks(draft) {
+        var t = {}, w = [], known = elAi.placeholders || {}, unknown = [];
+        EL_AI_PARTS.forEach(function(x) { t[x[0]] = (draft[x[0]] != null) ? draft[x[0]] : (elAi.factory[x[0]] || ''); });
+        if (!/\x7b\x7b\s*nonce\s*\x7d\x7d/.test(t.base)) w.push('Without ' + elAiPh('nonce') + ' the rule that marks event data as untrusted is incomplete: text in event logs could be taken as instructions.');
+        ['explain', 'diagnose', 'ask'].forEach(function(m) { var b = EL_AI_BLOCKS[m]; if (t[m].indexOf('<' + b[0] + '>') < 0) w.push('Without the <' + b[0] + '> block the ' + b[1] + ' view falls back to plain text.'); });
+        EL_AI_PARTS.forEach(function(x) {
+          var re = /\x7b\x7b\s*([A-Za-z_][\w.]{0,40})\s*\x7d\x7d/g, m;
+          while ((m = re.exec(t[x[0]]))) if (!Object.prototype.hasOwnProperty.call(known, m[1]) && unknown.indexOf(m[1]) < 0) unknown.push(m[1]);
+        });
+        if (unknown.length) w.push('Unknown placeholders are sent as they are: ' + unknown.map(elAiPh).join(', ') + '.');
+        return w;
+      }
+      function elAiRenderNotes(listId, notes) {
+        var ul = Q(listId); ul.textContent = '';
+        (Array.isArray(notes) ? notes : []).forEach(function(n) { var li = document.createElement('li'); li.className = 'elAiWarn'; li.textContent = String(n); ul.appendChild(li); });
+      }
+      function elAiSelectPart(p, focus) {
+        elAi.promptPart = p;
+        EL_AI_PARTS.forEach(function(x) {
+          var on = (x[0] == p), tab = Q('elAiTab_' + x[0]);
+          tab.setAttribute('aria-selected', on ? 'true' : 'false');
+          tab.tabIndex = on ? 0 : -1;
+          Q('elAiPanel_' + x[0]).hidden = !on;
+        });
+        if (focus) Q('elAiTab_' + p).focus();
+      }
+      function elAiBuildPrompts() {
+        if (elAi.promptsBuilt) return;
+        elAi.promptsBuilt = true;
+        var tabs = Q('elAiPartTabs'), panels = Q('elAiPartPanels');
+        EL_AI_PARTS.forEach(function(x, i) {
+          var p = x[0];
+          var tab = document.createElement('button');
+          tab.type = 'button'; tab.id = 'elAiTab_' + p; tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', 'elAiPanel_' + p);
+          tab.appendChild(document.createTextNode(x[1]));
+          var dot = document.createElement('span'); dot.className = 'elAiDot'; dot.id = 'elAiDot_' + p; dot.hidden = true; dot.setAttribute('aria-hidden', 'true');
+          var sr = document.createElement('span'); sr.className = 'elSr'; sr.id = 'elAiDotSr_' + p;
+          tab.appendChild(dot); tab.appendChild(sr);
+          tab.addEventListener('click', function() { elAiSelectPart(p, false); });
+          tab.addEventListener('keydown', function(e) {
+            var k = e.key, n = EL_AI_PARTS.length, j = null;
+            if (k == 'ArrowRight') j = (i + 1) % n; else if (k == 'ArrowLeft') j = (i - 1 + n) % n; else if (k == 'Home') j = 0; else if (k == 'End') j = n - 1;
+            if (j == null) return;
+            e.preventDefault(); elAiSelectPart(EL_AI_PARTS[j][0], true);
+          });
+          tabs.appendChild(tab);
+
+          var panel = document.createElement('div');
+          panel.id = 'elAiPanel_' + p; panel.className = 'elAiPanel'; panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', tab.id);
+          var badges = document.createElement('div'); badges.className = 'elAiBadges'; badges.id = 'elAiBadges_' + p;
+          var lbl = document.createElement('label'); lbl.className = 'elSr'; lbl.htmlFor = 'elAiTpl_' + p; lbl.textContent = x[1] + ' (system prompt part)';
+          var ta = document.createElement('textarea');
+          ta.id = 'elAiTpl_' + p; ta.className = 'elAiMono elAiTpl'; ta.rows = (p == 'base') ? 18 : 10; ta.maxLength = EL_AI_TPL_MAX; ta.spellcheck = false; ta.readOnly = true;
+          ta.setAttribute('aria-describedby', 'elAiCount_' + p + ' elAiPromptHelp');
+          ta.addEventListener('input', elAiPromptState);
+          var foot = document.createElement('div'); foot.className = 'elAiPanelFoot';
+          var reset = document.createElement('button'); reset.type = 'button'; reset.id = 'elAiReset_' + p; reset.textContent = 'Reset to factory default';
+          reset.addEventListener('click', function() {
+            Q('elAiTpl_' + p).value = elAi.factory[p] || '';
+            elAi.settingsDirty = true; elAiPromptState();
+            Q('elAiTpl_' + p).focus();
+          });
+          var count = document.createElement('div'); count.className = 'elAiCount'; count.id = 'elAiCount_' + p;
+          foot.appendChild(reset); foot.appendChild(count);
+          var fac = document.createElement('div'); fac.className = 'elAiFactory'; fac.id = 'elAiFactory_' + p; fac.hidden = true;
+          var fl = document.createElement('label'); fl.htmlFor = 'elAiFac_' + p; fl.textContent = 'Factory default text (read-only)';
+          var fta = document.createElement('textarea'); fta.id = 'elAiFac_' + p; fta.className = 'elAiMono'; fta.rows = ta.rows; fta.readOnly = true; fta.spellcheck = false;
+          fac.appendChild(fl); fac.appendChild(fta);
+          panel.appendChild(badges); panel.appendChild(lbl); panel.appendChild(ta); panel.appendChild(foot); panel.appendChild(fac);
+          panels.appendChild(panel);
+        });
+        var dl = Q('elAiPhList'); dl.textContent = '';
+        Object.keys(elAi.placeholders || {}).forEach(function(k) {
+          var dt = document.createElement('dt'), c = document.createElement('code'), dd = document.createElement('dd');
+          c.textContent = elAiPh(k); dt.appendChild(c); dd.textContent = String(elAi.placeholders[k]);
+          dl.appendChild(dt); dl.appendChild(dd);
+        });
+        var edit = Q('elAiPromptEdit');
+        edit.addEventListener('change', function(e) {
+          e.stopPropagation();   // a view switch, not a settings change
+          elAi.promptEdit = edit.checked;
+          Q('elAiPromptWarn').hidden = !edit.checked;
+          elAiPromptState();
+        });
+        Q('elAiResetAll').addEventListener('click', function() {
+          if (!confirm('Reset all four parts of the system prompt to the factory defaults? The change takes effect when you save the settings.')) return;
+          EL_AI_PARTS.forEach(function(x) { Q('elAiTpl_' + x[0]).value = elAi.factory[x[0]] || ''; });
+          elAi.settingsDirty = true; elAiPromptState();
+        });
+        Q('elAiExtra').addEventListener('input', function() { elAiCount('elAiExtraCount', Q('elAiExtra').value.length, EL_AI_EXTRA_MAX); });
+        ['elAiPrevMode', 'elAiPrevOs', 'elAiPrevEp'].forEach(function(id) {
+          Q(id).addEventListener('change', function(e) { e.stopPropagation(); if (!Q('elAiPrevOut').hidden) elAiPreview(); });
+          Q(id).addEventListener('input', function(e) { e.stopPropagation(); });
+        });
+        Q('elAiPrevBtn').addEventListener('click', function() { elAiPreview(); });
+        elAiSelectPart('base', false);
+      }
+      // the parts' text from the saved settings (on load and after saving)
+      function elAiRenderPrompts() {
+        if (!elAi.promptsBuilt) return;
+        EL_AI_PARTS.forEach(function(x) {
+          var p = x[0], saved = elAiSavedPart(p);
+          Q('elAiTpl_' + p).value = (saved != null) ? saved : (elAi.factory[p] || '');
+          Q('elAiFac_' + p).value = elAi.factory[p] || '';
+        });
+        Q('elAiExtra').value = (elAi.settings && typeof elAi.settings.extraInstructions == 'string') ? elAi.settings.extraInstructions : '';
+        elAiCount('elAiExtraCount', Q('elAiExtra').value.length, EL_AI_EXTRA_MAX);
+        elAiPromptState();
+      }
+      function elAiTag(text, cls) { var t = document.createElement('span'); t.className = 'elAiTag' + (cls ? ' ' + cls : ''); t.textContent = text; return t; }
+      // badges, edit state, counters and notes of every part
+      function elAiPromptState() {
+        if (!elAi.promptsBuilt) return;
+        var sp = (elAi.settings && elAi.settings.prompts) || {}, edited = (sp.edited && typeof sp.edited == 'object') ? sp.edited : {};
+        var draft = elAiPromptDraft(), anyCustom = false;
+        elAi.factoryOpen = elAi.factoryOpen || {};
+        EL_AI_PARTS.forEach(function(x) {
+          var p = x[0], ta = Q('elAiTpl_' + p), saved = elAiSavedPart(p), now = draft[p], b = Q('elAiBadges_' + p);
+          ta.readOnly = !elAi.promptEdit;
+          if (now != null) anyCustom = true;
+          b.textContent = '';
+          if (saved == null) b.appendChild(elAiTag('Factory default'));
+          else {
+            var ed = edited[p], who = ed && ed.by ? String(ed.by) : '', when = ed ? elAiFmtDate(ed.at) : '';
+            b.appendChild(elAiTag(who || when ? ('Edited' + (who ? ' by ' + who : '') + (when ? ' on ' + when : '')) : 'Edited', 'edited'));
+            if (ed && ed.factoryHash && elAi.factoryHash[p] && ed.factoryHash !== elAi.factoryHash[p]) b.appendChild(elAiTag('Factory default changed since this was edited', 'changed'));
+          }
+          var unsaved = (now !== saved);
+          if (unsaved) b.appendChild(elAiTag(now == null ? 'Unsaved: back to the factory default' : 'Unsaved changes', 'unsaved'));
+          var fac = Q('elAiFactory_' + p);
+          if (saved != null || now != null) {
+            var tg = document.createElement('button'); tg.type = 'button'; tg.className = 'elAiMini'; tg.setAttribute('aria-controls', 'elAiFactory_' + p);
+            tg.setAttribute('aria-expanded', elAi.factoryOpen[p] ? 'true' : 'false');
+            tg.textContent = elAi.factoryOpen[p] ? 'Hide factory text' : 'Show factory text';
+            tg.addEventListener('click', function() {
+              elAi.factoryOpen[p] = !elAi.factoryOpen[p];
+              fac.hidden = !elAi.factoryOpen[p];
+              tg.setAttribute('aria-expanded', elAi.factoryOpen[p] ? 'true' : 'false');
+              tg.textContent = elAi.factoryOpen[p] ? 'Hide factory text' : 'Show factory text';
+            });
+            b.appendChild(tg);
+            fac.hidden = !elAi.factoryOpen[p];
+          } else fac.hidden = true;
+          var dot = Q('elAiDot_' + p);
+          dot.hidden = (now == null && saved == null);
+          Q('elAiDotSr_' + p).textContent = unsaved ? ' (unsaved changes)' : (saved != null ? ' (edited)' : '');
+          Q('elAiReset_' + p).disabled = !elAi.promptEdit || String(ta.value) === (elAi.factory[p] || '');
+          elAiCount('elAiCount_' + p, ta.value.length, EL_AI_TPL_MAX);
+        });
+        Q('elAiResetAll').disabled = !elAi.promptEdit || !anyCustom;
+        elAiRenderNotes('elAiPromptChecks', elAiTplChecks(draft));
+      }
+      function elAiRenderPrevEps() {
+        var sel = Q('elAiPrevEp'); if (sel == null) return;
+        var cur = sel.value;
+        sel.textContent = '';
+        sel.appendChild(new Option('None', ''));
+        elAi.endpoints.slice().sort(function(a, b) { return String(a.name || '').localeCompare(String(b.name || '')); }).forEach(function(ep) {
+          sel.appendChild(new Option((ep.name || ep.id) + (ep.extraInstructions ? '' : ' (no model-specific instructions)'), ep.id));
+        });
+        sel.value = cur; if (sel.value !== cur) sel.value = '';
+      }
+      function elAiPreview() {
+        var epId = Q('elAiPrevEp').value, ep = elAi.endpoints.filter(function(x) { return x.id === epId; })[0];
+        var epExtra = (elAi.edit && elAi.edit.id && elAi.edit.id === epId) ? Q('elAiEpExtra').value : ((ep && ep.extraInstructions) || '');   // unsaved form text included
+        setStatus('elAiPrevStatus', 'pending', 'Building the prompt\u2026', 'elAiPrevBtn');
+        elAiSend('preview', 'aiAdminPreviewPrompt', {
+          mode: Q('elAiPrevMode').value, os: Q('elAiPrevOs').value,
+          draft: { prompts: elAiPromptDraft(), extraInstructions: Q('elAiExtra').value, endpointExtra: epExtra }
+        }, 10000, elAiNoAnswer('elAiPrevStatus', 'elAiPrevBtn', 'the preview did not arrive.'));
         return false;
       }
 
@@ -1024,6 +1232,16 @@
           var td = function(text, cls, title) { var c = document.createElement('td'); if (cls) c.className = cls; c.textContent = (text == null || text === '') ? '\u2014' : String(text); if (title) c.title = String(title); tr.appendChild(c); return c; };
           td(elAiFmtTime(r.time));
           td(r.username || r.userid, null, r.userid);
+          if (r.kind == 'settings') {
+            td('');
+            td(r.endpointName);
+            td('', 'elNum'); td('', 'elNum'); td('', 'elNum'); td('', 'elNum');
+            var sc = td('Settings changed');
+            var what = (Array.isArray(r.changed) ? r.changed : []).map(function(k) { return EL_AI_CHANGED[k] || String(k); });
+            if (what.length) { var w = document.createElement('div'); w.className = 'elAiSub'; w.textContent = what.join(', '); sc.appendChild(w); }
+            tb.appendChild(tr);
+            return;
+          }
           td(r.nodename || r.nodeid, null, r.nodeid);
           td(r.endpointName, null, r.model ? ('Model: ' + r.model) : null);
           var steps = Array.isArray(r.steps) ? r.steps.length : r.steps;
@@ -1097,11 +1315,19 @@
         elAi.keySource = (typeof msg.keySource == 'string' && msg.keySource) ? msg.keySource : null;
         var first = !elAi.loaded;
         elAi.loaded = true;
+        if (msg.factory && typeof msg.factory == 'object') {
+          elAi.factory = {};
+          EL_AI_PARTS.forEach(function(x) { elAi.factory[x[0]] = (typeof msg.factory[x[0]] == 'string') ? msg.factory[x[0]] : ''; });
+          elAi.factoryHash = (msg.factoryHash && typeof msg.factoryHash == 'object') ? msg.factoryHash : {};
+          elAi.placeholders = (msg.placeholders && typeof msg.placeholders == 'object') ? msg.placeholders : {};
+          elAiBuildPrompts();
+        }
         if (msg.settings && typeof msg.settings == 'object') {
           elAi.settings = msg.settings;
           if (first || !elAi.settingsDirty) elAiRenderSettings();   // never overwrite unsaved edits
         }
         elAiRenderEndpoints();
+        elAiRenderPrevEps();
         if (elAi.edit) elAiKeyState();
       });
       parent.pluginHandler['eventlog'].aiAdminSaved = elAiHandler(function(msg) {
@@ -1128,7 +1354,18 @@
         if (elAiTake(msg) == null) return;
         if (msg.settings && typeof msg.settings == 'object') { elAi.settings = msg.settings; elAiRenderSettings(); }
         elAi.settingsDirty = false;
-        setStatus('elAiSetStatus', 'ok', '\u2713 Settings saved at ' + new Date().toLocaleTimeString() + '.', 'elAiSetBtn');
+        var notes = Array.isArray(msg.warnings) ? msg.warnings : [];
+        if (notes.length) setStatus('elAiSetStatus', 'warn', '\u2713 Settings saved at ' + new Date().toLocaleTimeString() + '. See the notes under System prompt.', 'elAiSetBtn');
+        else setStatus('elAiSetStatus', 'ok', '\u2713 Settings saved at ' + new Date().toLocaleTimeString() + '.', 'elAiSetBtn');
+      });
+      parent.pluginHandler['eventlog'].aiAdminPromptPreview = elAiHandler(function(msg) {
+        if (elAiTake(msg) == null) return;
+        var text = String(msg.text == null ? '' : msg.text);
+        Q('elAiPrevText').value = text;
+        Q('elAiPrevMeta').textContent = 'About ' + elAiFmtNum(Number(msg.tokens) || 0) + ' tokens, ' + elAiFmtNum(text.length) + ' characters';
+        elAiRenderNotes('elAiPrevWarn', msg.warnings);
+        Q('elAiPrevOut').hidden = false;
+        setStatus('elAiPrevStatus', '', '', 'elAiPrevBtn');
       });
       parent.pluginHandler['eventlog'].aiAdminTestResult = elAiHandler(function(msg) {
         if (elAiTake(msg) == null || elAi.edit == null) return;
@@ -1168,6 +1405,7 @@
           case 'test': setStatus('elAiFormStatus', 'err', text, 'elAiTestBtn'); break;
           case 'models': setStatus('elAiModelsStatus', 'err', text, 'elAiFetchBtn'); break;
           case 'audit': setStatus('elAiAuditStatus', 'err', text); elAiAuditButtons(); break;
+          case 'preview': setStatus('elAiPrevStatus', 'err', text, 'elAiPrevBtn'); break;
           default: setStatus('elAiEpStatus', 'err', text); if (!elAi.loaded) Q('elAiEpEmpty').textContent = 'Could not load the endpoints.';
         }
       });
@@ -1186,6 +1424,7 @@
         Q('elAiSettings').addEventListener('input', mark);
         Q('elAiSettings').addEventListener('change', mark);
         Q('elAiRounds').addEventListener('input', elAiCapPlaceholders);
+        Q('elAiEpExtra').addEventListener('input', function() { elAiCount('elAiEpExtraCount', Q('elAiEpExtra').value.length, EL_AI_EXTRA_MAX); });
         elAiRefresh();
         elAiLoadAudit();
       }
@@ -1324,6 +1563,56 @@
     #eventLogAdmin input[type=radio] { accent-color: var(--evl-acc); }
     #eventLogAdmin input[type=checkbox]:focus-visible, #eventLogAdmin input[type=radio]:focus-visible { outline: 2px solid var(--evl-acc); outline-offset: 1px; }
     #elAiKeyRemove { margin-top: 4px; }
+
+    /* ---- Assistant behaviour: prompt templates ----
+       Locked text reads as a printed sheet (muted paper, dashed edge); unlocked text is an input with a warning-coloured
+       rule on the left, so the edit state is visible at a glance on every part. */
+    #eventLogAdmin textarea {
+      border: 1px solid var(--evl-line); background: var(--evl-input); color: var(--evl-ink);
+      border-radius: 3px; padding: 6px 8px; font: inherit; box-sizing: border-box; width: 100%; max-width: 900px; resize: vertical;
+    }
+    #eventLogAdmin textarea:focus { outline: 2px solid var(--evl-acc); outline-offset: -1px; }
+    #eventLogAdmin textarea.elAiMono { font-family: Consolas, "DejaVu Sans Mono", monospace; font-size: 12px; line-height: 1.5; tab-size: 4; }
+    #eventLogAdmin textarea[readonly] { background: var(--evl-alt); border-style: dashed; color: var(--evl-ink); }
+    #eventLogAdmin textarea.elAiTpl:not([readonly]) { border-left: 4px solid var(--evl-warn-line); padding-left: 8px; }
+    .elAiBeh { display: flex; flex-direction: column; gap: 4px; }
+    .elAiBeh code { white-space: nowrap; }
+    #eventLogAdmin .elAiBadges button.elAiMini:not(#eventLogAdminNav button) { font-size: 12px; line-height: 16px; padding: 0 8px; border-radius: 9px; color: var(--evl-acc); }
+    .elAiCount { color: var(--evl-muted); font-size: 12px; max-width: 900px; text-align: right; font-variant-numeric: tabular-nums; }
+    .elAiCount.over { color: var(--evl-err); font-weight: bold; }
+    .elAiSwitch { display: inline-flex; align-items: center; gap: 6px; font-weight: bold; cursor: pointer; }
+    .elAiPartTabs { display: inline-flex; flex-wrap: wrap; align-self: flex-start; border: 1px solid var(--evl-bline); border-radius: 3px; overflow: hidden; background: var(--evl-input); margin: 4px 0 0 0; }
+    #eventLogAdmin .elAiPartTabs button:not(#eventLogAdminNav button) { border: 0; border-radius: 0; border-right: 1px solid var(--evl-line2); background: var(--evl-input); color: var(--evl-muted); padding: 4px 12px; }
+    #eventLogAdmin .elAiPartTabs button:not(#eventLogAdminNav button):last-child { border-right: 0; }
+    #eventLogAdmin .elAiPartTabs button:not(#eventLogAdminNav button):hover { background: var(--evl-hover); color: var(--evl-ink); }
+    #eventLogAdmin .elAiPartTabs button[aria-selected="true"]:not(#eventLogAdminNav button) { background: var(--evl-acc); color: var(--evl-acc-ink); font-weight: bold; }
+    .elAiDot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--evl-warn-line); margin-left: 6px; vertical-align: middle; }
+    .elAiPartTabs button[aria-selected="true"] .elAiDot { background: var(--evl-acc-ink); }
+    .elAiPanel { display: flex; flex-direction: column; gap: 4px; padding-top: 6px; }
+    .elAiBadges { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 20px; }
+    .elAiTag.edited { border-color: var(--evl-acc); color: var(--evl-acc); }
+    .elAiTag.changed { border-color: var(--evl-warn-line); background: var(--evl-warn-bg); color: var(--evl-warn-ink); white-space: normal; }
+    .elAiTag.unsaved { border-style: dashed; color: var(--evl-ink); }
+    .elAiPanelFoot { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; justify-content: space-between; max-width: 900px; }
+    .elAiFactory { border-top: 1px solid var(--evl-line2); padding-top: 6px; margin-top: 2px; }
+    .elAiFactory > span { display: block; font-size: 12px; color: var(--evl-muted); margin-bottom: 3px; }
+    .elAiChecksList { list-style: none; margin: 0; padding: 0; max-width: 900px; }
+    .elAiChecksList:empty { display: none; }
+    .elAiChecksList li { margin: 4px 0; }
+    .elAiChecksList li.elAiWarn { max-width: 900px; }
+    .elAiLegend { max-width: 900px; margin-top: 4px; }
+    .elAiLegend summary { cursor: pointer; color: var(--evl-acc); }
+    .elAiLegend summary:focus-visible { outline: 2px solid var(--evl-acc); outline-offset: 1px; }
+    .elAiLegend dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 12px; margin: 6px 0; font-size: 13px; }
+    .elAiLegend dt { margin: 0; }
+    .elAiLegend dd { margin: 0; color: var(--evl-muted); }
+    .elAiPrevText { min-height: 220px; }
+    @media (max-width: 640px) {
+      .elAiLegend dl { grid-template-columns: minmax(0, 1fr); gap: 0; }
+      .elAiLegend dd { margin-bottom: 6px; }
+      .elAiPartTabs { display: flex; }
+      #eventLogAdmin .elAiPartTabs button:not(#eventLogAdminNav button) { flex: 1 1 auto; }
+    }
     @media (max-width: 640px) {
       .elAiGrid { grid-template-columns: minmax(0, 1fr); gap: 2px 0; }
       .elAiGrid > label, .elAiGrid > .elAiLbl { padding-top: 8px; font-weight: bold; }
@@ -1500,6 +1789,11 @@
               <label>Context tokens <input type="number" id="elAiCtx" min="1024" max="4194304" step="1" placeholder="Detected when tested" aria-describedby="elAiCtxHelp" oninput="elAiLimitHints();"></label>
               <small id="elAiCtxHelp" class="elAiHelp">Leave empty to use the value shown. Max output is at most half the context. Timeout is per request to the model.</small></div>
 
+            <label for="elAiEpExtra">Model-specific instructions</label>
+            <div><textarea id="elAiEpExtra" class="elAiMono" rows="3" maxlength="4000" aria-describedby="elAiEpExtraHelp elAiEpExtraCount" placeholder="For example: /no_think"></textarea>
+              <div class="elAiCount" id="elAiEpExtraCount"></div>
+              <small id="elAiEpExtraHelp" class="elAiHelp">Added for this endpoint only, e.g. switches a model needs.</small></div>
+
             <span class="elAiLbl">Advanced</span>
             <div><label><input type="checkbox" id="elAiLinkLocal" aria-describedby="elAiLinkLocalHelp" onchange="elAiUrlChanged();"> Allow link-local addresses</label>
               <small id="elAiLinkLocalHelp" class="elAiHelp">Off by default. Link-local and cloud metadata addresses (169.254.x.x, fe80::) are blocked to protect this server. Turn this on only if your model server really uses such an address.</small></div>
@@ -1527,6 +1821,49 @@
             <label class="elAiRadio"><input type="radio" name="elAiPreview" value="every"> Show the preview every time</label>
             <label class="elAiRadio"><input type="radio" name="elAiPreview" value="once"> Show it once per user and endpoint</label>
             <label class="elAiRadio"><input type="radio" name="elAiPreview" value="never"> Do not show it</label>
+          </fieldset>
+        </section>
+
+        <section class="elAiSec" aria-labelledby="elAiBehH">
+          <h3 id="elAiBehH">Assistant behaviour</h3>
+          <fieldset class="elAiFs elAiBeh"><legend><label for="elAiExtra">Additional instructions</label></legend>
+            <small id="elAiExtraHelp" class="elAiHelp">Added after the built-in instructions for every question. Use it for context (your environment, language, tone, preferred tools). It cannot switch off the safety rules.</small>
+            <textarea id="elAiExtra" rows="4" maxlength="4000" spellcheck="true" aria-describedby="elAiExtraHelp elAiExtraCount" placeholder="For example: Our clients run Windows 11 with Microsoft Intune. Answer in German."></textarea>
+            <div class="elAiCount" id="elAiExtraCount"></div>
+          </fieldset>
+
+          <fieldset class="elAiFs elAiBeh" id="elAiPromptFs"><legend>System prompt</legend>
+            <p class="elAiHelp" id="elAiPromptHelp">The built-in instructions the model gets before every question: shared base instructions, then the part for the kind of question. Values in <code>&#123;&#123;&hellip;&#125;&#125;</code> are filled in for each request.</p>
+            <div class="elAiBtns">
+              <label class="elAiSwitch"><input type="checkbox" role="switch" id="elAiPromptEdit" aria-describedby="elAiPromptWarn"> Edit the system prompt</label>
+            </div>
+            <p id="elAiPromptWarn" class="elAiWarn" hidden>Changes affect every answer. The trust rules protect against instructions hidden in event logs; the output blocks are what the Diagnosis, Explain and follow-up views read.</p>
+            <div id="elAiPartTabs" class="elAiPartTabs" role="tablist" aria-label="System prompt parts"></div>
+            <div id="elAiPartPanels"></div>
+            <ul id="elAiPromptChecks" class="elAiChecksList" aria-live="polite"></ul>
+            <div class="elAiBtns"><button id="elAiResetAll" disabled>Reset all to factory defaults</button></div>
+            <details class="elAiLegend">
+              <summary>Placeholders</summary>
+              <p class="elAiHelp">A line that holds only a placeholder is left out when the placeholder is empty. Unknown placeholders are sent as they are.</p>
+              <dl id="elAiPhList"></dl>
+            </details>
+          </fieldset>
+
+          <fieldset class="elAiFs elAiBeh"><legend>Full prompt</legend>
+            <p class="elAiHelp" id="elAiPrevHelp">What the model receives as instructions, built from the text on this page including unsaved changes. Sample values: device SAMPLE-PC, every tool available, personal values replaced.</p>
+            <div class="elAiFilters">
+              <label>Question type <select id="elAiPrevMode"><option value="ask">Ask</option><option value="explain">Explain</option><option value="diagnose">Diagnosis</option></select></label>
+              <label>Device <select id="elAiPrevOs"><option value="windows">Windows</option><option value="linux">Linux</option></select></label>
+              <label>Endpoint <select id="elAiPrevEp"><option value="">None</option></select></label>
+              <button id="elAiPrevBtn">Show the full prompt</button>
+              <span id="elAiPrevStatus" class="elSaveStatus" role="status" aria-live="polite"></span>
+            </div>
+            <div id="elAiPrevOut" hidden>
+              <ul id="elAiPrevWarn" class="elAiChecksList"></ul>
+              <label for="elAiPrevText" class="elSr">Full prompt</label>
+              <textarea id="elAiPrevText" class="elAiMono elAiPrevText" rows="18" readonly aria-describedby="elAiPrevMeta"></textarea>
+              <div class="elAiCount" id="elAiPrevMeta"></div>
+            </div>
           </fieldset>
         </section>
 

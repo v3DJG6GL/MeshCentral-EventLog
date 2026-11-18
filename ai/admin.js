@@ -5,10 +5,18 @@
 //   -> { handle(command, myparent) -> bool }
 //   handle returns false for an action it does not know, true otherwise (the reply is sent asynchronously).
 //   Replies go to myparent.ws as { action:'plugin', plugin:'eventlog', method, reqId?, ... }:
-//   aiAdminGet            -> aiAdminData { endpoints:[public], settings, usedBy:{epId:[set names]}, keySource }
+//   aiAdminGet            -> aiAdminData { endpoints:[public], settings, usedBy:{epId:[set names]}, keySource,
+//                            prompts (settings.prompts), factory (prompts.FACTORY), factoryHash {part: sha256 hex},
+//                            placeholders {name: meaning} }
 //   aiAdminSaveEndpoint   -> aiAdminSaved { endpoint(public), warning? }       | aiAdminError { scope:'endpoint' }
 //   aiAdminDeleteEndpoint -> aiAdminDeleted { id }                              | aiAdminError { scope:'endpoint' }
-//   aiAdminSaveSettings   -> aiAdminSettingsSaved { settings }                  | aiAdminError { scope:'settings' }
+//   aiAdminSaveSettings   -> aiAdminSettingsSaved { settings, warnings }        | aiAdminError { scope:'settings' }
+//       prompts.edited is set here (never taken from the page): { at, by: user name, factoryHash } for every part
+//       saved with own text, dropped for parts back at the factory default. A save that changes prompt parts or
+//       extra instructions writes an audit record { kind:'settings', counted:false, userid, username, changed }.
+//   aiAdminPreviewPrompt {mode, os:'windows'|'linux', draft:{prompts?, extraInstructions?, endpointExtra?}}
+//                         -> aiAdminPromptPreview { text, warnings, tokens } (sample device, window, nonce, all tools;
+//                            missing draft fields use the saved settings)
 //   aiAdminTest {id|draft}-> aiAdminTestResult { ok, steps:[{name,ok,ms,detail}], network, caps }
 //       steps resolve, connect, auth, model, tools, context; a step that could not run has ok:null.
 //       Only a test of a saved endpoint ({id} without draft) stores caps, lastTest and network. The auth step
@@ -25,6 +33,9 @@
 // redirects, stay on the validated host, never send a key over http:// to a public address and share a 30 s
 // budget per test (the admin page waits 40 s) and stop at the first connect-level failure. Details sent back
 // are short (<= 300 chars) and have the key scrubbed.
+
+const prompts = require('./prompts.js');
+const budget = require('./budget.js');
 
 const OVERALL_MS = 30000;
 const MAX_INFLIGHT = 4;
@@ -374,7 +385,11 @@ function create(o) {
         const eps = await store.listEndpoints();
         const settings = await store.getSettings();
         const usedBy = await usedByMap();
-        return { endpoints: eps.map(store.publicEndpoint), settings: settings, usedBy: usedBy, keySource: store.keySource() || null };
+        return {
+            endpoints: eps.map(store.publicEndpoint), settings: settings, usedBy: usedBy, keySource: store.keySource() || null,
+            prompts: settings.prompts || null, factory: Object.assign({}, prompts.FACTORY), factoryHash: Object.assign({}, prompts.FACTORY_HASH),
+            placeholders: Object.assign({}, prompts.PLACEHOLDERS)
+        };
     }
 
     async function doGet(command, myparent) {
@@ -395,7 +410,11 @@ function create(o) {
     async function doSave(command, myparent) {
         try {
             if (!isObj(command.endpoint)) throw mkErr('invalid', 'Missing endpoint data');
+            const before = typeof command.endpoint.id === 'string' && command.endpoint.id ? await store.getEndpoint(command.endpoint.id) : null;
             const ep = await store.saveEndpoint(command.endpoint, { keyAction: command.keyAction == null ? 'keep' : command.keyAction, key: command.key });
+            if (String((before && before.extraInstructions) || '') !== String(ep.extraInstructions || '')) {
+                await settingsAudit(myparent, ['endpoint.extraInstructions'], { endpointId: ep.id, endpointName: String(ep.name || '').slice(0, 64) });
+            }
             const msg = { method: 'aiAdminSaved', reqId: command.reqId, endpoint: store.publicEndpoint(ep) };
             if (ep.warning) msg.warning = short(ep.warning);
             safeSend(myparent, msg);
@@ -416,13 +435,71 @@ function create(o) {
         }
     }
 
+    function userOf(myparent) {
+        const u = (myparent && myparent.user) || {};
+        return { userid: typeof u._id === 'string' ? u._id : null, username: typeof u.name === 'string' ? u.name.slice(0, 120) : null };
+    }
+    function settingsAudit(myparent, changed, extra) {
+        if (!changed.length) return Promise.resolve();
+        const u = userOf(myparent);
+        return Promise.resolve(store.auditAdd(Object.assign({ kind: 'settings', counted: false, userid: u.userid, username: u.username, changed: changed, time: Date.now() }, extra || {})))
+            .catch(function (e) { warn('settings audit failed (' + errText(e) + ')'); });
+    }
+    function promptChanges(a, b) {
+        const pa = (a && a.prompts) || {}, pb = (b && b.prompts) || {}, out = [];
+        for (const p of prompts.PARTS) if ((pa[p] == null ? null : pa[p]) !== (pb[p] == null ? null : pb[p])) out.push('prompts.' + p);
+        if (String((a && a.extraInstructions) || '') !== String((b && b.extraInstructions) || '')) out.push('extraInstructions');
+        return out;
+    }
+
     async function doSettings(command, myparent) {
         try {
             if (!isObj(command.settings)) throw mkErr('invalid', 'Missing settings');
-            const s = await store.saveSettings(command.settings);
-            safeSend(myparent, { method: 'aiAdminSettingsSaved', reqId: command.reqId, settings: s });
+            const input = Object.assign({}, command.settings);
+            const cur = await store.getSettings();
+            const curP = isObj(cur.prompts) ? cur.prompts : {};
+            // who edited which part is recorded here, never taken from the page
+            const reqP = isObj(input.prompts) ? Object.assign({}, input.prompts) : {};
+            delete reqP.edited;
+            const next = store.mergeSettings(cur, Object.assign({}, input, { prompts: reqP }));
+            const edited = Object.assign({}, isObj(curP.edited) ? curP.edited : {});
+            const by = userOf(myparent);
+            for (const p of prompts.PARTS) {
+                const nv = next.prompts ? next.prompts[p] : null;
+                if (nv == null) delete edited[p];
+                else if (nv !== (curP[p] == null ? null : curP[p]) || !edited[p]) edited[p] = { at: Date.now(), by: by.username || by.userid || '', factoryHash: prompts.FACTORY_HASH[p] };
+            }
+            reqP.edited = edited;
+            input.prompts = reqP;
+            const s = await store.saveSettings(input);
+            await settingsAudit(myparent, promptChanges(cur, s));
+            safeSend(myparent, { method: 'aiAdminSettingsSaved', reqId: command.reqId, settings: s, warnings: prompts.checkTemplates(s.prompts) });
         } catch (e) {
             safeSend(myparent, { method: 'aiAdminError', reqId: command.reqId, scope: 'settings', error: userError(e, 'Could not save the settings') });
+        }
+    }
+
+    const SAMPLE_NONCE = '5a3c0f9e1b7d24c86e0a9f31';
+    async function doPreview(command, myparent) {
+        try {
+            const cur = await store.getSettings();
+            const d = isObj(command.draft) ? command.draft : {};
+            const input = {};
+            if (isObj(d.prompts)) { input.prompts = Object.assign({}, d.prompts); delete input.prompts.edited; }
+            if (typeof d.extraInstructions === 'string') input.extraInstructions = d.extraInstructions;
+            const eff = store.mergeSettings(cur, input);
+            const mode = ['ask', 'explain', 'diagnose'].indexOf(command.mode) >= 0 ? command.mode : 'ask';
+            const os = command.os === 'linux' ? 'linux' : 'windows';
+            const t = Date.now();
+            const ctx = {
+                nonce: SAMPLE_NONCE, deviceName: 'SAMPLE-PC', os: os, tools: prompts.TOOL_NAMES.slice(), redacted: true, now: t,
+                window: mode === 'diagnose' ? { from: t - 6 * 3600000, to: t } : null
+            };
+            const text = prompts.system(mode, ctx, { prompts: eff.prompts, extraInstructions: eff.extraInstructions, endpointExtra: typeof d.endpointExtra === 'string' ? d.endpointExtra : '' });
+            safeSend(myparent, { method: 'aiAdminPromptPreview', reqId: command.reqId, mode: mode, os: os, text: text, warnings: prompts.checkTemplates(eff.prompts), tokens: budget.estimateTokens(text) });
+        } catch (e) {
+            warn('prompt preview failed (' + errText(e) + ')');
+            safeSend(myparent, { method: 'aiAdminError', reqId: command.reqId, scope: 'preview', error: 'The preview could not be built' });
         }
     }
 
@@ -465,7 +542,8 @@ function create(o) {
         aiAdminSaveSettings: doSettings,
         aiAdminTest: limited(doTest, 'aiAdminTestResult'),
         aiAdminModels: limited(doModels, 'aiAdminModelsResult'),
-        aiAdminAudit: doAudit
+        aiAdminAudit: doAudit,
+        aiAdminPreviewPrompt: doPreview
     };
 
     // reqId is echoed back: only short strings and finite numbers

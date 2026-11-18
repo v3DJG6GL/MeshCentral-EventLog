@@ -53,3 +53,8 @@ test('spreadsheet formulas are neutralised', function () {
     // harmless text and numbers are left alone
     assert.strictEqual(auditCsv([{ username: 'a=b' }]).split('\r\n')[1].split(',')[1], 'a=b');
 });
+
+test('settings records: mode "settings" and the changed fields as the result', function () {
+    var l = lines(auditCsv([{ time: 0, kind: 'settings', counted: false, username: 'admin', changed: ['prompts.base', 'extraInstructions'] }]));
+    assert.strictEqual(l[1], '1970-01-01T00:00:00.000Z,admin,,,,settings,,,,,,,,changed: prompts.base extraInstructions,');
+});

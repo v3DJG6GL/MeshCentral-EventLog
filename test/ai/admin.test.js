@@ -153,6 +153,118 @@ test('settings are clamped; errors carry scope settings', async function () {
     assert.deepStrictEqual([r.method, r.scope], ['aiAdminError', 'settings']);
 });
 
+test('system prompt: aiAdminData carries the factory templates, hashes and overrides', async function () {
+    const P = require('../../ai/prompts.js');
+    const t = setup();
+    let r = await t.call({ pluginaction: 'aiAdminGet' });
+    assert.deepStrictEqual(r.factory, Object.assign({}, P.FACTORY));
+    assert.deepStrictEqual(r.factoryHash, Object.assign({}, P.FACTORY_HASH));
+    assert.deepStrictEqual(r.prompts, storeMod.DEFAULTS.prompts);
+    assert.deepStrictEqual(Object.keys(r.placeholders), Object.keys(P.PLACEHOLDERS));
+    await t.call({ pluginaction: 'aiAdminSaveSettings', settings: { prompts: { ask: 'Own ask <followups>' } } });
+    r = await t.call({ pluginaction: 'aiAdminGet' });
+    assert.strictEqual(r.prompts.ask, 'Own ask <followups>');
+    assert.strictEqual(r.settings.prompts.ask, 'Own ask <followups>');
+    assert.strictEqual(r.prompts.edited.ask.factoryHash, P.FACTORY_HASH.ask);
+});
+
+test('system prompt: saving records who edited which part, drops reset parts and writes a settings audit record', async function () {
+    const P = require('../../ai/prompts.js');
+    const t = setup();
+    t.myparent.user.name = 'admin';
+    const t0 = Date.now();
+    // the page cannot set edited itself
+    let r = await t.call({ pluginaction: 'aiAdminSaveSettings', settings: {
+        prompts: { base: 'No fence {{nonce}}', explain: 'Explain without block', ask: null, diagnose: P.FACTORY.diagnose, edited: { ask: { at: 1, by: 'mallory' }, base: { at: 1, by: 'mallory' } } },
+        extraInstructions: 'Answer in German.'
+    } });
+    assert.strictEqual(r.method, 'aiAdminSettingsSaved');
+    const ed = r.settings.prompts.edited;
+    assert.deepStrictEqual(Object.keys(ed).sort(), ['base', 'explain']);
+    assert.strictEqual(ed.base.by, 'admin');
+    assert.ok(ed.base.at >= t0);
+    assert.strictEqual(ed.base.factoryHash, P.FACTORY_HASH.base);
+    assert.strictEqual(ed.explain.factoryHash, P.FACTORY_HASH.explain);
+    assert.deepStrictEqual(r.warnings, ['Without the <explain> block the Explain view falls back to plain text.']);
+    let audit = t.db.audit.filter(function (a) { return a.kind === 'settings'; });
+    assert.strictEqual(audit.length, 1);
+    assert.deepStrictEqual([audit[0].counted, audit[0].userid, audit[0].username], [false, 'user/d/admin', 'admin']);
+    assert.deepStrictEqual(audit[0].changed, ['prompts.base', 'prompts.explain', 'extraInstructions']);
+    assert.ok(audit[0].time >= t0);
+    const firstAt = ed.base.at;
+
+    // another user changes only explain: base keeps its edit record; settings without prompt changes write no record
+    t.myparent.user.name = 'bob';
+    r = await t.call({ pluginaction: 'aiAdminSaveSettings', settings: { prompts: { base: 'No fence {{nonce}}', explain: 'Explain <explain>' }, extraInstructions: 'Answer in German.' } });
+    assert.deepStrictEqual([r.settings.prompts.edited.base.by, r.settings.prompts.edited.base.at, r.settings.prompts.edited.explain.by], ['admin', firstAt, 'bob']);
+    assert.deepStrictEqual(r.warnings, []);
+    r = await t.call({ pluginaction: 'aiAdminSaveSettings', settings: { previewPolicy: 'once' } });
+    audit = t.db.audit.filter(function (a) { return a.kind === 'settings'; });
+    assert.deepStrictEqual(audit.map(function (a) { return a.changed; }), [['prompts.base', 'prompts.explain', 'extraInstructions'], ['prompts.explain']]);
+
+    // reset to the factory default ('' or the factory text): the edit record goes, the change is audited
+    r = await t.call({ pluginaction: 'aiAdminSaveSettings', settings: { prompts: { base: '', explain: P.FACTORY.explain }, extraInstructions: '' } });
+    assert.deepStrictEqual([r.settings.prompts.base, r.settings.prompts.explain, r.settings.prompts.edited, r.settings.extraInstructions], [null, null, {}, '']);
+    audit = t.db.audit.filter(function (a) { return a.kind === 'settings'; });
+    assert.deepStrictEqual(audit[2].changed, ['prompts.base', 'prompts.explain', 'extraInstructions']);
+    // settings records are not counted as questions
+    assert.strictEqual((await t.store.usage('user/d/admin', 0)).questions, 0);
+});
+
+test('system prompt: preview renders the draft with sample values and returns warnings', async function () {
+    const P = require('../../ai/prompts.js');
+    const t = setup();
+    await t.call({ pluginaction: 'aiAdminSaveSettings', settings: { prompts: { ask: 'Saved ask <followups>' }, extraInstructions: 'Saved extra' } });
+    // no draft: the saved settings
+    let r = await t.call({ pluginaction: 'aiAdminPreviewPrompt', mode: 'ask', os: 'windows' });
+    assert.strictEqual(r.method, 'aiAdminPromptPreview');
+    assert.match(r.text, /^You are a read-only troubleshooting assistant for ONE MeshCentral device: "SAMPLE-PC" \(Windows\)\./);
+    assert.match(r.text, /\n\nSaved ask <followups>\n\nAdditional instructions from the administrator:\nSaved extra$/);
+    assert.match(r.text, /nonce=[0-9a-f]{24} \.\.\.>>>/);
+    assert.match(r.text, /Tools \(read-only, bound to this device\): get_device_info, /);
+    assert.match(r.text, /HOST_1/);
+    assert.deepStrictEqual(r.warnings, []);
+    assert.ok(r.tokens > 100);
+    // a draft (unsaved) wins over the saved text, for every part it carries
+    r = await t.call({ pluginaction: 'aiAdminPreviewPrompt', mode: 'diagnose', os: 'linux', draft: {
+        prompts: { base: 'Draft base {{device}}{{os}} {{osNotes}} {{oops}}', ask: null, diagnose: 'Draft diagnosis' }, extraInstructions: '', endpointExtra: '/no_think'
+    } });
+    assert.strictEqual(r.text.split('\n\n')[0].indexOf('Draft base SAMPLE-PC (Linux) On this Linux device'), 0);
+    assert.match(r.text, /\{\{oops\}\}/);
+    assert.match(r.text, /\n\nDraft diagnosis\n\nModel-specific instructions:\n\/no_think$/);
+    assert.ok(r.text.indexOf('Saved extra') < 0, 'the draft cleared the extra instructions');
+    assert.deepStrictEqual(r.warnings, [
+        'Without {{nonce}} the rule that marks event data as untrusted is incomplete: text in event logs could be taken as instructions.',
+        'Without the <diagnosis> block the Diagnosis view falls back to plain text.',
+        'Unknown placeholders are sent as they are: {{oops}}.'
+    ]);
+    // explain with the factory text; unknown mode / os fall back to ask / windows; the diagnosis gets a sample window
+    r = await t.call({ pluginaction: 'aiAdminPreviewPrompt', mode: 'explain', os: 'linux', draft: { prompts: { ask: null } } });
+    assert.ok(r.text.endsWith(P.FACTORY.explain + '\n\nAdditional instructions from the administrator:\nSaved extra'));
+    r = await t.call({ pluginaction: 'aiAdminPreviewPrompt', mode: 'nope', os: 'mac', draft: 'x' });
+    assert.deepStrictEqual([r.mode, r.os], ['ask', 'windows']);
+    r = await t.call({ pluginaction: 'aiAdminPreviewPrompt', mode: 'diagnose', draft: { prompts: {} } });
+    assert.match(r.text, /Time window of interest: \d{4}-.* to \d{4}-/);
+    // the preview never saves
+    assert.strictEqual((await t.store.getSettings()).prompts.base, null);
+});
+
+test('endpoint: model-specific instructions are saved, returned and their change audited', async function () {
+    const t = setup();
+    t.myparent.user.name = 'admin';
+    let r = await t.call({ pluginaction: 'aiAdminSaveEndpoint', endpoint: chatEp({ extraInstructions: '/no_think' }) });
+    assert.strictEqual(r.endpoint.extraInstructions, '/no_think');
+    const id = r.endpoint.id;
+    r = await t.call({ pluginaction: 'aiAdminSaveEndpoint', endpoint: chatEp({ id: id, extraInstructions: '/no_think' }) });
+    r = await t.call({ pluginaction: 'aiAdminSaveEndpoint', endpoint: chatEp({ id: id }) });
+    assert.strictEqual(r.endpoint.extraInstructions, '');
+    const audit = t.db.audit.filter(function (a) { return a.kind === 'settings'; });
+    assert.deepStrictEqual(audit.map(function (a) { return [a.changed, a.endpointName, a.username]; }), [[['endpoint.extraInstructions'], 'Mock chat', 'admin'], [['endpoint.extraInstructions'], 'Mock chat', 'admin']]);
+    r = await t.call({ pluginaction: 'aiAdminSaveEndpoint', endpoint: chatEp({ id: id, extraInstructions: 'x'.repeat(4001) }) });
+    assert.deepStrictEqual([r.method, r.scope], ['aiAdminError', 'endpoint']);
+    assert.match(r.error, /4000/);
+});
+
 test('test: openai-chat with tools, stored key, caps and lastTest saved', async function () {
     const t = setup();
     const saved = await t.call({ pluginaction: 'aiAdminSaveEndpoint', endpoint: chatEp(), keyAction: 'set', key: KEY });

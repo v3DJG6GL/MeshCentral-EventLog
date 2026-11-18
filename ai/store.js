@@ -8,7 +8,7 @@
 //
 // Endpoints (settings store, id 'aiEndpoint:<12 hex>', type 'aiEndpoint'):
 //   { id, name, format, preset, baseUrl, model, key, contextTokens, numCtx, maxOutputTokens, timeoutSec, toolMode,
-//     allowLinkLocal, network, caps, quirks, lastTest, updated }
+//     allowLinkLocal, extraInstructions (<= 4000 chars, '' = none), network, caps, quirks, lastTest, updated }
 //   key: null | { v, iv, ct, tag, last4 } (AES-GCM, AAD = endpoint id) | { env: 'VAR' }
 //   listEndpoints() -> Promise<[ep]> (sorted by name)      getEndpoint(id) -> Promise<ep|null>
 //   saveEndpoint(input, { keyAction:'keep'|'set'|'remove', key }) -> Promise<ep>
@@ -30,6 +30,9 @@
 //   saveSettings(input) -> Promise<settings>: known fields only, numbers clamped, enums checked; fields missing
 //   from input keep their current value. Quotas of 0 mean "no limit". limits.maxCalls and limits.maxSentKB may be
 //   null (or '') for "automatic": 3 x maxRounds tool calls, and about 3 bytes per context token (at least 400 KB).
+//   prompts { base, ask, explain, diagnose: null (factory default) | text <= 20000 chars, edited { part: {at, by,
+//   factoryHash} } } ('' or the factory text itself -> null; edited entries of factory parts are dropped) and
+//   extraInstructions (<= 4000 chars). mergeSettings(base, input) is the same merge without saving.
 //   The stored document also carries sv (SETTINGS_VERSION, server-side only); an older document is migrated once
 //   on load (old defaults -> new defaults) and saved again; a failed save is logged and does not fail the load.
 // Acknowledgements: getAck(userid, epId) -> Promise<bool>, setAck(userid, epId) -> Promise<bool>.
@@ -39,6 +42,7 @@
 //   Promise<{questions, tokens}> (never rejects; zeros + log on a database error), sweep() -> Promise<removed>.
 
 const crypto = require('crypto');
+const prompts = require('./prompts.js');
 
 const FORMATS = ['openai-chat', 'openai-responses', 'anthropic'];
 const PRESETS = ['ollama', 'vllm', 'lmstudio', 'llamacpp', 'localai', 'custom'];
@@ -61,8 +65,13 @@ const DEFAULTS = {
     storeTranscripts: false,
     previewPolicy: 'every',
     redact: { users: true, hosts: true, domains: true, ips: true, macs: true, emails: true, sids: true, paths: true, secrets: true, serials: false },
-    categories: { deviceSummary: true, network: true, storedEvents: true, meshEvents: true, notes: false, software: false }
+    categories: { deviceSummary: true, network: true, storedEvents: true, meshEvents: true, notes: false, software: false },
+    // system prompt templates per part (null = factory default, ai/prompts.js FACTORY); edited[part] = { at, by, factoryHash }
+    prompts: { base: null, ask: null, explain: null, diagnose: null, edited: {} },
+    extraInstructions: ''
 };
+const PROMPT_PARTS = prompts.PARTS;
+const MAX_TEMPLATE = prompts.MAX_TEMPLATE, MAX_EXTRA = prompts.MAX_EXTRA;
 const RANGES = {
     limits: { maxRounds: [1, 50], maxCalls: [1, 200], maxOutputTokens: [64, 128000], timeoutSec: [10, 900], maxSentKB: [16, 8192] },
     quotas: { perUserQuestions: [0, 100000], perUserTokens: [0, 1000000000] },
@@ -97,6 +106,70 @@ function clampInt(v, range, fallback) {
     const n = Number(v);
     if (!Number.isFinite(n)) return fallback;
     return Math.min(range[1], Math.max(range[0], Math.round(n)));
+}
+
+// a template part from the admin page: null for the factory default ('', blank or the factory text itself),
+// undefined for a value that is not a string (ignored), else the text (line breaks normalized, capped)
+function normTemplate(part, v) {
+    if (v === null) return null;
+    if (typeof v !== 'string') return undefined;
+    const t = v.replace(/\r\n?/g, '\n');
+    if (t.trim() === '' || t === prompts.FACTORY[part]) return null;
+    return t.length > MAX_TEMPLATE ? t.slice(0, MAX_TEMPLATE) : t;
+}
+function normExtra(v) {
+    if (typeof v !== 'string') return undefined;
+    const t = v.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
+    return t.length > MAX_EXTRA ? t.slice(0, MAX_EXTRA) : t;
+}
+function normEdited(e) {
+    const out = {};
+    if (!isObj(e)) return out;
+    for (const p of PROMPT_PARTS) {
+        const x = e[p];
+        if (!isObj(x)) continue;
+        out[p] = {
+            at: Number.isFinite(Number(x.at)) && Number(x.at) > 0 ? Number(x.at) : Date.now(),
+            by: String(x.by == null ? '' : x.by).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 120),
+            factoryHash: typeof x.factoryHash === 'string' && /^[0-9a-f]{64}$/.test(x.factoryHash) ? x.factoryHash : null
+        };
+    }
+    return out;
+}
+
+// Settings merge (pure): base settings + input -> new settings. Known fields only, numbers clamped, enums checked,
+// fields missing from input keep their base value.
+function mergeSettings(base, input) {
+    const s = clone(base);
+    if (!isObj(s.prompts)) s.prompts = clone(DEFAULTS.prompts);
+    for (const p of PROMPT_PARTS) if (typeof s.prompts[p] !== 'string') s.prompts[p] = null;
+    s.prompts.edited = normEdited(s.prompts.edited);
+    if (typeof s.extraInstructions !== 'string') s.extraInstructions = '';
+    if (!isObj(input)) return s;
+    if (typeof input.enabled === 'boolean') s.enabled = input.enabled;
+    if (typeof input.storeTranscripts === 'boolean') s.storeTranscripts = input.storeTranscripts;
+    if (PREVIEW.indexOf(input.previewPolicy) >= 0) s.previewPolicy = input.previewPolicy;
+    s.retentionDays = clampInt(input.retentionDays, RANGES.retentionDays, s.retentionDays);
+    for (const grp of ['limits', 'quotas']) {
+        if (!isObj(input[grp])) continue;
+        for (const k of Object.keys(DEFAULTS[grp])) {
+            const v = input[grp][k];
+            if (NULLABLE[grp] && NULLABLE[grp][k] && (v === null || v === '')) s[grp][k] = null;
+            else s[grp][k] = clampInt(v, RANGES[grp][k], s[grp][k]);
+        }
+    }
+    for (const grp of ['redact', 'categories']) {
+        if (!isObj(input[grp])) continue;
+        for (const k of Object.keys(DEFAULTS[grp])) if (typeof input[grp][k] === 'boolean') s[grp][k] = input[grp][k];
+    }
+    if (isObj(input.prompts)) {
+        for (const p of PROMPT_PARTS) { const v = normTemplate(p, input.prompts[p]); if (v !== undefined) s.prompts[p] = v; }
+        if (isObj(input.prompts.edited)) s.prompts.edited = normEdited(input.prompts.edited);
+    }
+    for (const p of PROMPT_PARTS) if (s.prompts[p] == null) delete s.prompts.edited[p];
+    const ex = normExtra(input.extraInstructions);
+    if (ex !== undefined) s.extraInstructions = ex;
+    return s;
 }
 
 // Syntax-only endpoint validation (no DNS). Throws Error{code:'invalid'}.
@@ -138,6 +211,10 @@ function validateEndpoint(input, opts) {
     }
     out.toolMode = TOOL_MODES.indexOf(input.toolMode) >= 0 ? input.toolMode : 'auto';
     out.allowLinkLocal = input.allowLinkLocal === true;
+    const ex = input.extraInstructions == null ? '' : normExtra(input.extraInstructions);
+    if (ex === undefined) throw invalid('Model-specific instructions must be text');
+    if (typeof input.extraInstructions === 'string' && input.extraInstructions.trim().length > MAX_EXTRA) throw invalid('Model-specific instructions must be at most ' + MAX_EXTRA + ' characters');
+    out.extraInstructions = ex;
     return out;
 }
 
@@ -287,6 +364,7 @@ function create(opts) {
         const o = {};
         for (const k of Object.keys(ep)) if (k !== 'key' && k !== '_id' && k !== 'type') o[k] = ep[k];
         const k = ep.key;
+        if (typeof o.extraInstructions !== 'string') o.extraInstructions = '';
         o.hasKey = !!(k && (k.env || k.ct));
         o.keyHint = !k ? '' : (typeof k.env === 'string' ? 'env:' + k.env : (k.last4 ? '…' + k.last4 : ''));
         return o;
@@ -314,27 +392,6 @@ function create(opts) {
     }
 
     // ---- settings ----
-    function mergeSettings(base, input) {
-        const s = clone(base);
-        if (!isObj(input)) return s;
-        if (typeof input.enabled === 'boolean') s.enabled = input.enabled;
-        if (typeof input.storeTranscripts === 'boolean') s.storeTranscripts = input.storeTranscripts;
-        if (PREVIEW.indexOf(input.previewPolicy) >= 0) s.previewPolicy = input.previewPolicy;
-        s.retentionDays = clampInt(input.retentionDays, RANGES.retentionDays, s.retentionDays);
-        for (const grp of ['limits', 'quotas']) {
-            if (!isObj(input[grp])) continue;
-            for (const k of Object.keys(DEFAULTS[grp])) {
-                const v = input[grp][k];
-                if (NULLABLE[grp] && NULLABLE[grp][k] && (v === null || v === '')) s[grp][k] = null;
-                else s[grp][k] = clampInt(v, RANGES[grp][k], s[grp][k]);
-            }
-        }
-        for (const grp of ['redact', 'categories']) {
-            if (!isObj(input[grp])) continue;
-            for (const k of Object.keys(DEFAULTS[grp])) if (typeof input[grp][k] === 'boolean') s[grp][k] = input[grp][k];
-        }
-        return s;
-    }
     function putSettings(s) { return db.aiPutDoc('aiSettings', 'aiSettings', Object.assign({}, s, { sv: SETTINGS_VERSION })); }
     async function loadSettings() {
         let d = null;
@@ -442,8 +499,8 @@ function create(opts) {
     return {
         listEndpoints, getEndpoint, saveEndpoint, deleteEndpoint, publicEndpoint, resolveKey, setCaps, setNetwork, setQuirks, setLastTest,
         validateEndpoint, keySource: function () { return secrets && secrets.source; },
-        getSettings, saveSettings, getAck, setAck, auditAdd, auditQuery, usage, sweep
+        getSettings, saveSettings, mergeSettings, getAck, setAck, auditAdd, auditQuery, usage, sweep
     };
 }
 
-module.exports = { create, validateEndpoint, sanitize, DEFAULTS, SETTINGS_VERSION, FORMATS, PRESETS, TOOL_MODES, ID_RE };
+module.exports = { create, validateEndpoint, sanitize, mergeSettings, DEFAULTS, SETTINGS_VERSION, FORMATS, PRESETS, TOOL_MODES, ID_RE };

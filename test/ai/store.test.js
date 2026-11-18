@@ -367,6 +367,65 @@ test('settings: an unversioned document with the old defaults is migrated once; 
     assert.ok(logs5.some(function (m) { return /^EVENTLOG AI: could not save the migrated settings \(disk full\)/.test(m); }), logs5.join('\n'));
 });
 
+test('settings: prompt templates and extra instructions (defaults, clamping, factory text and blanks -> null, edited)', async function () {
+    const P = require('../../ai/prompts.js');
+    const { store, db } = setup();
+    const d = await store.getSettings();
+    assert.deepStrictEqual(d.prompts, { base: null, ask: null, explain: null, diagnose: null, edited: {} });
+    assert.strictEqual(d.extraInstructions, '');
+    const h = P.FACTORY_HASH.base;
+    let s = await store.saveSettings({
+        prompts: { base: 'Mine {{nonce}}\r\nline 2', ask: '', explain: '   \n ', diagnose: 'x'.repeat(25000), bogus: 'y',
+            edited: { base: { at: 5, by: 'alice\n', factoryHash: h, evil: 1 }, ask: { at: 6, by: 'bob' }, nope: { at: 1 } } },
+        extraInstructions: '  Answer in German.\r\n\u0000Thanks  '
+    });
+    assert.deepStrictEqual(Object.keys(s.prompts).sort(), ['ask', 'base', 'diagnose', 'edited', 'explain']);
+    assert.strictEqual(s.prompts.base, 'Mine {{nonce}}\nline 2');
+    assert.strictEqual(s.prompts.ask, null);
+    assert.strictEqual(s.prompts.explain, null);
+    assert.strictEqual(s.prompts.diagnose.length, 20000);
+    // edited entries are cleaned and kept only for parts with own text
+    assert.deepStrictEqual(s.prompts.edited, { base: { at: 5, by: 'alice', factoryHash: h } });
+    assert.strictEqual(s.extraInstructions, 'Answer in German.\nThanks');
+    assert.strictEqual(db.docs.get('aiSettings').prompts.base, 'Mine {{nonce}}\nline 2');
+    // the factory text itself is stored as null (factory default); non-strings are ignored; missing parts are kept
+    s = await store.saveSettings({ prompts: { base: P.FACTORY.base, ask: 5, explain: 'E <explain>' } });
+    assert.deepStrictEqual([s.prompts.base, s.prompts.ask, s.prompts.explain], [null, null, 'E <explain>']);
+    assert.strictEqual(s.prompts.diagnose.length, 20000);
+    assert.deepStrictEqual(s.prompts.edited, {});
+    s = await store.saveSettings({ extraInstructions: 'z'.repeat(5000), prompts: 'nope' });
+    assert.strictEqual(s.extraInstructions.length, 4000);
+    assert.strictEqual(s.prompts.explain, 'E <explain>');
+    assert.strictEqual((await store.saveSettings({ extraInstructions: 42 })).extraInstructions.length, 4000);
+    assert.strictEqual((await store.saveSettings({ extraInstructions: '' })).extraInstructions, '');
+    // a stored document from before the templates gets the defaults; mergeSettings is the same merge without saving
+    const db2 = fakeDb();
+    db2.docs.set('aiSettings', { _id: 'aiSettings', type: 'aiSettings', sv: 2, limits: { maxRounds: 9 }, prompts: { base: 7, edited: 'x' } });
+    const s2 = await storeMod.create({ db: db2, secrets: makeSecrets(), netguard: fakeNetguard(), log: function () { } }).getSettings();
+    assert.deepStrictEqual([s2.limits.maxRounds, s2.prompts, s2.extraInstructions], [9, storeMod.DEFAULTS.prompts, '']);
+    const before = JSON.stringify(db.docs.get('aiSettings'));
+    const m = store.mergeSettings(await store.getSettings(), { prompts: { ask: 'A <followups>' } });
+    assert.strictEqual(m.prompts.ask, 'A <followups>');
+    assert.strictEqual(JSON.stringify(db.docs.get('aiSettings')), before);
+    assert.strictEqual((await store.getSettings()).prompts.ask, null);
+});
+
+test('endpoints: model-specific instructions (validated, stored, in publicEndpoint)', async function () {
+    const { store, db } = setup();
+    let ep = await store.saveEndpoint(Object.assign({}, BASE, { extraInstructions: '  /no_think\r\n ' }), {});
+    assert.strictEqual(ep.extraInstructions, '/no_think');
+    assert.strictEqual((await store.getEndpoint(ep.id)).extraInstructions, '/no_think');
+    assert.strictEqual(store.publicEndpoint(ep).extraInstructions, '/no_think');
+    await assert.rejects(store.saveEndpoint(Object.assign({}, BASE, { id: ep.id, extraInstructions: 'x'.repeat(4001) }), {}), /at most 4000 characters/);
+    await assert.rejects(store.saveEndpoint(Object.assign({}, BASE, { id: ep.id, extraInstructions: { a: 1 } }), {}), /must be text/);
+    ep = await store.saveEndpoint(Object.assign({}, BASE, { id: ep.id }), {});
+    assert.strictEqual(ep.extraInstructions, '');
+    // an endpoint stored before the field existed
+    const old = Object.assign({}, db.docs.get(ep.id)); delete old.extraInstructions;
+    assert.strictEqual(store.publicEndpoint(old).extraInstructions, '');
+    assert.strictEqual(storeMod.validateEndpoint(Object.assign({}, BASE, { extraInstructions: 'x'.repeat(4000) })).extraInstructions.length, 4000);
+});
+
 test('audit: sanitising, transcript policy, usage, sweep', async function () {
     const { store, db } = setup();
     const now = Date.now();

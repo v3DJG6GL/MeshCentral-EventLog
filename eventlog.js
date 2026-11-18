@@ -1997,7 +1997,7 @@ body.night #pluginEventLog {
     // Assistant actions authorized by conversation ownership inside ai/index.js (same user and connection), so Stop
     // and Close keep working after a permission was revoked; and the Assistant admin actions (full administrators).
     obj.AI_SESSION_ACTIONS = { aiStop: true, aiClose: true };
-    obj.AI_ADMIN_ACTIONS = { aiAdminGet: true, aiAdminSaveEndpoint: true, aiAdminDeleteEndpoint: true, aiAdminSaveSettings: true, aiAdminTest: true, aiAdminModels: true, aiAdminAudit: true };
+    obj.AI_ADMIN_ACTIONS = { aiAdminGet: true, aiAdminSaveEndpoint: true, aiAdminDeleteEndpoint: true, aiAdminSaveSettings: true, aiAdminTest: true, aiAdminModels: true, aiAdminAudit: true, aiAdminPreviewPrompt: true };
     // Every Assistant action is a user action; an agent connection never reaches one.
     obj.isAiAction = function(act) { return typeof act == 'string' && act.substring(0, 2) == 'ai'; };
 
@@ -2184,7 +2184,7 @@ body.night #pluginEventLog {
             break;
         }
         case 'aiAdminGet': case 'aiAdminSaveEndpoint': case 'aiAdminDeleteEndpoint': case 'aiAdminSaveSettings':
-        case 'aiAdminTest': case 'aiAdminModels': case 'aiAdminAudit': {
+        case 'aiAdminTest': case 'aiAdminModels': case 'aiAdminAudit': case 'aiAdminPreviewPrompt': {
             obj.aiAdminAction(command, myparent);
             break;
         }

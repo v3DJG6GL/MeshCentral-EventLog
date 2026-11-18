@@ -395,3 +395,26 @@ test('explain in summary mode: the picked event is sent even when stored events 
     assert.ok(body.indexOf('jdoe') < 0 && body.indexOf('C:\\\\Users\\\\jdoe') < 0);
     t.close();
 });
+
+test('system prompt: the saved template overrides and both kinds of extra instructions reach the model', async function () {
+    mock.script(CHAT, { sse: chatSse({ text: 'Fine.' }) });
+    const t = F.setup({ mock: mock, settings: { prompts: { base: 'Custom base for {{device}}{{os}}, data fenced with nonce={{nonce}}.', ask: 'Custom ask part. <followups>[]</followups>', explain: null, diagnose: null, edited: {} }, extraInstructions: 'Answer in German.' }, ep: { extraInstructions: '/no_think' } });
+    await t.start('ask', { text: 'What happened?' });
+    assert.ok(t.last('onAiDone'), methods(t));
+    const msgs = chatReqs()[0].body.messages;
+    assert.strictEqual(msgs[0].role, 'system');
+    const sys = msgs[0].content;
+    assert.match(sys, /^Custom base for HOST_\d+ \(Windows\), data fenced with nonce=[0-9a-f]{24}\.\n\nCustom ask part\. <followups>\[\]<\/followups>\n\nAdditional instructions from the administrator:\nAnswer in German\.\n\nModel-specific instructions:\n\/no_think$/);
+    t.close();
+});
+
+test('system prompt: without overrides the factory prompt is sent (Linux wording on a Linux device)', async function () {
+    mock.script(CHAT, { sse: chatSse({ text: 'Fine.' }) });
+    const t = F.setup({ mock: mock, db: { meta: { os: 'linux', caps: null } } });
+    await t.start('ask', { text: 'q' });
+    const sys = chatReqs()[0].body.messages[0].content;
+    assert.match(sys, /understand its systemd journal entries \(journald\) and device data/);
+    assert.match(sys, /"id" is the process id, not an event id/);
+    assert.doesNotMatch(sys, /Additional instructions|Model-specific instructions/);
+    t.close();
+});

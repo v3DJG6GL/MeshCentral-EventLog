@@ -7,7 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Added
+- Assistant: the system prompt can be viewed and, after switching on edit mode, changed per part (base instructions, Ask, Explain, Diagnosis) with reset to factory defaults and a full-prompt preview; additional instructions globally and per endpoint
+
 ### Changed
+- Assistant: clearer instructions for Linux devices (systemd journal fields, process ids, journalctl/systemctl)
 - Event Log tab: when the Assistant is not available on a device, users with the Assistant permission see why (for example no endpoint assigned to the device's config set, or the Assistant turned off)
 - Assistant: while an answer is being prepared, a progress strip, the current step in plain words, an elapsed-time counter and a streaming cursor show what is happening; the Ask button shows a dot when an answer is running in the closed panel
 

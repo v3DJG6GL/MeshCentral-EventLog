@@ -44,7 +44,7 @@ function auditCsv(rows) {
             (r.nodename != null && r.nodename !== '') ? r.nodename : r.nodeid,
             r.endpointName,
             r.model,
-            r.mode,
+            (r.mode == null && r.kind === 'settings') ? 'settings' : r.mode,
             Array.isArray(r.steps) ? r.steps.length : csvNum(r.steps),
             csvNum(r.rounds),
             csvNum(r.bytesSent),
@@ -52,7 +52,7 @@ function auditCsv(rows) {
             csvNum(r.tokensIn),
             csvNum(r.tokensOut),
             csvNum(r.durationMs),
-            r.result,
+            (r.result == null && r.kind === 'settings' && Array.isArray(r.changed)) ? 'changed: ' + r.changed.join(' ') : r.result,
             r.error
         ];
         lines.push(cells.map(csvCell).join(','));

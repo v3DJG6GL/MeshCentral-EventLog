@@ -147,7 +147,7 @@ function setupAi(opts) {
     return { ph: ph, plugin: plugin, ai: ai, gp: gp };
 }
 var AI_DEVICE = ['aiStart', 'aiConfirm', 'aiSend', 'aiFeedback'];
-var AI_ADMIN = ['aiAdminGet', 'aiAdminSaveEndpoint', 'aiAdminDeleteEndpoint', 'aiAdminSaveSettings', 'aiAdminTest', 'aiAdminModels', 'aiAdminAudit'];
+var AI_ADMIN = ['aiAdminGet', 'aiAdminSaveEndpoint', 'aiAdminDeleteEndpoint', 'aiAdminSaveSettings', 'aiAdminTest', 'aiAdminModels', 'aiAdminAudit', 'aiAdminPreviewPrompt'];
 
 test('Assistant device actions need the Assistant permission', async function () {
     var s = setupAi({ grants: { 'user/d/alice|deviceHistoryTab': true, 'user/d/alice|deviceLiveTab': true } });

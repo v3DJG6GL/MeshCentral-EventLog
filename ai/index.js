@@ -348,7 +348,9 @@ function create(o) {
         return { from: found - 6 * HOUR, to: Math.min(found + HOUR, t), restartAt: found };
     }
     function systemPrompt(S, toolNames) {
-        return prompts.system(S.mode, { nonce: S.nonce, deviceName: S.redactor.redact(String((S.node && S.node.name) || 'this device')), os: S.os, tools: toolNames, redacted: !!S.redacted, now: now(), window: S.window || null });
+        const st = S.settings || {};
+        return prompts.system(S.mode, { nonce: S.nonce, deviceName: S.redactor.redact(String((S.node && S.node.name) || 'this device')), os: S.os, tools: toolNames, redacted: !!S.redacted, now: now(), window: S.window || null },
+            { prompts: isObj(st.prompts) ? st.prompts : null, extraInstructions: st.extraInstructions, endpointExtra: S.ep && S.ep.extraInstructions });
     }
     async function compose(S) {
         const summary = S.toolMode === 'summary';

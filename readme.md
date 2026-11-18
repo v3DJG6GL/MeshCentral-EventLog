@@ -130,7 +130,7 @@ Supported API formats:
 
 1. Admin page (*My Server → Plugins → Event Log*) → **Assistant** tab → **Add endpoint**: choose the server type (Ollama, vLLM, LM Studio, llama.cpp, LocalAI, *Other OpenAI-compatible server*, *OpenAI Responses API* or *Anthropic Messages API*), the address, an API key if the server needs one, and the model (*Fetch models* lists what the server offers).
 2. **Test connection** (address, connection, API key, model, tool calls, context size), then **Save endpoint**.
-3. Check **Data sent to the model** (what may be read, what is replaced, the preview policy) and the daily limits under **Access**, then **Save settings**.
+3. Check **Data sent to the model** (what may be read, what is replaced, the preview policy), optionally **Assistant behaviour** (see below), and the daily limits under **Access**, then **Save settings**.
 4. **Config Sets** tab → edit a set → **Assistant endpoint**: pick the endpoint. Devices using that set can now use the Assistant (the default is *None*).
 5. Grant **Event Log: Assistant** (*My Server → Plugins → Event Log → Permissions*) to the users or groups who should use it. They also need MeshCentral's **Details** right on the device.
 
@@ -151,6 +151,10 @@ Each category is offered to the model only when it is on. Every field is picked 
 - It is **best effort**: names inside free text that look like ordinary words can slip through. Use a local model for data that must not leave your network.
 
 **Preview for endpoints outside your network:** before a question is sent to such an endpoint, the user sees what will be sent (readable and raw, with counts per category and the replaced values), can switch categories off, and then sends or cancels; on Cancel nothing is sent. The policy is *every time* (default), *once per user and endpoint*, or *never*.
+
+### Assistant behaviour
+
+Under **Assistant behaviour** on the Assistant tab, *Additional instructions* are added after the built-in instructions for every question (your environment, language, tone, preferred tools), and an endpoint's *Model-specific instructions* are added for that endpoint only (for example a switch a model needs). The built-in instructions (the system prompt) can be read there part by part: *Base instructions* shared by all questions, and the parts for *Ask*, *Explain* and *Diagnosis*. After switching on *Edit the system prompt*, each part can be changed and reset to its factory default; a part changed by an administrator shows who changed it and when, and a note appears when a plugin update changed the factory text since then. Values such as `{{device}}`, `{{nonce}}` or `{{tools}}` are filled in for each request (the page lists them). *Show the full prompt* shows what the model receives for a question type and a Windows or Linux device, including unsaved changes, with notes when a change removes the untrusted-data rule (`{{nonce}}`) or an output block that the Diagnosis, Explain or follow-up views read. Changes are saved with *Save settings* and logged in the audit log. Extra instructions cannot switch off the read-only tools or the device binding, which are enforced by the server.
 
 ### Security
 
