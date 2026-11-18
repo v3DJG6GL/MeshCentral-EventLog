@@ -122,11 +122,14 @@ module.exports.attach = function (obj) {
         // full: the panel takes the whole width (evl_ai_full), diagSetup: the window choice before a diagnosis runs,
         // act: a message action waiting for its inline editor or confirmation { cid, n, kind: 'edit'|'del'|'retry' },
         // pend: a message action sent to the server { cid, n, op, then }
+        // genNew: the answer settings { thinking?, temperature? } for a chat not started yet (a chat keeps its own in
+        // c.gen), genOpen: the Answer settings popover is open, fuReq: a "Suggest questions" request { reqId, cid, n }
         var full = false;
         try { full = getstore('evl_ai_full', '') == '1'; } catch (e) { }
         return { nodeid: nid, open: false, w: Number(getstore('evl_ai_w', '0')) || 0, convs: {}, chat: null, explainBy: {},
                  focus: null, sel: null, draft: '', diagWin: win, notice: null, reveal: null, peek: null, hyp: {}, citeVer: 0,
-                 saved: null, hist: false, opening: null, delAsk: null, exReq: {}, full: full, diagSetup: false, act: null, pend: null };
+                 saved: null, hist: false, opening: null, delAsk: null, exReq: {}, full: full, diagSetup: false, act: null, pend: null,
+                 genNew: {}, genOpen: false, fuReq: null };
     };
     obj.aiStashSave = function () {
         var ph = pluginHandler.eventlog, st = ph.st;
@@ -135,6 +138,9 @@ module.exports.attach = function (obj) {
         ph.aiDlgClose(true);
         var a = st.ai, nid = a.nodeid;
         a.notice = null; a.reveal = null; a.peek = null; a._cm = null;
+        // a pending "Suggest questions" is dropped (its reply is for this device only) and the settings popover closes
+        if (a.fuReq) { var ft = ph.aiTurnOf(a.convs[a.fuReq.cid], a.fuReq.n); if (ft) ft.fuBusy = null; a.fuReq = null; }
+        if (a.genOpen) ph.aiGenClose(false);
         ph._aiStash = ph._aiStash || {};
         ph._aiStashOrder = (ph._aiStashOrder || []).filter(function (x) { return x != nid; });
         ph._aiStashOrder.push(nid);
@@ -173,7 +179,8 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai;
         ph._aiSeq = (ph._aiSeq || 0) + 1;
         var c = { id: 'c' + ph._aiSeq, mode: mode, input: input, reqId: ph.aiReqId(), convId: null, status: 'starting', closed: false, ended: false,
-                  info: null, notes: [], preview: null, red: null, last: Date.now(), doneAt: 0, turns: [ph.aiNewTurn(1, q)] };
+                  info: null, notes: [], preview: null, red: null, last: Date.now(), doneAt: 0, turns: [ph.aiNewTurn(1, q)],
+                  gen: (mode == 'explain') ? {} : ph.aiGenClean(a.genNew) };
         if (mode == 'diagnose') c.turns[0].diag = true;
         a.convs[c.id] = c;
         ph.aiPrune();
@@ -194,7 +201,9 @@ module.exports.attach = function (obj) {
     obj.aiStartConv = function (c) {
         var ph = pluginHandler.eventlog;
         c.last = Date.now();
-        ph.aiSendMsg('aiStart', { reqId: c.reqId, mode: c.mode, input: c.input });
+        var m = { reqId: c.reqId, mode: c.mode, input: c.input }, g = ph.aiGenOut(c.gen);
+        if (g) m.gen = g;
+        ph.aiSendMsg('aiStart', m);
         ph.aiDogStart();
     };
     obj.aiCloseConv = function (c) {
@@ -387,6 +396,8 @@ module.exports.attach = function (obj) {
     obj.onAiError = function (server, m) {
         var ph = pluginHandler.eventlog;
         if (!ph.aiOk(m)) return;
+        var fr = ph.st.ai.fuReq;   // a "Suggest questions" request: only its button shows the failure
+        if (m.scope == 'followups' || (fr && m.reqId != null && m.reqId === fr.reqId)) { ph.aiFuFail(m); return; }
         var c = ph.aiFind(m); if (!c) return;
         var code = String(m.code || 'internal'), msg = String(m.message || '');
         // an idle conversation closed by the server (expired, or evicted for a newer one)
@@ -495,7 +506,8 @@ module.exports.attach = function (obj) {
         });
         if (!c.turns.length) return null;
         c.turns.forEach(function (t) { t.html = ph.aiMd(t.text, c); });
-        if (kind == 'chat') { c.chatId = item.id; c.created = Number(item.created) || c.turns[0].at; }
+        if (kind == 'chat') { c.chatId = item.id; c.created = Number(item.created) || c.turns[0].at; c.gen = ph.aiGenClean(item.gen); }
+        else c.gen = {};
         if (isDiag) { c.win = (['24h', '7d', 'restart'].indexOf(item.window) >= 0) ? item.window : '24h'; c.input = { window: c.win }; c.turns[0].q = 'Diagnose ' + ph.aiWinText(c.win); }
         if (kind == 'explain') {
             c.input = { eventId: String(item.eventId) }; c.doneAt = Number(item.time) || c.doneAt;
@@ -1692,6 +1704,8 @@ module.exports.attach = function (obj) {
             full: '<path d="M9.5 2.5h4v4M13.5 2.5L9.2 6.8M6.5 13.5h-4v-4M2.5 13.5l4.3-4.3"/>',
             dock: '<rect x=2 y=3 width=12 height=10 rx=1.2 /><path d="M9.2 3v10M3.8 6h3.5M3.8 8.5h3.5"/>',
             diag: '<path d="M1.5 8.5h2.8l1.6-4.2 2.8 8 1.7-5 1 1.2h3.1"/>',
+            sliders: '<path d="M2.5 4.5h5.6M11.9 4.5h1.6M2.5 11.5h1.6M7.9 11.5h5.6"/><circle cx=10 cy=4.5 r=1.9 /><circle cx=6 cy=11.5 r=1.9 />',
+            chev: '<path d="M6 3.5l4.5 4.5L6 12.5"/>',
             x: '<path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/>'
         })[name] || '';
         return '<svg width=14 height=14 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 stroke-linecap=round stroke-linejoin=round aria-hidden=true>' + d + '</svg>';
@@ -1714,7 +1728,7 @@ module.exports.attach = function (obj) {
             el.innerHTML = '<div class=evlAiIn onkeydown="return pluginHandler.eventlog.aiPanelKey(event)">' +
                 '<div class=evlAiSplit role=separator tabindex=0 aria-orientation=vertical aria-label="Resize the assistant panel" title="Drag to resize, double-click to reset"' +
                 ' onpointerdown="return pluginHandler.eventlog.aiSplitDown(event)" ondblclick="return pluginHandler.eventlog.aiSplitReset()" onkeydown="return pluginHandler.eventlog.aiSplitKey(event)"></div>' +
-                '<div class=evlAiHd id=evlAiHd></div><div class=evlAiStripSlot id=evlAiStripSlot></div>' +
+                '<div class=evlAiHd id=evlAiHd></div><div class=evlAiPopSlot id=evlAiPopSlot></div><div class=evlAiStripSlot id=evlAiStripSlot></div>' +
                 '<div class=evlAiLog id=evlAiLog role=log aria-live=polite aria-busy=false aria-label="Conversation"></div>' +
                 '<div class=evlAiFt id=evlAiFt></div>' +
                 '<div class=evlAiHGrip id=evlAiHGrip role=separator tabindex=0 aria-orientation=horizontal aria-controls=evlAi aria-label="Height of the assistant panel" aria-valuemin=360' +
@@ -1732,7 +1746,7 @@ module.exports.attach = function (obj) {
             var mode = a.hist ? 'hist' : (a.diagSetup ? 'setup' : 'open');
             if (log._evlConv != mode) log.scrollTop = 0;
             log._evlConv = mode;
-            ph.aiRenderComposer(); ph.aiLayout();
+            ph.aiRenderComposer(); ph.aiLayout(); ph.aiGenSync();
             return;
         }
         log.setAttribute('aria-label', 'Conversation');
@@ -1742,6 +1756,7 @@ module.exports.attach = function (obj) {
         var top = log.scrollTop;
         log.setAttribute('aria-busy', ph.aiBusy(c) ? 'true' : 'false');
         log.innerHTML = ph.aiLogHtml(c);
+        ph.aiFuTitles(log);
         var turns = log.querySelectorAll('.evlAiTurn'), lastEl = turns.length ? turns[turns.length - 1] : null;
         if (a.act) log.scrollTop = top;   // an inline editor or confirmation: stay where the user is
         else if (justDone && lastEl && log._evlConv == sig) log.scrollTop = Math.max(0, lastEl.offsetTop - 8);
@@ -1751,6 +1766,7 @@ module.exports.attach = function (obj) {
         ph.aiRenderComposer();
         ph.aiApplySel();
         ph.aiLayout();
+        ph.aiGenSync();
     };
     obj.aiHeadHtml = function (c) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, sv = a.saved, only = ph.aiOnly();
@@ -1761,14 +1777,22 @@ module.exports.attach = function (obj) {
             var n = sv.chats.length;
             hb = '<button id=evlAiHistBtn class="evlBtn mini evlAiHistBtn' + (a.hist ? ' on' : '') + '" aria-expanded=' + (a.hist ? 'true' : 'false') + ' aria-controls=evlAiLog' +
                  ' aria-label="' + (a.hist ? 'Back to the chat' : 'Saved chats' + (n ? ' (' + n + ')' : '')) + '" onclick="return pluginHandler.eventlog.aiHistoryToggle()">' +
-                 '<svg width=13 height=13 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 aria-hidden=true><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></svg>Chats' +
+                 '<svg width=13 height=13 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 aria-hidden=true><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></svg><span class=evlAiHistL>Chats</span>' +
                  (n ? '<span class=evlAiN>' + n + '</span>' : '') + '</button>';
         }
         var title = a.hist ? 'Saved chats' : (a.diagSetup ? 'Diagnose' : (c && c.mode == 'diagnose' ? 'Diagnosis' : 'Ask'));
         // full width <-> docked beside the table (not offered stacked below the table, nor without a table)
         var fb = only ? '' : '<button id=evlAiFullBtn class="evlBtn mini evlAiIco evlAiFullBtn" aria-pressed=' + (a.full ? 'true' : 'false') + ' aria-label="Full width"' +
                  ' title="' + (a.full ? 'Dock beside the table (Esc)' : 'Full width') + '" onclick="return pluginHandler.eventlog.aiFullToggle()">' + ph.aiIcon(a.full ? 'dock' : 'full') + '</button>';
-        return '<div class=evlAiTitle><h2>' + title + '</h2>' + (line && !a.hist ? '<div class=evlAiSub>' + ph.aiEsc(line) + '</div>' : '') + (a.hist ? '' : ph.aiNotesHtml(c)) + '</div>' + hb +
+        // Answer settings (thinking, temperature) of this chat: the button, and what is changed from the endpoint's
+        var gi = a.hist ? null : ph.aiGenInfo(), gb = '', tag = '';
+        if (gi) {
+            tag = ph.aiGenTag(ph.aiGenGet());
+            gb = '<button id=evlAiGenBtn type=button class="evlBtn mini evlAiIco evlAiGenBtn' + (tag ? ' set' : '') + '" aria-haspopup=dialog aria-expanded=' + (a.genOpen ? 'true' : 'false') + ' aria-controls=evlAiGenPop' +
+                 ' aria-label="Answer settings' + (tag ? ' (' + ph.aiEsc(tag) + ')' : '') + '" title="Answer settings" onclick="return pluginHandler.eventlog.aiGenToggle()">' + ph.aiIcon('sliders') + '</button>';
+        }
+        return '<div class=evlAiTitle><h2>' + title + '</h2>' + (line && !a.hist ? '<div class=evlAiSub>' + ph.aiEsc(line) + '</div>' : '') +
+               (tag ? '<div class=evlAiGenTag>' + ph.aiIcon('sliders') + '<span>' + ph.aiEsc(tag) + '</span></div>' : '') + (a.hist ? '' : ph.aiNotesHtml(c)) + '</div>' + hb + gb +
                '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiNewChat()"' + (c || a.hist || a.diagSetup ? '' : ' disabled') + '>New chat</button>' + fb +
                (only ? '' : '<button class="evlBtn mini evlAiX" aria-label="Close the assistant" title="Close" onclick="return pluginHandler.eventlog.aiClosePanel()">' + ph.aiIcon('x') + '</button>');
     };
@@ -1830,11 +1854,7 @@ module.exports.attach = function (obj) {
         if (t.status == 'done') {
             h += ph.aiAActsHtml(c, t, busy);
             if (act == 'retry') h += ph.aiConfirmHtml(c, t, 'retry');
-            if (isLast && t.followups.length && ph.aiIsChat(c) && (!c.closed || c.chatId)) {
-                h += '<div class=evlAiFollow role=group aria-label="Suggested follow-up questions">';
-                t.followups.forEach(function (f, i) { h += '<button class=evlBtn onclick="return pluginHandler.eventlog.aiFollow(\'' + c.id + '\',' + t.n + ',' + i + ')">' + esc(ph.aiStripMarks(f)) + '</button>'; });
-                h += '</div>';
-            }
+            if (isLast && ph.aiIsChat(c) && (!c.closed || c.chatId)) h += ph.aiFuHtml(c, t);
         }
         return h + '</div>';
     };
@@ -2001,6 +2021,7 @@ module.exports.attach = function (obj) {
         } else if (m.chat && typeof m.chat == 'object' && p.chatId) {
             // the saved chat as the server holds it now: the next question continues it in a new session with a recap
             var nc = ph.aiConvFromSaved('chat', Object.assign({}, m.chat, { id: p.chatId }));
+            if (nc && c) nc.gen = ph.aiGenClean(c.gen);   // the settings as the user has them now
             if (c) { ph.aiCloseConv(c); delete a.convs[c.id]; }
             if (nc && a.chat == p.cid) { a.chat = nc.id; if (a.focus == p.cid) a.focus = nc.id; }
             if (sv) sv.chats.forEach(function (x) { if (x.id === p.chatId) x.count = nc ? nc.turns.length : x.count; });
@@ -2066,7 +2087,9 @@ module.exports.attach = function (obj) {
             var last = c.turns[c.turns.length - 1];
             c.turns.push(ph.aiNewTurn((last ? last.n : 0) + 1, text));
             c.status = 'running'; c.last = Date.now();
-            ph.aiSendMsg('aiSend', { convId: c.convId, text: text });
+            var sm = { convId: c.convId, text: text }, sg = ph.aiGenOut(c.gen);
+            if (sg) sm.gen = sg;
+            ph.aiSendMsg('aiSend', sm);
             ph.aiDogStart();
         } else if (chat && c.chatId && !ph.aiBusy(c) && c.turns.length) {
             // a saved chat (or one whose server conversation ended): a new conversation continues it with a recap
@@ -2077,7 +2100,9 @@ module.exports.attach = function (obj) {
             c.turns.push(nt);
             c.convId = null; c.closed = false; c.ended = false; c.reqId = ph.aiReqId(); c.status = 'starting'; c.preview = null;
             c.last = Date.now();
-            ph.aiSendMsg('aiStart', { reqId: c.reqId, mode: 'ask', input: { text: text }, chatId: c.chatId });
+            var cm = { reqId: c.reqId, mode: 'ask', input: { text: text }, chatId: c.chatId }, cg = ph.aiGenOut(c.gen);
+            if (cg) cm.gen = cg;
+            ph.aiSendMsg('aiStart', cm);
             ph.aiDogStart();
         } else {
             if (ph.aiIsChat(c)) ph.aiCloseConv(c);
@@ -2095,11 +2120,292 @@ module.exports.attach = function (obj) {
         if (typeof f == 'string' && f.trim()) ph.aiAsk(ph.aiStripMarks(f));
         return false;
     };
+
+    // ---- suggested follow-up questions: a compact, collapsible row under the last answer ------------------------------
+    // Collapsed by default (remembered per browser: evl_ai_fu). "Suggest questions" asks the server for new ones
+    // (aiFollowups: one short request without tools); t.fuShow opens the new ones for that answer only.
+    obj.aiFuOpen = function () {
+        var ph = pluginHandler.eventlog;
+        if (typeof ph._aiFu != 'boolean') { var v = ''; try { v = getstore('evl_ai_fu', ''); } catch (e) { } ph._aiFu = (v == '1'); }
+        return ph._aiFu;
+    };
+    obj.aiFuHtml = function (c, t) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, esc = ph.aiEsc, list = t.followups || [], n = list.length, busy = !!t.fuBusy;
+        var open = n > 0 && (t.fuShow != null ? t.fuShow : ph.aiFuOpen()), lid = 'evlAiFuL' + c.id + '-' + t.n;
+        var wait = ph.aiBusy(c) || !!(a.pend && a.pend.cid == c.id);
+        var h = '<div class="evlAiFu' + (open ? ' open' : '') + '" data-n=' + t.n + '><div class=evlAiFuBar>';
+        if (n) h += '<button type=button class=evlAiFuTg data-fu=tg aria-expanded=' + (open ? 'true' : 'false') + ' aria-controls=' + lid +
+                    ' onclick="return pluginHandler.eventlog.aiFuToggle(\'' + c.id + '\',' + t.n + ')">' + ph.aiIcon('chev') + 'Suggested questions <span class=n>(' + n + ')</span></button>';
+        else h += '<span class=evlAiFuNone>No suggested questions</span>';
+        h += '<button type=button class=evlAiFuRe data-fu=re' + (busy ? ' aria-disabled=true aria-busy=true' : '') + (wait && !busy ? ' disabled' : '') +
+             ' title="' + (busy ? 'Suggesting questions' : (wait ? 'Wait until the answer is finished' : 'Ask the model for new follow-up questions')) + '"' +
+             ' onclick="return pluginHandler.eventlog.aiFuGen(\'' + c.id + '\',' + t.n + ')">' +
+             (busy ? '<svg class=evlAiRing width=12 height=12 viewBox="0 0 16 16" aria-hidden=true><circle class=trk cx=8 cy=8 r=6.5 /><circle class=arc cx=8 cy=8 r=6.5 /></svg>Suggesting…' : ph.aiIcon('retry') + 'Suggest questions') + '</button></div>';
+        if (open) {
+            h += '<div class=evlAiFuL id=' + lid + ' role=group aria-label="Suggested follow-up questions">';
+            list.forEach(function (f, i) { h += '<button type=button class=evlAiFuChip data-i=' + i + ' onclick="return pluginHandler.eventlog.aiFollow(\'' + c.id + '\',' + t.n + ',' + i + ')">' + esc(ph.aiStripMarks(f)) + '</button>'; });
+            h += '</div>';
+        }
+        if (t.fuErr) h += '<p class=evlAiFuErr>' + esc(t.fuErr) + '</p>';
+        return h + '</div>';
+    };
+    // the full text of a shortened chip as its tooltip (set as a property: model text never goes into the markup's attributes)
+    obj.aiFuTitles = function (root) {
+        var l = root ? root.querySelectorAll('.evlAiFuChip') : [];
+        for (var i = 0; i < l.length; i++) l[i].title = l[i].textContent;
+    };
+    obj.aiFuFocus = function (n, which) {
+        var b = document.querySelector('#evlAiLog .evlAiFu[data-n="' + n + '"] [data-fu=' + which + ']');
+        if (b) b.focus();
+    };
+    obj.aiFuToggle = function (cid, n) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[cid], t = ph.aiTurnOf(c, n);
+        if (!c || !t) return false;
+        var open = !(t.fuShow != null ? t.fuShow : ph.aiFuOpen());
+        ph._aiFu = open;
+        try { putstore('evl_ai_fu', open ? '1' : ''); } catch (e) { }
+        c.turns.forEach(function (x) { x.fuShow = null; });
+        ph.aiRenderPanel();
+        ph.aiFuFocus(n, 'tg');
+        return false;
+    };
+    obj.aiFuGen = function (cid, n) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[cid], t = ph.aiTurnOf(c, n);
+        if (!c || !t || t.fuBusy) return false;
+        if (ph.aiBusy(c) || (a.pend && a.pend.cid == cid)) { ph.aiSay('Wait until the answer is finished.'); return false; }
+        var m = { reqId: 'fu' + ph.aiReqId() };
+        if (c.convId && !c.closed) m.convId = c.convId;
+        if (c.chatId) m.chatId = c.chatId;
+        if (!m.convId && !m.chatId) return false;
+        if (a.fuReq) { var o = ph.aiTurnOf(a.convs[a.fuReq.cid], a.fuReq.n); if (o) o.fuBusy = null; }
+        a.fuReq = { reqId: m.reqId, cid: cid, n: n };
+        t.fuBusy = m.reqId; t.fuErr = null;
+        clearTimeout(ph._aiFuT);
+        ph._aiFuT = setTimeout(function () { try { var p = pluginHandler.eventlog, r = p.st && p.st.ai && p.st.ai.fuReq; if (r && r.reqId === m.reqId) p.aiFuFail({ reqId: m.reqId, code: 'noReply' }); } catch (e) { } }, 90000);
+        ph.aiSendMsg('aiFollowups', m);
+        ph.aiRenderPanel();
+        ph.aiFuFocus(n, 're');
+        ph.aiSay('Suggesting questions…');
+        return false;
+    };
+    obj.onAiFollowups = function (server, m) {
+        var ph = pluginHandler.eventlog;
+        if (!ph.aiOk(m)) return;
+        var a = ph.st.ai, fr = a.fuReq;
+        if (!fr || m.reqId !== fr.reqId) return;
+        a.fuReq = null; clearTimeout(ph._aiFuT);
+        var c = a.convs[fr.cid], t = ph.aiTurnOf(c, fr.n);
+        if (!c || !t) return;
+        var back = !document.activeElement || document.activeElement === document.body || !!(document.activeElement.closest && document.activeElement.closest('.evlAiFu'));
+        t.followups = (Array.isArray(m.followups) ? m.followups : []).filter(function (f) { return typeof f == 'string' && f.trim(); }).slice(0, 3).map(function (f) { return f.slice(0, 200); });
+        t.fuBusy = null; t.fuErr = null;
+        t.fuShow = t.followups.length ? true : null;
+        if (a.open && a.chat == c.id) ph.aiRenderPanel();
+        if (back) ph.aiFuFocus(fr.n, 're');
+        var k = t.followups.length;
+        ph.aiSay(k ? (k == 1 ? '1 suggested question.' : k + ' suggested questions.') : 'No suggested questions.');
+    };
+    obj.aiFuFail = function (m) {
+        var ph = pluginHandler.eventlog, a = ph.st.ai, fr = a.fuReq;
+        if (!fr || (m.reqId != null && m.reqId !== fr.reqId)) return;
+        a.fuReq = null; clearTimeout(ph._aiFuT);
+        var c = a.convs[fr.cid], t = ph.aiTurnOf(c, fr.n), code = String(m.code || 'internal');
+        if (code == 'denied') { try { ph.elRequestAccess(true); } catch (e) { } }
+        if (!c || !t) return;
+        t.fuBusy = null;
+        t.fuErr = 'No new questions: ' + ph.aiErrText(code, m.phase);
+        if (a.open && a.chat == c.id) ph.aiRenderPanel();
+        ph.aiSay(t.fuErr);
+    };
+
+    // ---- answer settings per chat: thinking level and temperature (on top of the endpoint's) -------------------------
+    // The server says what this endpoint takes (onAccess chatGen); a chat keeps its settings (c.gen, saved with it), a
+    // chat not started yet uses a.genNew; New chat starts again with the endpoint's.
+    obj.aiGenInfo = function () {
+        var g = (pluginHandler.eventlog.elAccess || {}).chatGen;
+        if (!g || typeof g != 'object' || g.enabled !== true) return null;
+        var lv = Array.isArray(g.thinkingLevels) ? g.thinkingLevels.filter(function (x) { return ['off', 'low', 'medium', 'high'].indexOf(x) >= 0; }) : null;
+        if (lv && !lv.length) lv = null;
+        if (!lv && g.temperature !== true) return null;
+        var num = function (v) { return (typeof v == 'number' && isFinite(v)) ? v : null; };
+        return { levels: lv, verified: g.thinkingVerified === true, temperature: g.temperature === true,
+                 epThinking: (['off', 'low', 'medium', 'high'].indexOf(g.endpointThinking) >= 0) ? g.endpointThinking : null, epTemperature: num(g.endpointTemperature) };
+    };
+    // { thinking?, temperature? } kept only where this endpoint takes them
+    obj.aiGenClean = function (g) {
+        var info = pluginHandler.eventlog.aiGenInfo(), o = {};
+        if (!g || typeof g != 'object' || !info) return o;
+        if (info.levels && info.levels.indexOf(g.thinking) >= 0) o.thinking = g.thinking;
+        if (info.temperature && typeof g.temperature == 'number' && isFinite(g.temperature) && g.temperature >= 0 && g.temperature <= 2) o.temperature = Math.round(g.temperature * 100) / 100;
+        return o;
+    };
+    // what aiStart / aiSend carry (null: nothing to send, the server keeps the chat's or the endpoint's)
+    obj.aiGenOut = function (g) {
+        var ph = pluginHandler.eventlog;
+        return ph.aiGenInfo() ? ph.aiGenClean(g) : null;
+    };
+    obj.aiGenGet = function () {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[a.chat];
+        if (a.diagSetup || !ph.aiIsChat(c)) return a.genNew || {};
+        if (!c.gen) c.gen = {};
+        return c.gen;
+    };
+    obj.aiGenSet = function (k, v) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[a.chat];
+        var g = (a.diagSetup || !ph.aiIsChat(c)) ? (a.genNew = a.genNew || {}) : (c.gen = c.gen || {});
+        if (v == null) delete g[k]; else g[k] = v;
+        QH('evlAiHd', ph.aiHeadHtml(c || null));
+    };
+    obj.aiGenWord = function (l) {
+        return ({ off: 'off', low: 'low', medium: 'medium', high: 'high' })[l] || '';
+    };
+    // "Thinking: high · temperature 0.7": what this chat changes ('' = the endpoint's settings)
+    obj.aiGenTag = function (g) {
+        var ph = pluginHandler.eventlog, info = ph.aiGenInfo(), p = [];
+        if (!info || !g) return '';
+        g = ph.aiGenClean(g);
+        if (g.thinking) p.push('Thinking: ' + ph.aiGenWord(g.thinking));
+        if (g.temperature != null) p.push((p.length ? 'temperature ' : 'Temperature ') + g.temperature);
+        return p.join(' · ');
+    };
+    obj.aiGenToggle = function () {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        if (a.genOpen) { ph.aiGenClose(true); return false; }
+        if (!ph.aiGenInfo()) return false;
+        a.genOpen = true;
+        ph.aiGenRender();
+        var b = Q('evlAiGenBtn'); if (b) b.setAttribute('aria-expanded', 'true');
+        if (!ph._aiGenDoc) {
+            ph._aiGenDoc = function (ev) { try { pluginHandler.eventlog.aiGenOutside(ev); } catch (e) { } };
+            document.addEventListener('pointerdown', ph._aiGenDoc, true);
+        }
+        var f = document.querySelector('#evlAiGenPop [aria-pressed=true]:not([disabled])') || document.querySelector('#evlAiGenPop button:not([disabled]), #evlAiGenPop input');
+        if (f) f.focus();
+        return false;
+    };
+    // back: focus returns to the Answer settings button
+    obj.aiGenClose = function (back) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        a.genOpen = false;
+        if (ph._aiGenDoc) { document.removeEventListener('pointerdown', ph._aiGenDoc, true); ph._aiGenDoc = null; }
+        var s = Q('evlAiPopSlot'); if (s) s.innerHTML = '';
+        var b = Q('evlAiGenBtn');
+        if (b) { b.setAttribute('aria-expanded', 'false'); if (back) b.focus(); }
+        return false;
+    };
+    obj.aiGenOutside = function (ev) {
+        var ph = pluginHandler.eventlog, t = ev && ev.target;
+        if (!t || !t.closest) return;
+        if (t.closest('#evlAiGenPop') || t.closest('#evlAiGenBtn')) return;
+        ph.aiGenClose(false);
+    };
+    obj.aiGenKey = function (ev) {
+        var ph = pluginHandler.eventlog;
+        if (ev.key == 'Escape') { ev.preventDefault(); if (ev.stopPropagation) ev.stopPropagation(); ph.aiGenClose(true); return false; }
+        return true;
+    };
+    // focus leaving the popover (Tab past its last control) closes it
+    obj.aiGenBlur = function (ev) {
+        var ph = pluginHandler.eventlog, to = ev && ev.relatedTarget;
+        if (!to || !to.closest) return;
+        if (to.closest('#evlAiGenPop') || to.closest('#evlAiGenBtn')) return;
+        ph.aiGenClose(false);
+    };
+    obj.aiGenHtml = function () {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, info = ph.aiGenInfo(), esc = ph.aiEsc;
+        if (!info) return '';
+        var c = a.convs[a.chat], g = ph.aiGenClean(ph.aiGenGet()), forChat = !a.diagSetup && ph.aiIsChat(c);
+        var h = '<div id=evlAiGenPop class=evlAiPop role=dialog aria-modal=false aria-labelledby=evlAiGenH aria-describedby=evlAiGenSub' +
+                ' onkeydown="return pluginHandler.eventlog.aiGenKey(event)" onfocusout="pluginHandler.eventlog.aiGenBlur(event)">' +
+                '<div class=evlAiPopHd><h3 id=evlAiGenH>Answer settings</h3><button type=button class="evlBtn mini evlAiIco evlAiX" data-k=x aria-label="Close the answer settings" title="Close (Esc)" onclick="return pluginHandler.eventlog.aiGenClose(true)">' + ph.aiIcon('x') + '</button></div>' +
+                '<p class=evlAiPopSub id=evlAiGenSub>' + (forChat ? 'For this chat.' : 'For the chat you start next.') + ' New chats start with the endpoint\'s settings.</p>';
+        if (info.levels) {
+            var cur = g.thinking || '';
+            h += '<div class=evlAiGenF><span class=evlAiGenL id=evlAiGenThL>Thinking</span><div class=evlAiGenSeg role=group aria-labelledby=evlAiGenThL>';
+            [['', 'Endpoint default'], ['off', 'Off'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High']].forEach(function (x) {
+                var ok = (x[0] === '' || info.levels.indexOf(x[0]) >= 0), on = (cur === x[0]);
+                h += '<button type=button data-k="th' + (x[0] || 'def') + '" aria-pressed=' + (on ? 'true' : 'false') + (ok ? '' : ' disabled title="This endpoint does not take this level"') +
+                     (x[0] === '' ? ' aria-label="Endpoint default"' : '') + ' onclick="return pluginHandler.eventlog.aiGenThink(\'' + x[0] + '\')">' +
+                     (x[0] === '' ? '<span class=lg>Endpoint default</span><span class=sm>Default</span>' : x[1]) + '</button>';
+            });
+            h += '</div><p class=evlAiGenHint>' + esc(info.epThinking ? 'Endpoint default: ' + ph.aiGenWord(info.epThinking) + '.' : 'Endpoint default: the server\'s own setting.') +
+                 (info.verified ? '' : ' <span class=evlAiGenWarn>Not verified for this endpoint: a level may have no effect, or the server may refuse it.</span>') + '</p></div>';
+        }
+        if (info.temperature) {
+            var tv = g.temperature, shown = (tv != null) ? tv : (info.epTemperature != null ? info.epTemperature : 1);
+            h += '<div class=evlAiGenF><div class=evlAiGenTH><label for=evlAiGenT class=evlAiGenL>Temperature</label><output id=evlAiGenTV for=evlAiGenT' + (tv != null ? '' : ' class=def') + '>' + (tv != null ? tv.toFixed(2) : 'Endpoint default') + '</output></div>' +
+                 '<input type=range id=evlAiGenT data-k=temp min=0 max=2 step=0.05 value="' + shown + '" aria-valuetext="' + (tv != null ? tv.toFixed(2) : 'Endpoint default') + '"' +
+                 ' oninput="pluginHandler.eventlog.aiGenTemp(this,false)" onchange="pluginHandler.eventlog.aiGenTemp(this,true)">' +
+                 '<div class=evlAiGenScale aria-hidden=true><span>0 predictable</span><span>1</span><span>2 varied</span></div>' +
+                 '<p class=evlAiGenHint>' + esc(info.epTemperature != null ? 'Endpoint default: ' + info.epTemperature + '.' : 'Endpoint default: the server\'s own setting.') +
+                 (tv != null ? ' <button type=button class=evlLinkBtn data-k=treset onclick="return pluginHandler.eventlog.aiGenTempReset()">Use the endpoint default</button>' : '') + '</p></div>';
+        }
+        h += '<div class=evlAiPopFt><span>' + (ph.aiBusy(c) && forChat ? 'Applies from the next question.' : 'Applies to the next answers.') + '</span>' +
+             '<button type=button class="evlBtn mini on" data-k=done onclick="return pluginHandler.eventlog.aiGenClose(true)">Done</button></div>';
+        return h + '</div>';
+    };
+    // render the popover (keeping the focus on the control with data-k = focusKey)
+    obj.aiGenRender = function (focusKey) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, s = Q('evlAiPopSlot');
+        if (!s) return;
+        if (!a.genOpen) { s.innerHTML = ''; return; }
+        s.innerHTML = ph.aiGenHtml();
+        ph.aiGenPlace();
+        if (focusKey) { var f = document.querySelector('#evlAiGenPop [data-k="' + focusKey + '"]'); if (f && !f.disabled) f.focus(); else { f = document.querySelector('#evlAiGenPop [aria-pressed=true]'); if (f) f.focus(); } }
+    };
+    // below the header, its right edge under the settings button's, inside the panel and the visible window
+    obj.aiGenPlace = function () {
+        var p = Q('evlAiGenPop'), hd = Q('evlAiHd'), b = Q('evlAiGenBtn'), box = p && p.offsetParent;
+        if (!p || !hd) return;
+        p.style.top = (hd.offsetTop + hd.offsetHeight - 2) + 'px';
+        if (!b || !box) return;
+        var br = b.getBoundingClientRect(), xr = box.getBoundingClientRect(), w = p.offsetWidth;
+        if (!w || !xr.width) return;
+        var vw = (window.innerWidth || document.documentElement.clientWidth || 0);
+        var left = Math.round(br.right - xr.left - w + 8);
+        if (vw > 0) left = Math.min(left, Math.round(vw - xr.left - w - 8));
+        left = Math.max(8, Math.min(left, Math.round(xr.width - w - 8)));
+        p.style.left = left + 'px'; p.style.right = 'auto';
+    };
+    // after the panel was rendered: closed when it cannot be offered now, else kept where it is (and placed again)
+    obj.aiGenSync = function () {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        if (!a.genOpen) return;
+        if (a.hist || !ph.aiGenInfo()) { ph.aiGenClose(false); return; }
+        if (!Q('evlAiGenPop')) ph.aiGenRender(); else ph.aiGenPlace();
+    };
+    obj.aiGenThink = function (l) {
+        var ph = pluginHandler.eventlog, info = ph.aiGenInfo();
+        if (!info || !info.levels) return false;
+        if (l !== '' && info.levels.indexOf(l) < 0) return false;
+        ph.aiGenSet('thinking', l === '' ? null : l);
+        ph.aiGenRender('th' + (l || 'def'));
+        ph.aiSay(l === '' ? 'Thinking: endpoint default.' : 'Thinking: ' + ph.aiGenWord(l) + '.');
+        return false;
+    };
+    // the slider: the readout follows while it moves; commit (change) re-renders with "Use the endpoint default"
+    obj.aiGenTemp = function (el, commit) {
+        var ph = pluginHandler.eventlog, v = Math.round(Number(el.value) * 100) / 100;
+        if (!(v >= 0 && v <= 2)) return;
+        ph.aiGenSet('temperature', v);
+        var o = Q('evlAiGenTV'); if (o) { o.textContent = v.toFixed(2); o.classList.remove('def'); }
+        el.setAttribute('aria-valuetext', v.toFixed(2));
+        if (commit) ph.aiGenRender('temp');
+    };
+    obj.aiGenTempReset = function () {
+        var ph = pluginHandler.eventlog;
+        ph.aiGenSet('temperature', null);
+        ph.aiGenRender('temp');
+        ph.aiSay('Temperature: endpoint default.');
+        return false;
+    };
     obj.aiNewChat = function () {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[a.chat];
         if (ph.aiIsChat(c)) { if (ph.aiBusy(c)) ph.aiStop(c.id); ph.aiCloseConv(c); delete a.convs[c.id]; }
         if (c && a.focus == c.id) { a.focus = null; a.sel = null; }
         a.chat = null; a.peek = null; a.citeVer++; a.hist = false; a.delAsk = null; a.opening = null; a.diagSetup = false; a.act = null; a.pend = null;
+        a.genNew = {}; a.fuReq = null;   // a new chat starts with the endpoint's answer settings
+        if (a.genOpen) ph.aiGenClose(false);
         a.open = true;
         ph.aiRenderPanel();
         ph.elUpdate();
@@ -2615,8 +2921,12 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlAiSplit { position:absolute; left:-7px; top:0; bottom:0; width:11px; cursor:col-resize; z-index:2; touch-action:none; outline:none; }
 #pluginEventLog .evlAiSplit:hover, #pluginEventLog .evlAiSplit.active, #pluginEventLog .evlAiSplit:focus-visible { background:linear-gradient(to right, transparent 5px, var(--evl-acc) 5px, var(--evl-acc) 7px, transparent 7px); }
 #pluginEventLog .evlStack .evlAiSplit { display:none; }
-#pluginEventLog .evlAiHd { flex:none; display:flex; align-items:flex-start; gap:6px; padding:9px 10px 9px 13px; border-bottom:1px solid var(--evl-line2); }
-#pluginEventLog .evlAiTitle { flex:1 1 auto; min-width:0; }
+#pluginEventLog .evlAiHd { flex:none; display:flex; flex-wrap:wrap; align-items:flex-start; gap:6px; padding:9px 10px 9px 13px; border-bottom:1px solid var(--evl-line2); }
+#pluginEventLog .evlAiTitle { flex:1 1 0; min-width:0; }
+/* a narrow panel puts the buttons on a line of their own instead of squeezing the title (Chats: icon and count) */
+#pluginEventLog .evlAi { container:evlai / inline-size; }
+@container evlai (max-width: 440px) { #pluginEventLog .evlAiTitle { flex-basis:100%; } }
+@container evlai (max-width: 330px) { #pluginEventLog .evlAiHistBtn .evlAiHistL { display:none; } }
 #pluginEventLog .evlAiHd h2 { margin:0; font-size:15px; font-weight:bold; color:var(--evl-ink); line-height:1.3; }
 #pluginEventLog .evlAiSub { font-size:12px; color:var(--evl-muted); overflow-wrap:anywhere; }
 #pluginEventLog .evlAiNoteLine { font-size:12px; color:var(--evl-warn); margin:4px 0 0; line-height:1.4; }
@@ -2666,6 +2976,67 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlAiFollow { display:flex; flex-wrap:wrap; gap:6px; }
 #pluginEventLog .evlAiFollow .evlBtn { text-align:left; white-space:normal; line-height:1.35; }
 #pluginEventLog .evlAiActs { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+/* suggested follow-up questions: one quiet line under the last answer; the chips wear the question bubble's colours
+   (each one becomes the technician's next question) */
+#pluginEventLog .evlAiFu { display:flex; flex-direction:column; gap:6px; margin-top:-3px; font-size:12px; }
+#pluginEventLog .evlAiFuBar { display:flex; align-items:center; gap:2px 10px; flex-wrap:wrap; min-height:24px; }
+#pluginEventLog .evlAiFuTg, #pluginEventLog .evlAiFuRe { display:inline-flex; align-items:center; gap:5px; border:1px solid transparent; background:none; color:var(--evl-muted); font:inherit; font-size:12px; padding:2px 6px; border-radius:3px; cursor:pointer; min-height:24px; white-space:nowrap; }
+#pluginEventLog .evlAiFuTg { margin-left:-6px; }
+#pluginEventLog .evlAiFuRe { margin-left:auto; margin-right:-6px; }
+#pluginEventLog .evlAiFuTg:hover, #pluginEventLog .evlAiFuRe:hover:not([disabled]):not([aria-disabled=true]) { color:var(--evl-ink); background:var(--evl-hover); }
+#pluginEventLog .evlAiFuTg svg, #pluginEventLog .evlAiFuRe svg { margin:0; flex:none; }
+#pluginEventLog .evlAiFuTg svg { width:12px; height:12px; transition:transform .12s ease-out; }
+#pluginEventLog .evlAiFuTg[aria-expanded=true] svg { transform:rotate(90deg); }
+#pluginEventLog .evlAiFuTg[aria-expanded=true] { color:var(--evl-ink); }
+#pluginEventLog .evlAiFuTg .n { font-variant-numeric:tabular-nums; color:var(--evl-muted); }
+#pluginEventLog .evlAiFuRe svg { width:13px; height:13px; }
+#pluginEventLog .evlAiFuRe[aria-disabled=true] { cursor:progress; color:var(--evl-ink); }
+#pluginEventLog .evlAiFuRe[disabled] { opacity:.5; cursor:default; }
+#pluginEventLog .evlAiFuNone { color:var(--evl-muted); }
+#pluginEventLog .evlAiFuL { display:flex; flex-wrap:wrap; gap:5px; max-height:88px; overflow-y:auto; padding:1px; margin:-1px; }
+#pluginEventLog .evlAiFuChip { flex:0 1 auto; max-width:100%; min-width:0; box-sizing:border-box; height:26px; padding:0 11px; border:1px solid var(--evl-bubble-line); border-radius:13px; background:var(--evl-bubble); color:var(--evl-ink); font:inherit; font-size:12px; line-height:24px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; text-align:left; }
+#pluginEventLog .evlAiFuChip:hover { border-color:var(--evl-acc); }
+#pluginEventLog .evlAiFuChip:active { background:var(--evl-sel); }
+#pluginEventLog .evlAiFuChip:focus-visible, #pluginEventLog .evlAiFuTg:focus-visible, #pluginEventLog .evlAiFuRe:focus-visible { outline:2px solid var(--evl-acc); outline-offset:1px; }
+#pluginEventLog .evlAiFuErr { margin:0; color:var(--evl-err); line-height:1.4; }
+@media (prefers-reduced-motion: reduce) { #pluginEventLog .evlAiFuTg svg { transition:none; } }
+/* answer settings: the header button, what the chat changes, and the popover below the header */
+#pluginEventLog .evlBtn.evlAiGenBtn.set { color:var(--evl-acc); border-color:var(--evl-acc); }
+#pluginEventLog .evlBtn.evlAiGenBtn[aria-expanded=true] { background:var(--evl-sel); border-color:var(--evl-acc); }
+#pluginEventLog .evlAiGenTag { display:flex; align-items:center; gap:4px; margin-top:2px; font-size:11.5px; color:var(--evl-acc); font-variant-numeric:tabular-nums; }
+#pluginEventLog .evlAiGenTag svg { width:12px; height:12px; flex:none; margin:0; }
+#pluginEventLog .evlAiPop { position:absolute; right:8px; z-index:8; width:min(320px, calc(100% - 16px)); box-sizing:border-box; container:evlpop / inline-size;
+  background:var(--evl-bg); color:var(--evl-ink); border:1px solid var(--evl-line); border-top:2px solid var(--evl-acc); border-radius:2px 2px 4px 4px; box-shadow:0 10px 28px rgba(16,24,23,.18), 0 1px 3px rgba(16,24,23,.08); padding:8px 12px 10px; font-size:12px; }
+body.night #pluginEventLog .evlAiPop { box-shadow:0 10px 28px rgba(0,0,0,.75); border-color:var(--evl-bline); border-top-color:var(--evl-acc); }
+#pluginEventLog .evlAiPopHd { display:flex; align-items:center; gap:6px; }
+#pluginEventLog .evlAiPopHd h3 { flex:1 1 auto; margin:0; font-size:13px; font-weight:bold; color:var(--evl-ink); }
+#pluginEventLog .evlAiPopHd .evlAiX { margin-right:-6px; border-color:transparent; background:none; color:var(--evl-muted); }
+#pluginEventLog .evlAiPopHd .evlAiX:hover { color:var(--evl-ink); border-color:var(--evl-line); }
+#pluginEventLog .evlAiPopSub { margin:1px 0 9px; color:var(--evl-muted); line-height:1.4; }
+#pluginEventLog .evlAiGenF { padding:9px 0 10px; border-top:1px solid var(--evl-line2); }
+#pluginEventLog .evlAiGenL { display:block; margin:0 0 6px; font-size:12px; font-weight:bold; color:var(--evl-ink); }
+#pluginEventLog .evlAiGenSeg { display:flex; border:1px solid var(--evl-bline); border-radius:3px; overflow:hidden; }
+#pluginEventLog .evlAiGenSeg button { flex:1 1 auto; min-width:0; min-height:28px; border:0; border-left:1px solid var(--evl-line2); background:var(--evl-input); color:var(--evl-ink); font:inherit; font-size:12px; padding:3px 6px; cursor:pointer; white-space:nowrap; }
+#pluginEventLog .evlAiGenSeg button:first-child { border-left:0; }
+#pluginEventLog .evlAiGenSeg button:hover:not([disabled]):not([aria-pressed=true]) { background:var(--evl-hover); }
+#pluginEventLog .evlAiGenSeg button[aria-pressed=true] { background:var(--evl-acc); color:var(--evl-acc-ink); font-weight:bold; }
+#pluginEventLog .evlAiGenSeg button[disabled] { color:var(--evl-muted); opacity:.5; cursor:not-allowed; text-decoration:line-through; }
+#pluginEventLog .evlAiGenSeg button:focus-visible { outline:2px solid var(--evl-acc); outline-offset:-3px; }
+#pluginEventLog .evlAiGenSeg .sm { display:none; }
+@container evlpop (max-width: 282px) { #pluginEventLog .evlAiGenSeg .lg { display:none; } #pluginEventLog .evlAiGenSeg .sm { display:inline; } }
+#pluginEventLog .evlAiGenHint { margin:6px 0 0; font-size:11.5px; color:var(--evl-muted); line-height:1.4; }
+#pluginEventLog .evlAiGenWarn { color:var(--evl-warn); }
+#pluginEventLog .evlAiGenHint .evlLinkBtn { font-size:11.5px; }
+#pluginEventLog .evlAiGenTH { display:flex; align-items:baseline; justify-content:space-between; gap:8px; }
+#pluginEventLog .evlAiGenTH .evlAiGenL { margin:0; }
+#pluginEventLog .evlAiGenTH output { font-variant-numeric:tabular-nums; font-weight:bold; color:var(--evl-acc); }
+#pluginEventLog .evlAiGenTH output.def { font-weight:normal; color:var(--evl-muted); }
+#pluginEventLog #evlAiGenT { display:block; width:100%; margin:6px 0 1px; accent-color:var(--evl-acc); cursor:pointer; }
+#pluginEventLog #evlAiGenT:focus-visible { outline:2px solid var(--evl-acc); outline-offset:1px; border-radius:3px; }
+#pluginEventLog .evlAiGenScale { display:grid; grid-template-columns:1fr auto 1fr; font-size:10.5px; color:var(--evl-muted); font-variant-numeric:tabular-nums; }
+#pluginEventLog .evlAiGenScale span:last-child { text-align:right; }
+#pluginEventLog .evlAiPopFt { display:flex; align-items:center; gap:8px; padding-top:9px; border-top:1px solid var(--evl-line2); }
+#pluginEventLog .evlAiPopFt span { flex:1 1 auto; color:var(--evl-muted); line-height:1.35; }
 #pluginEventLog .evlBtn[aria-pressed=true] { background:var(--evl-sel); border-color:var(--evl-acc); }
 #pluginEventLog .evlBtn[disabled] { opacity:.5; cursor:default; }
 #pluginEventLog .evlBtn svg { vertical-align:-2px; margin-right:4px; }
@@ -2972,6 +3343,9 @@ body.night #evlAiDlg {
         'aiCanEdit', 'aiLaterN', 'aiMsgIndex', 'aiActBtn', 'aiQActsHtml', 'aiAActsHtml', 'aiEditHtml', 'aiConfirmHtml', 'aiTurnOf', 'aiMsgAct', 'aiMsgCancel', 'aiMsgYes',
         'aiEditSave', 'aiEditKey', 'aiTurnsCut', 'aiMsgRun', 'onAiChatEdited',
         'aiRenderComposer', 'aiKey', 'aiDraft', 'aiSubmit', 'aiAsk', 'aiFollow', 'aiNewChat', 'aiPrefill',
+        'aiFuOpen', 'aiFuHtml', 'aiFuTitles', 'aiFuFocus', 'aiFuToggle', 'aiFuGen', 'onAiFollowups', 'aiFuFail',
+        'aiGenInfo', 'aiGenClean', 'aiGenOut', 'aiGenGet', 'aiGenSet', 'aiGenWord', 'aiGenTag', 'aiGenToggle', 'aiGenClose', 'aiGenOutside', 'aiGenKey', 'aiGenBlur',
+        'aiGenHtml', 'aiGenRender', 'aiGenPlace', 'aiGenSync', 'aiGenThink', 'aiGenTemp', 'aiGenTempReset',
         'aiExplainConv', 'aiExplainBtn', 'aiExplainSaved', 'aiExplain', 'aiVerdict', 'aiExplainBody', 'aiExplainMeta', 'aiExplainHtml', 'aiExplainContinue',
         'aiWinText', 'aiSetWin', 'aiDiagOpen', 'aiDiagCancel', 'aiDiagSetupHtml', 'aiDiagnose', 'aiStatusWord', 'aiChips', 'aiDiagCard', 'aiTlRange', 'aiLaneClusters', 'aiTimelineHtml',
         'aiAskAbout', 'aiCopyCmd',

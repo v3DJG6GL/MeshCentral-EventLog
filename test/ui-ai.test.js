@@ -316,7 +316,8 @@ test('Ask: start, steps, streaming, done with citations -> gutter chip, chip jum
     var gut = doc.querySelector('#evlBody td.evlCCite button.evlCite');
     assert.ok(gut, 'the cited row shows a chip in the gutter');
     assert.strictEqual(gut.closest('tr').id, 'evlR_' + ph.elNormalize(REC).key);
-    assert.ok(doc.querySelector('.evlAiFollow button'));
+    var tg = doc.querySelector('#evlAiLog .evlAiFu .evlAiFuTg');
+    assert.ok(tg && /Suggested questions \(1\)/.test(tg.textContent) && tg.getAttribute('aria-expanded') == 'false', 'follow-ups collapsed by default');
     assert.ok(doc.querySelector('#evlAiLog details.evlAiSteps summary').textContent.indexOf('1 step, 6.1 s, 14.8k tokens') >= 0);
     ph.aiGotoCite(ph.st.ai.chat, 'E1');
     var key = ph.elNormalize(REC).key;
@@ -780,7 +781,8 @@ test('saved chats: the latest comes back after a reload, is listed, continues wi
     assert.ok(log.querySelector('.evlCite[data-r=E1]') && log.querySelector('.evlCite[data-r=E2]'), 'citation chips of the saved answers');
     assert.ok(log.querySelector('mark.evlPs'), 'restored values stay marked');
     assert.ok(!/Helpful/.test(log.textContent), 'no feedback buttons for a saved answer');
-    assert.ok(Array.prototype.some.call(log.querySelectorAll('.evlAiFollow button'), function (b) { return b.textContent == 'Is the PSU failing?'; }), 'follow-ups of the last answer');
+    assert.ok(/Suggested questions \(1\)/.test(log.querySelector('.evlAiFuTg').textContent), 'follow-ups of the last answer');
+    assert.strictEqual(log.querySelectorAll('.evlAiFu').length, 1, 'only under the last answer');
     var hb = doc.getElementById('evlAiHistBtn');
     assert.ok(hb && /Chats\s*2/.test(hb.textContent));
     // the gutter shows the saved citations, a chip finds the row
@@ -1345,4 +1347,213 @@ test('Ask panel height: dragging follows the pointer; layout callbacks during th
     assert.strictEqual(doc.getElementById('evlAiHReset').textContent, 'Reset panel height');
     ph.st.heights[ph.st.layout] = 300; ph.elRenderStatus();
     assert.match(doc.getElementById('evlStatus').textContent, /Reset table height/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// suggested follow-up questions (compact row) and the answer settings per chat
+function askDone(w, followups, convId) {
+    var ph = w.ph;
+    ph.aiAsk('Why did it restart?');
+    var st = sentOf(w, 'aiStart').pop();
+    ph.onAiStarted(null, { nodeid: NODE, reqId: st.reqId, convId: convId || 'cvF', chatId: CH1, model: 'qwen3:14b', endpointName: 'gpu-01.lan', network: 'private' });
+    ph.onAiDone(null, { nodeid: NODE, convId: convId || 'cvF', turn: 1, text: 'The drive stalled [E1].', citations: { E1: REC }, invalidCitations: [], usage: {}, followups: followups, chatId: CH1 });
+    return ph.st.ai.convs[ph.st.ai.chat];
+}
+var LONGQ = 'Which storage controller driver version is installed, and did Windows Update replace it during the last maintenance window on this laptop?';
+
+test('follow-ups: a collapsed row by default; expanding is remembered per browser; chips are one line with the full text as tooltip and ask on click', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantSaved(w); loadHistory(w);
+    var c = askDone(w, ['Is the PSU failing?', LONGQ, 'When did it start?']);
+    var row = doc.querySelector('#evlAiLog .evlAiTurn.last .evlAiFu');
+    var tg = row.querySelector('.evlAiFuTg');
+    assert.deepStrictEqual([tg.textContent, tg.getAttribute('aria-expanded'), row.querySelectorAll('.evlAiFuChip').length], ['Suggested questions (3)', 'false', 0]);
+    assert.ok(row.querySelector('.evlAiFuRe') && /Suggest questions/.test(row.querySelector('.evlAiFuRe').textContent));
+    ph.aiFuToggle(c.id, 1);
+    tg = doc.querySelector('#evlAiLog .evlAiFuTg');
+    assert.strictEqual(tg.getAttribute('aria-expanded'), 'true');
+    assert.strictEqual(w.store.evl_ai_fu, '1', 'remembered');
+    assert.strictEqual(doc.activeElement, tg, 'focus stays on the toggle');
+    var list = doc.getElementById(tg.getAttribute('aria-controls'));
+    assert.ok(list && list.getAttribute('role') == 'group');
+    var chips = list.querySelectorAll('.evlAiFuChip');
+    assert.strictEqual(chips.length, 3);
+    assert.strictEqual(chips[1].title, LONGQ, 'full text as the tooltip');
+    assert.strictEqual(chips[1].outerHTML.indexOf('title="') < 0 || chips[1].getAttribute('title') === LONGQ, true);
+    var css = doc.getElementById('evlAiStyles').textContent;
+    assert.match(css, /\.evlAiFuChip \{[^}]*white-space:nowrap;[^}]*text-overflow:ellipsis/);
+    assert.match(css, /\.evlAiFuL \{[^}]*flex-wrap:wrap;[^}]*max-height:88px/);
+    ph.aiFollow(c.id, 1, 0);   // (inline handlers do not run here: the call they make)
+    assert.deepStrictEqual(plain(sentOf(w, 'aiSend').map(function (m) { return [m.convId, m.text]; })), [['cvF', 'Is the PSU failing?']]);
+    // a new tab in this browser opens them expanded; collapsing is remembered too
+    var w2 = makeDom(); w2.store.evl_ai_fu = '1';
+    grantSaved(w2); loadHistory(w2);
+    var c2 = askDone(w2, ['Is the PSU failing?']);
+    assert.strictEqual(w2.document.querySelectorAll('#evlAiLog .evlAiFuChip').length, 1);
+    w2.ph.aiFuToggle(c2.id, 1);
+    assert.strictEqual(w2.store.evl_ai_fu, '');
+    assert.strictEqual(w2.document.querySelectorAll('#evlAiLog .evlAiFuChip').length, 0);
+});
+
+test('follow-ups: "Suggest questions" asks the server, shows its progress, opens the new ones; none -> "No suggested questions"; failures stay at the button', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantSaved(w); loadHistory(w);
+    var c = askDone(w, []);
+    var row = doc.querySelector('#evlAiLog .evlAiFu');
+    assert.match(row.textContent, /No suggested questions/);
+    assert.strictEqual(row.querySelector('.evlAiFuTg'), null);
+    assert.match(row.querySelector('.evlAiFuRe').getAttribute('onclick'), /aiFuGen\('c\d+',1\)/);
+    ph.aiFuGen(c.id, 1);
+    var m = sentOf(w, 'aiFollowups')[0];
+    assert.deepStrictEqual([m.convId, m.chatId, /^fu/.test(m.reqId), m.nodeid], ['cvF', CH1, true, NODE]);
+    var re = doc.querySelector('#evlAiLog .evlAiFuRe');
+    assert.deepStrictEqual([re.getAttribute('aria-busy'), re.getAttribute('aria-disabled'), /Suggesting/.test(re.textContent), !!re.querySelector('svg.evlAiRing')], ['true', 'true', true, true]);
+    assert.strictEqual(doc.activeElement, re, 'focus stays on the button');
+    ph.aiFuGen(c.id, 1);
+    assert.strictEqual(sentOf(w, 'aiFollowups').length, 1, 'not twice while it runs');
+    ph.onAiFollowups(null, { nodeid: NODE, reqId: 'other', followups: ['x'] });   // not ours
+    assert.ok(doc.querySelector('#evlAiLog .evlAiFuRe[aria-busy=true]'));
+    ph.onAiFollowups(null, { nodeid: NODE, reqId: m.reqId, chatId: CH1, convId: 'cvF', turn: 1, followups: ['Is the PSU failing?', 'Which driver?'] });
+    var chips = doc.querySelectorAll('#evlAiLog .evlAiFuChip');
+    assert.deepStrictEqual(Array.prototype.map.call(chips, function (b) { return b.textContent; }), ['Is the PSU failing?', 'Which driver?'], 'the new ones are shown although the row is collapsed by default');
+    assert.strictEqual(w.store.evl_ai_fu, undefined, 'the stored choice is not changed');
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiFuRe').getAttribute('aria-busy'), null);
+    assert.deepStrictEqual(plain(c.turns[0].followups), ['Is the PSU failing?', 'Which driver?']);
+    // regenerate again: the model has none
+    ph.aiFuGen(c.id, 1);
+    var m2 = sentOf(w, 'aiFollowups').pop();
+    ph.onAiFollowups(null, { nodeid: NODE, reqId: m2.reqId, followups: [] });
+    assert.match(doc.querySelector('#evlAiLog .evlAiFu').textContent, /No suggested questions/);
+    // a failure: shown at the button, the answer stays as it is
+    ph.aiFuGen(c.id, 1);
+    var m3 = sentOf(w, 'aiFollowups').pop();
+    ph.onAiError(null, { nodeid: NODE, reqId: m3.reqId, scope: 'followups', code: 'quota', message: 'used up' });
+    assert.match(doc.querySelector('#evlAiLog .evlAiFuErr').textContent, /No new questions: You reached today's limit/);
+    assert.deepStrictEqual([c.turns[0].status, c.status, c.turns[0].error], ['done', 'done', null]);
+    // refused by the server's permission check (onAccessDenied echoes the reqId)
+    ph.aiFuGen(c.id, 1);
+    var m4 = sentOf(w, 'aiFollowups').pop();
+    var n = sentOf(w, 'checkAccess').length;
+    ph.onAccessDenied(null, { nodeid: NODE, act: 'aiFollowups', reqId: m4.reqId, reason: 'missing permission' });
+    assert.match(doc.querySelector('#evlAiLog .evlAiFuErr').textContent, /No new questions: You do not have access/);
+    assert.ok(sentOf(w, 'checkAccess').length > n, 'access asked again');
+    assert.strictEqual(c.turns[0].status, 'done');
+    // a saved chat without an open conversation: by chat id only; while a question runs the button waits
+    c.closed = true;
+    ph.aiFuGen(c.id, 1);
+    var m5 = sentOf(w, 'aiFollowups').pop();
+    assert.deepStrictEqual([m5.convId, m5.chatId], [undefined, CH1]);
+    ph.onAiFollowups(null, { nodeid: NODE, reqId: m5.reqId, followups: ['A?'] });
+    ph.aiAsk('Next?');
+    assert.strictEqual(doc.querySelectorAll('#evlAiLog .evlAiFu').length, 0, 'no row while the next answer runs');
+});
+
+function grantGen(w, gen, extra) {
+    grantSaved(w, Object.assign({ chatGen: Object.assign({ enabled: true, thinkingLevels: ['low', 'medium', 'high'], thinkingVerified: true, temperature: true, endpointThinking: null, endpointTemperature: 0.8 }, gen || {}) }, extra || {}));
+}
+function popBtns(doc) { return Array.prototype.map.call(doc.querySelectorAll('#evlAiGenPop .evlAiGenSeg button'), function (b) { return b.getAttribute('aria-label') || b.textContent; }); }
+
+test('answer settings: the header button opens a popover; only the levels the endpoint takes are enabled; Esc closes and focus returns', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantGen(w); loadHistory(w);
+    ph.aiToggle();
+    var b = doc.getElementById('evlAiGenBtn');
+    assert.ok(b, 'shown');
+    assert.deepStrictEqual([b.getAttribute('aria-label'), b.getAttribute('title'), b.getAttribute('aria-expanded'), b.getAttribute('aria-haspopup')], ['Answer settings', 'Answer settings', 'false', 'dialog']);
+    ph.aiGenToggle();
+    var pop = doc.getElementById('evlAiGenPop');
+    assert.ok(pop && pop.getAttribute('role') == 'dialog' && pop.getAttribute('aria-labelledby') == 'evlAiGenH');
+    assert.strictEqual(doc.getElementById('evlAiGenBtn').getAttribute('aria-expanded'), 'true');
+    assert.deepStrictEqual(popBtns(doc), ['Endpoint default', 'Off', 'Low', 'Medium', 'High']);
+    var dis = Array.prototype.map.call(doc.querySelectorAll('#evlAiGenPop .evlAiGenSeg button'), function (x) { return x.disabled; });
+    assert.deepStrictEqual(dis, [false, true, false, false, false], 'Off is not offered by this endpoint');
+    assert.strictEqual(doc.activeElement.getAttribute('aria-pressed'), 'true', 'focus on the current choice');
+    assert.ok(!/Not verified/.test(pop.textContent));
+    assert.match(pop.textContent, /Endpoint default: 0\.8\./);
+    assert.strictEqual(doc.getElementById('evlAiGenTV').textContent, 'Endpoint default');
+    // Esc closes, focus back on the button
+    ph.aiGenKey({ key: 'Escape', preventDefault: function () { }, stopPropagation: function () { } });
+    assert.strictEqual(doc.getElementById('evlAiGenPop'), null);
+    assert.strictEqual(doc.activeElement, doc.getElementById('evlAiGenBtn'));
+    assert.strictEqual(doc.getElementById('evlAiGenBtn').getAttribute('aria-expanded'), 'false');
+    // a click outside closes it too
+    ph.aiGenToggle();
+    doc.getElementById('evlAiLog').dispatchEvent(new w.Event('pointerdown', { bubbles: true }));
+    assert.strictEqual(doc.getElementById('evlAiGenPop'), null);
+    // thinking support unknown: all levels with a hint
+    var w2 = makeDom();
+    grantGen(w2, { thinkingLevels: ['off', 'low', 'medium', 'high'], thinkingVerified: false }); loadHistory(w2);
+    w2.ph.aiToggle(); w2.ph.aiGenToggle();
+    assert.ok(Array.prototype.every.call(w2.document.querySelectorAll('#evlAiGenPop .evlAiGenSeg button'), function (x) { return !x.disabled; }));
+    assert.match(w2.document.getElementById('evlAiGenPop').textContent, /Not verified for this endpoint/);
+    // no thinking setting (Anthropic: neither) / turned off by the admin / an older server: no thinking control or no button
+    var w3 = makeDom();
+    grantGen(w3, { thinkingLevels: null }); loadHistory(w3);
+    w3.ph.aiToggle(); w3.ph.aiGenToggle();
+    assert.strictEqual(w3.document.querySelector('#evlAiGenPop .evlAiGenSeg'), null);
+    assert.ok(w3.document.getElementById('evlAiGenT'));
+    [{ thinkingLevels: null, temperature: false }, { enabled: false }].forEach(function (g) {
+        var w4 = makeDom(); grantGen(w4, g); loadHistory(w4); w4.ph.aiToggle();
+        assert.strictEqual(w4.document.getElementById('evlAiGenBtn'), null, JSON.stringify(g));
+    });
+    var w5 = makeDom(); grantSaved(w5); loadHistory(w5); w5.ph.aiToggle();
+    assert.strictEqual(w5.document.getElementById('evlAiGenBtn'), null);
+});
+
+test('answer settings: chosen per chat, shown in the header, sent with aiStart and aiSend; New chat starts with the endpoint\'s; restored from a saved chat', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantGen(w); loadHistory(w);
+    ph.aiToggle(); ph.aiGenToggle();
+    ph.aiGenThink('high');
+    assert.strictEqual(doc.activeElement.getAttribute('data-k'), 'thhigh', 'focus kept on the pressed level');
+    assert.strictEqual(doc.querySelector('#evlAiGenPop [data-k=thhigh]').getAttribute('aria-pressed'), 'true');
+    var sl = doc.getElementById('evlAiGenT');
+    sl.value = '0.7'; ph.aiGenTemp(sl, false);
+    assert.strictEqual(doc.getElementById('evlAiGenTV').textContent, '0.70');
+    ph.aiGenTemp(doc.getElementById('evlAiGenT'), true);
+    assert.ok(doc.querySelector('#evlAiGenPop [data-k=treset]'), 'Use the endpoint default');
+    assert.match(doc.querySelector('#evlAiHd .evlAiGenTag').textContent, /^Thinking: high · temperature 0\.7$/);
+    assert.ok(doc.getElementById('evlAiGenBtn').classList.contains('set'));
+    ph.aiGenClose(true);
+    ph.aiAsk('Why did it restart?');
+    var st = sentOf(w, 'aiStart').pop();
+    assert.deepStrictEqual(plain(st.gen), { thinking: 'high', temperature: 0.7 });
+    var c = ph.st.ai.convs[ph.st.ai.chat];
+    ph.onAiStarted(null, { nodeid: NODE, reqId: st.reqId, convId: 'cvG', chatId: CH1 });
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvG', turn: 1, text: 'Ok.', citations: {}, usage: {}, followups: [], chatId: CH1 });
+    // changed in the chat: the next question carries it
+    ph.aiGenToggle();
+    ph.aiGenThink('');
+    ph.aiGenTempReset();
+    assert.strictEqual(doc.querySelector('#evlAiHd .evlAiGenTag'), null, 'nothing changed from the endpoint any more');
+    ph.aiGenThink('low');
+    ph.aiGenClose(false);
+    ph.aiAsk('And now?');
+    assert.deepStrictEqual(plain(sentOf(w, 'aiSend').pop().gen), { thinking: 'low' });
+    assert.deepStrictEqual(plain(c.gen), { thinking: 'low' });
+    // New chat: the endpoint's settings again
+    ph.aiNewChat();
+    assert.strictEqual(doc.querySelector('#evlAiHd .evlAiGenTag'), null);
+    ph.aiAsk('Fresh?');
+    assert.deepStrictEqual(plain(sentOf(w, 'aiStart').pop().gen), {});
+    // a saved chat brings its settings back (levels the endpoint does not take are dropped) and continues with them
+    var w2 = makeDom(), ph2 = w2.ph, doc2 = w2.document;
+    grantGen(w2); loadHistory(w2);
+    ph2.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'Why did it restart?', updated: Date.now(), count: 2 }], explains: [] });
+    ph2.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: Object.assign(chatItem(), { gen: { thinking: 'medium', temperature: 1.25 } }) });
+    ph2.aiToggle();
+    assert.match(doc2.querySelector('#evlAiHd .evlAiGenTag').textContent, /Thinking: medium · temperature 1\.25/);
+    ph2.aiGenToggle();
+    assert.strictEqual(doc2.querySelector('#evlAiGenPop [data-k=thmedium]').getAttribute('aria-pressed'), 'true');
+    assert.strictEqual(doc2.getElementById('evlAiGenT').value, '1.25');
+    assert.match(doc2.getElementById('evlAiGenPop').textContent, /For this chat\./);
+    ph2.aiGenClose(false);
+    ph2.aiAsk('Did it happen again?');
+    var s2 = sentOf(w2, 'aiStart').pop();
+    assert.deepStrictEqual([s2.chatId, plain(s2.gen)], [CH1, { thinking: 'medium', temperature: 1.25 }]);
+    var w3 = makeDom();
+    grantGen(w3); loadHistory(w3);
+    w3.ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'x', updated: Date.now(), count: 2 }], explains: [] });
+    w3.ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: Object.assign(chatItem(), { gen: { thinking: 'off', temperature: 7 } }) });
+    assert.deepStrictEqual(plain(w3.ph.st.ai.convs[w3.ph.st.ai.chat].gen), {}, 'what the endpoint does not take is dropped');
 });

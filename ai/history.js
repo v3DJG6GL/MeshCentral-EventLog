@@ -16,9 +16,15 @@
 //   get(userid, nodeid, kind, key)         -> Promise<item|null>   kind 'chat' (key: chat id), 'diagnosis' (key
 //                                             ignored; only items not migrated yet), 'explain' (key: the stored event id)
 //   remove(userid, nodeid, kind, key)      -> Promise<bool>
-//   saveChatTurn({ userid, nodeid, chatId, question, done, steps, endpointName, model, cont, type, window, range })
+//   saveChatTurn({ userid, nodeid, chatId, question, done, steps, endpointName, model, cont, type, window, range, gen })
 //                                          -> Promise<bool>   type 'diagnosis' (with window '24h'|'7d'|'restart' and
-//                                             range) on the first message of a diagnosis chat
+//                                             range) on the first message of a diagnosis chat; gen { thinking?,
+//                                             temperature? } = the chat's answer settings (doc.gen, absent = the
+//                                             endpoint's; ai/index.js validated them)
+//   setFollowups(userid, nodeid, chatId, followups, expect) -> Promise<{ ok, code? }>   replaces the suggested
+//                                             follow-up questions of the chat's last message; expect { count?, q? }:
+//                                             the chat must still have that many messages and that last question
+//                                             (code 'changed' otherwise; 'notFound' for a chat that is not the caller's)
 //   editChat(userid, nodeid, chatId, index, op, q) -> Promise<{ ok, code?, deleted?, item? }>   op 'delete' removes
 //                                             message index (question and answer), 'truncate' it and every later one;
 //                                             q (optional) must equal that message's question (the chat did not change
@@ -44,6 +50,7 @@ const MAX_CITES = 60, MAX_CITE_MSG = 4000, MAX_TEXT = 200000, MAX_Q = 4000, MAX_
 const WINDOWS = ['24h', '7d', 'restart'];
 const CHAT_ID_RE = /^ch[0-9a-f]{24}$/;
 const KINDS = ['chat', 'diagnosis', 'explain'];
+const THINK = ['off', 'low', 'medium', 'high'];
 
 function isObj(v) { return v != null && typeof v === 'object' && !Array.isArray(v); }
 function size(v) { try { return Buffer.byteLength(JSON.stringify(v), 'utf8'); } catch (e) { return Infinity; } }
@@ -54,6 +61,18 @@ function okStr(v, max) { return typeof v === 'string' && v.length > 0 && v.lengt
 function titleOf(q) {
     const t = String(q == null ? '' : q).replace(/[-]/g, '').replace(/\s+/g, ' ').trim();
     return t.length > 80 ? t.slice(0, 79).trimEnd() + '…' : (t || 'Chat');
+}
+
+// the answer settings of a chat as stored: { thinking?, temperature? }, null when none is set
+function genOf(g) {
+    if (!isObj(g)) return null;
+    const o = {};
+    if (THINK.indexOf(g.thinking) >= 0) o.thinking = g.thinking;
+    if (typeof g.temperature === 'number' && Number.isFinite(g.temperature) && g.temperature >= 0 && g.temperature <= 2) o.temperature = Math.round(g.temperature * 100) / 100;
+    return Object.keys(o).length ? o : null;
+}
+function followupsOf(list) {
+    return (Array.isArray(list) ? list : []).filter(function (f) { return typeof f === 'string'; }).slice(0, 3).map(function (f) { return f.slice(0, 300); });
 }
 
 function stripMarks(t) { return String(t == null ? '' : t).replace(/\uE002[a-z]{1,12}\uE003([^\uE002-\uE004]*)\uE004/g, '$1').replace(/[\uE000-\uE00F]/g, ''); }
@@ -106,7 +125,7 @@ function result(done, steps) {
         text: clip(done.text, MAX_TEXT), structured: isObj(done.structured) ? done.structured : null,
         cites: citesOf(done.citations, MAX_CITES, MAX_CITE_MSG),
         invalid: (Array.isArray(done.invalidCitations) ? done.invalidCitations : []).filter(function (r) { return typeof r === 'string'; }).slice(0, 40),
-        followups: (Array.isArray(done.followups) ? done.followups : []).filter(function (f) { return typeof f === 'string'; }).slice(0, 3).map(function (f) { return f.slice(0, 300); }),
+        followups: followupsOf(done.followups),
         usage: { in: Number(u.in) || 0, out: Number(u.out) || 0, estimated: u.estimated === true, ms: Number(u.ms) || 0, rounds: Number(u.rounds) || 0 },
         redactionCounts: isObj(done.redactionCounts) ? done.redactionCounts : null,
         steps: stepsOf(steps)
@@ -313,6 +332,7 @@ function create(o) {
                 doc.messages.push(msg);
                 doc.updated = t;
                 doc.model = msg.model; doc.endpointName = msg.endpointName;
+                if (c.gen !== undefined) { const g = genOf(c.gen); if (g) doc.gen = g; else delete doc.gen; }
                 fitChat(doc);
                 return put({ id: id, time: t, userid: c.userid, nodeid: c.nodeid, kind: 'chat', meta: chatMeta(doc), doc: doc });
             });
@@ -349,6 +369,27 @@ function create(o) {
         } catch (e) { warn('could not change the chat', e); return { ok: false, code: 'invalid' }; }
     }
 
+    // "Suggest questions": new follow-up questions for the last answer of the owner's chat
+    async function setFollowups(userid, nodeid, chatId, followups, expect) {
+        try {
+            if (!args(userid, nodeid, 'chat') || typeof chatId !== 'string' || !CHAT_ID_RE.test(chatId)) return { ok: false, code: 'notFound' };
+            const cfg = await config();
+            if (!cfg.enabled) return { ok: false, code: 'notFound' };
+            expect = isObj(expect) ? expect : {};
+            return await serial(chatId, async function () {
+                const rec = await db.aiChatGet(chatId);
+                if (!owned(rec, userid, nodeid, 'chat', cfg) || !isObj(rec.doc) || !Array.isArray(rec.doc.messages) || !rec.doc.messages.length) return { ok: false, code: 'notFound' };
+                const ms = rec.doc.messages, last = ms[ms.length - 1];
+                if (Number.isInteger(expect.count) && expect.count !== ms.length) return { ok: false, code: 'changed' };
+                if (typeof expect.q === 'string' && clip(last && last.q, MAX_Q) !== clip(expect.q, MAX_Q)) return { ok: false, code: 'changed' };
+                last.followups = followupsOf(followups);
+                // the chat's place in the list stays: the time of the record is kept
+                if (!(await put({ id: chatId, time: Number(rec.time) || now(), userid: userid, nodeid: nodeid, kind: 'chat', meta: chatMeta(rec.doc), doc: rec.doc }))) return { ok: false, code: 'invalid' };
+                return { ok: true };
+            });
+        } catch (e) { warn('could not save the suggested questions', e); return { ok: false, code: 'invalid' }; }
+    }
+
     async function saveSingle(kind, c, extra, meta) {
         try {
             if (!c || !args(c.userid, c.nodeid, kind)) return false;
@@ -382,7 +423,7 @@ function create(o) {
         return out;
     }
 
-    return { config, newChatId, list, get, remove, saveChatTurn, editChat, saveExplain, sweep, purge, counts, CHAT_ID_RE };
+    return { config, newChatId, list, get, remove, saveChatTurn, editChat, setFollowups, saveExplain, sweep, purge, counts, CHAT_ID_RE };
 }
 
-module.exports = { create, titleOf, diagQuestion, diagTitle, fitChat, CHAT_ID_RE, MAX_CHATS, MAX_EXPLAINS, MAX_DOC };
+module.exports = { create, genOf, titleOf, diagQuestion, diagTitle, fitChat, CHAT_ID_RE, MAX_CHATS, MAX_EXPLAINS, MAX_DOC };

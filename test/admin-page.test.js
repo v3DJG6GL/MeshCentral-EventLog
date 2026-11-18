@@ -230,6 +230,24 @@ test('starter questions: factory lists shown, add / remove / reorder (focus foll
     assert.deepStrictEqual(JSON.parse(JSON.stringify(w.last('aiAdminSaveSettings').settings.starters.linux)), ['Which units failed?']);
 });
 
+test('access: "Users can change thinking and temperature in the chat" is on by default and saved with the settings', { skip: SKIP }, function () {
+    var w = page();
+    dataWith(w, {});
+    assert.strictEqual($(w, 'elAiChatGen').checked, true, 'on when the server sends nothing (older settings)');
+    w.elAiSaveSettings();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(w.last('aiAdminSaveSettings').settings.chatGen)), { enabled: true });
+    w = page();
+    dataWith(w, { chatGen: { enabled: false } });
+    assert.strictEqual($(w, 'elAiChatGen').checked, false);
+    $(w, 'elAiChatGen').checked = true;
+    w.elAiSaveSettings();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(w.last('aiAdminSaveSettings').settings.chatGen)), { enabled: true });
+    $(w, 'elAiChatGen').checked = false;
+    w.elAiSaveSettings();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(w.last('aiAdminSaveSettings').settings.chatGen)), { enabled: false });
+    assert.match($(w, 'elAiChatGen').parentNode.textContent, /Users can change thinking and temperature in the chat/);
+});
+
 test('saved results: retention and switch saved with the settings, counts shown, delete all asks first', { skip: SKIP }, function () {
     var w = page();
     dataWith(w, { history: { enabled: true, retentionDays: 45 } });

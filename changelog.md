@@ -9,8 +9,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 ### Added
 - Assistant: questions can be edited or deleted and answers retried; questions can be copied
+- Assistant: thinking level and temperature can be changed per chat (admins can turn this off); “Suggest questions” creates new follow-up questions
 
 ### Changed
+- Assistant: suggested follow-up questions are a compact, collapsible row
 - Assistant: a diagnosis is now a chat — the result appears in the Ask panel, follow-up questions continue it, and earlier diagnoses are listed with the chats
 - Assistant: the chat panel can be switched to full width
 - Assistant: the Stop button shows that the model is still working

@@ -1080,6 +1080,7 @@
         var pp = (s.previewPolicy == 'once' || s.previewPolicy == 'never') ? s.previewPolicy : 'every';
         document.querySelectorAll('input[name="elAiPreview"]').forEach(function(i) { i.checked = (i.value == pp); });
         Q('elAiEnabled').checked = (s.enabled === true);
+        Q('elAiChatGen').checked = !(s.chatGen && s.chatGen.enabled === false);
         var num = function(v, d) { return (v == null || v === '' || !isFinite(Number(v))) ? String(d) : String(v); };
         Q('elAiQuotaQ').value = num(qu.perUserQuestions, 0);
         Q('elAiQuotaT').value = num(qu.perUserTokens, 0);
@@ -1227,6 +1228,7 @@
         var pp = document.querySelector('input[name="elAiPreview"]:checked');
         s.previewPolicy = pp ? pp.value : 'every';
         s.enabled = Q('elAiEnabled').checked;
+        s.chatGen = { enabled: Q('elAiChatGen').checked };
         s.quotas.perUserQuestions = quQ; s.quotas.perUserTokens = quT;
         s.limits.maxRounds = rounds; s.limits.maxCalls = calls; s.limits.maxSentKB = sentKB;
         s.retentionDays = ret;
@@ -1514,6 +1516,7 @@
           td(tok, 'elNum', 'Tokens in / out');
           var res = td(r.result, (r.result == 'ok') ? 'elAiOk' : (r.error ? 'elAiBad' : null), r.error);
           if (r.error) { var e = document.createElement('div'); e.className = 'elAiSub'; e.textContent = String(r.error); res.appendChild(e); }
+          if (r.kind == 'followups') { var fk = document.createElement('div'); fk.className = 'elAiSub'; fk.textContent = 'Suggested questions (not counted as a question)'; res.appendChild(fk); }
           tb.appendChild(tr);
         });
         if (!tb.firstChild) {
@@ -2226,6 +2229,9 @@
           <div class="elAiGrid">
             <span class="elAiLbl">Assistant</span>
             <div><label><input type="checkbox" id="elAiEnabled"> Turn the Assistant on</label></div>
+            <span class="elAiLbl">Answer settings</span>
+            <div><label><input type="checkbox" id="elAiChatGen" aria-describedby="elAiChatGenHelp"> Users can change thinking and temperature in the chat</label>
+              <small id="elAiChatGenHelp" class="elAiHelp">Per chat, on top of the endpoint's generation settings, with only the thinking levels the endpoint takes. The Anthropic format takes neither.</small></div>
             <label for="elAiQuotaQ">Questions per user per day</label>
             <div><input type="number" id="elAiQuotaQ" min="0" max="100000" step="1" aria-describedby="elAiQuotaHelp"></div>
             <label for="elAiQuotaT">Tokens per user per day</label>

@@ -3,7 +3,8 @@
 //
 // runTurn(S, userText, deps) -> Promise<void>   never rejects; every outcome ends in onAiDone or onAiError + audit
 //   S        session (ai/session.js) with mode, transcript, redactor, refs, toolMode ('tools'|'summary'), toolModeAuto,
-//            ep (no key), window?, os, nonce, answers[], suspicious:Set, reqId?
+//            ep (no key), window?, os, nonce, answers[], suspicious:Set, reqId?, genEff? { thinking, temperature }
+//            (the settings in effect for this turn, written to the audit record)
 //   userText the user message for the model, already composed and redacted by the caller
 //   deps: {
 //     llm, adapter, store, settings, log, now,
@@ -381,6 +382,8 @@ async function turn(S, userText, deps) {
             redactionOn: !!S.redacted, redactionCounts: R.counts(), tokensIn: tokIn, tokensOut: tokOut, estimated: estimated,
             durationMs: durationMs, result: result, error: errCode, counted: true
         };
+        // the thinking level and temperature in effect (the chat's override, else the endpoint's; null = the server's default)
+        if (isObj(S.genEff)) { rec.thinking = S.genEff.thinking == null ? null : S.genEff.thinking; rec.temperature = S.genEff.temperature == null ? null : S.genEff.temperature; }
         if (settings.storeTranscripts) { const tr = transcriptForAudit(S.transcript); if (tr) rec.transcript = tr; }
         Promise.resolve(deps.store.auditAdd(rec)).catch(function () { });
     } catch (e) { log('EVENTLOG AI: audit record failed'); }

@@ -146,7 +146,7 @@ function setupAi(opts) {
     var gp = F.makeWebserver(F.makeNodes(), opts.rights || { 'mesh/d/A': 0xFFFFFFFF });
     return { ph: ph, plugin: plugin, ai: ai, gp: gp };
 }
-var AI_DEVICE = ['aiStart', 'aiConfirm', 'aiSend', 'aiFeedback', 'aiHistoryList', 'aiHistoryGet', 'aiHistoryDelete', 'aiChatEdit'];
+var AI_DEVICE = ['aiStart', 'aiConfirm', 'aiSend', 'aiFeedback', 'aiHistoryList', 'aiHistoryGet', 'aiHistoryDelete', 'aiChatEdit', 'aiFollowups'];
 var AI_ADMIN = ['aiAdminGet', 'aiAdminSaveEndpoint', 'aiAdminDeleteEndpoint', 'aiAdminSaveSettings', 'aiAdminTest', 'aiAdminModels', 'aiAdminAudit', 'aiAdminPreviewPrompt', 'aiAdminHistoryStats', 'aiAdminHistoryPurge'];
 
 test('Assistant device actions need the Assistant permission', async function () {

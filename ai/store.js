@@ -43,6 +43,7 @@
 //   history { enabled (default true), retentionDays 1..3650 (default 30) }: saved chats, diagnoses and explanations
 //   (ai/history.js). starters { windows, linux }: null (factory list, STARTERS) | up to 12 one-line texts of at most
 //   200 characters (the factory list itself -> null); startersFor(settings, os) picks a device's list.
+//   chatGen { enabled (default true) }: users may change thinking and temperature per chat (ai/index.js).
 //   The stored document also carries sv (SETTINGS_VERSION, server-side only); an older document is migrated once
 //   on load (old defaults -> new defaults) and saved again; a failed save is logged and does not fail the load.
 // Acknowledgements: getAck(userid, epId) -> Promise<bool>, setAck(userid, epId) -> Promise<bool>.
@@ -85,7 +86,9 @@ const DEFAULTS = {
     // saved results (chats, the last diagnosis, explanations) per user and device, ai/history.js
     history: { enabled: true, retentionDays: 30 },
     // starter questions of an empty Ask panel per device OS (null = the factory list, STARTERS)
-    starters: { windows: null, linux: null }
+    starters: { windows: null, linux: null },
+    // users may change thinking and temperature per chat (on top of the endpoint's generation settings)
+    chatGen: { enabled: true }
 };
 // Factory starter questions (the buttons of an empty Ask panel); a device of unknown OS gets the Windows list.
 const STARTERS = {
@@ -200,6 +203,7 @@ function mergeSettings(base, input) {
     const st0 = isObj(s.starters) ? s.starters : {};
     s.starters = {};
     for (const os of STARTER_OS) { const v = normStarters(os, st0[os]); s.starters[os] = v === undefined ? null : v; }
+    s.chatGen = { enabled: !(isObj(s.chatGen) && s.chatGen.enabled === false) };
     if (!isObj(input)) return s;
     if (typeof input.enabled === 'boolean') s.enabled = input.enabled;
     if (typeof input.storeTranscripts === 'boolean') s.storeTranscripts = input.storeTranscripts;
@@ -231,6 +235,7 @@ function mergeSettings(base, input) {
     if (isObj(input.starters)) {
         for (const os of STARTER_OS) { const v = normStarters(os, input.starters[os]); if (v !== undefined) s.starters[os] = v; }
     }
+    if (isObj(input.chatGen) && typeof input.chatGen.enabled === 'boolean') s.chatGen.enabled = input.chatGen.enabled;
     return s;
 }
 

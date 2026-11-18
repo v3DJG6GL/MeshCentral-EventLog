@@ -2008,12 +2008,13 @@ body.night #pluginEventLog {
     // device actions only from a user session, after the user's rights on that device are confirmed.
     obj.AGENT_ACTIONS = { sendlog: true, gatherlogs: true };
     obj.NODE_ACTIONS = { checkAccess: true, getNodeHistory: true, collectNow: true, aiStart: true, aiConfirm: true, aiSend: true, aiFeedback: true,
-                         aiHistoryList: true, aiHistoryGet: true, aiHistoryDelete: true, aiChatEdit: true };
+                         aiHistoryList: true, aiHistoryGet: true, aiHistoryDelete: true, aiChatEdit: true, aiFollowups: true };
     // Device actions that need a plugin permission, and device actions that need MeshCentral device rights on top.
     obj.ACTION_PERMISSION = { getNodeHistory: 'deviceHistoryTab', collectNow: 'deviceHistoryTab', aiStart: 'deviceAssistant', aiConfirm: 'deviceAssistant', aiSend: 'deviceAssistant', aiFeedback: 'deviceAssistant',
-                              aiHistoryList: 'deviceAssistant', aiHistoryGet: 'deviceAssistant', aiHistoryDelete: 'deviceAssistant', aiChatEdit: 'deviceAssistant' };
+                              aiHistoryList: 'deviceAssistant', aiHistoryGet: 'deviceAssistant', aiHistoryDelete: 'deviceAssistant', aiChatEdit: 'deviceAssistant', aiFollowups: 'deviceAssistant' };
     obj.ACTION_RIGHTS = { aiStart: obj.MESHRIGHT_DEVICEDETAILS, aiConfirm: obj.MESHRIGHT_DEVICEDETAILS, aiSend: obj.MESHRIGHT_DEVICEDETAILS, aiFeedback: obj.MESHRIGHT_DEVICEDETAILS,
-                          aiHistoryList: obj.MESHRIGHT_DEVICEDETAILS, aiHistoryGet: obj.MESHRIGHT_DEVICEDETAILS, aiHistoryDelete: obj.MESHRIGHT_DEVICEDETAILS, aiChatEdit: obj.MESHRIGHT_DEVICEDETAILS };
+                          aiHistoryList: obj.MESHRIGHT_DEVICEDETAILS, aiHistoryGet: obj.MESHRIGHT_DEVICEDETAILS, aiHistoryDelete: obj.MESHRIGHT_DEVICEDETAILS, aiChatEdit: obj.MESHRIGHT_DEVICEDETAILS,
+                          aiFollowups: obj.MESHRIGHT_DEVICEDETAILS };
     // Assistant actions authorized by conversation ownership inside ai/index.js (same user and connection), so Stop
     // and Close keep working after a permission was revoked; and the Assistant admin actions (full administrators).
     obj.AI_SESSION_ACTIONS = { aiStop: true, aiClose: true };
@@ -2202,6 +2203,7 @@ body.night #pluginEventLog {
         case 'aiStart': case 'aiConfirm': case 'aiSend': case 'aiFeedback':   // device rights + permission checked in serveraction
         case 'aiHistoryList': case 'aiHistoryGet': case 'aiHistoryDelete':     // the same, and scoped to this user in ai/index.js
         case 'aiChatEdit':                                                      // the same (edit / delete / retry of a message)
+        case 'aiFollowups':                                                     // the same ("Suggest questions")
         case 'aiStop': case 'aiClose': {                                      // ownership checked in ai/index.js
             obj.aiDeviceAction(command, myparent, grandparent);
             break;
