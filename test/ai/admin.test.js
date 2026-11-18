@@ -430,5 +430,56 @@ test('public targets: proxy agent for https, no key over http', async function (
     r = await t.call({ pluginaction: 'aiAdminModels', draft: chatEp({ baseUrl: 'http://api.example.com/v1', keyAction: 'set', key: KEY }) });
     assert.strictEqual(r.ok, false);
     assert.match(r.error, /unencrypted/);
+    assert.strictEqual(r.network, 'public');
     noKeyAnywhere(t);
+});
+
+test('drafts without a name: models (no model either) and test work, save still needs a name', async function () {
+    const t = setup();
+    mock.always('/v1/models', { json: { data: [{ id: 'm1' }] } });
+    mock.always('/v1/chat/completions', { json: { choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }] } });
+    const draft = { name: '', format: 'openai-chat', preset: 'ollama', baseUrl: 'http://llm.lan:' + mock.port + '/v1', model: '', keyAction: 'set', key: KEY };
+    let r = await t.call({ pluginaction: 'aiAdminModels', draft: draft });
+    assert.strictEqual(r.ok, true, r.error);
+    assert.deepStrictEqual(r.models, [{ id: 'm1' }]);
+    assert.strictEqual(r.network, 'loopback');
+    r = await t.call({ pluginaction: 'aiAdminModels', draft: { baseUrl: mock.base } });   // no name, format or model at all
+    assert.strictEqual(r.ok, true, r.error);
+    r = await t.call({ pluginaction: 'aiAdminTest', draft: Object.assign({}, draft, { model: 'm1' }) });
+    assert.strictEqual(r.ok, true, JSON.stringify(r.steps));
+    assert.strictEqual(r.network, 'loopback');
+    r = await t.call({ pluginaction: 'aiAdminTest', draft: draft });
+    assert.strictEqual(r.ok, false);
+    assert.match(r.steps[0].detail, /Model is required/);
+    r = await t.call({ pluginaction: 'aiAdminModels', draft: { name: '', baseUrl: 'ftp://x/v1' } });
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(r.network, null);
+    assert.match(r.error, /http/);
+    r = await t.call({ pluginaction: 'aiAdminSaveEndpoint', endpoint: Object.assign({}, draft, { model: 'm1' }), keyAction: 'set', key: KEY });
+    assert.strictEqual(r.method, 'aiAdminError');
+    assert.match(r.error, /Name must be/);
+    noKeyAnywhere(t);
+});
+
+test('a test or model list of a saved endpoint stores the network the server found', async function () {
+    const t = setup();
+    mock.always('/v1/models', { json: { data: [{ id: 'm1' }] } });
+    mock.always('/v1/chat/completions', { json: { choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }] } });
+    DNS['later.lan'] = undefined;
+    const saved = await t.call({ pluginaction: 'aiAdminSaveEndpoint', endpoint: chatEp({ baseUrl: 'http://later.lan:' + mock.port + '/v1' }) });
+    assert.strictEqual(saved.endpoint.network, null);
+    DNS['later.lan'] = ['127.0.0.1'];
+    try {
+        let r = await t.call({ pluginaction: 'aiAdminTest', id: saved.endpoint.id });
+        assert.strictEqual(r.network, 'loopback');
+        assert.strictEqual((await t.store.getEndpoint(saved.endpoint.id)).network, 'loopback');
+        await t.store.setNetwork(saved.endpoint.id, 'bogus');
+        assert.strictEqual((await t.store.getEndpoint(saved.endpoint.id)).network, 'loopback');
+        await t.store.setNetwork(saved.endpoint.id, 'public');
+        r = await t.call({ pluginaction: 'aiAdminModels', id: saved.endpoint.id });
+        assert.strictEqual(r.network, 'loopback');
+        assert.strictEqual((await t.store.getEndpoint(saved.endpoint.id)).network, 'loopback');
+        r = await t.call({ pluginaction: 'aiAdminGet' });
+        assert.strictEqual(r.endpoints[0].network, 'loopback');
+    } finally { delete DNS['later.lan']; }
 });

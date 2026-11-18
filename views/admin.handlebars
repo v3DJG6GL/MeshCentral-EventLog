@@ -441,11 +441,35 @@
         audit: { skip: 0, limit: 50, total: 0, since: null, until: null },
         cfgValue: ''          // aiEndpointId of the config set in the editor
       };
-      var EL_AI_FORMATS = { 'openai-chat': 'OpenAI-compatible chat', 'openai-responses': 'OpenAI Responses', 'anthropic': 'Anthropic Messages' };
       var EL_AI_PRESETS = {
         ollama: 'http://localhost:11434/v1', vllm: 'http://localhost:8000/v1', lmstudio: 'http://localhost:1234/v1',
         llamacpp: 'http://localhost:8080/v1', localai: 'http://localhost:8080/v1'
       };
+      // "Server type" (one select) <-> the stored (format, preset) pair
+      var EL_AI_TYPES = {
+        ollama: { label: 'Ollama', format: 'openai-chat', preset: 'ollama' },
+        vllm: { label: 'vLLM', format: 'openai-chat', preset: 'vllm' },
+        lmstudio: { label: 'LM Studio', format: 'openai-chat', preset: 'lmstudio' },
+        llamacpp: { label: 'llama.cpp', format: 'openai-chat', preset: 'llamacpp' },
+        localai: { label: 'LocalAI', format: 'openai-chat', preset: 'localai' },
+        custom: { label: 'Other OpenAI-compatible server', format: 'openai-chat', preset: 'custom' },
+        responses: { label: 'OpenAI Responses API', format: 'openai-responses', preset: 'custom' },
+        anthropic: { label: 'Anthropic Messages API', format: 'anthropic', preset: 'custom' }
+      };
+      function elAiTypeOf(format, preset) {
+        if (format == 'openai-responses') return 'responses';
+        if (format == 'anthropic') return 'anthropic';
+        if (format != null && format != 'openai-chat') return null;
+        return (EL_AI_PRESETS[preset] && EL_AI_TYPES[preset]) ? preset : 'custom';
+      }
+      function elAiTypeLabel(ep) { var t = elAiTypeOf(ep.format, ep.preset); return t ? EL_AI_TYPES[t].label : String(ep.format || ''); }
+      // the (format, preset) the form sends; an endpoint of another API format keeps its stored preset (for example
+      // Ollama behind the Anthropic API) while its server type is not changed
+      function elAiFormKind() {
+        var t = EL_AI_TYPES[Q('elAiType').value] || EL_AI_TYPES.custom, e = elAi.edit || {};
+        var preset = (t.format != 'openai-chat' && e.origType === Q('elAiType').value && e.origPreset) ? e.origPreset : t.preset;
+        return { format: t.format, preset: preset };
+      }
       var EL_AI_REDACT = [
         ['users', 'User names'], ['hosts', 'Computer names'], ['domains', 'Domain names'], ['ips', 'IP addresses'],
         ['macs', 'MAC addresses'], ['emails', 'Email addresses'], ['sids', 'Windows SIDs'], ['paths', 'Paths that contain user names'],
@@ -548,23 +572,43 @@
           return 'public';
         }
         if (h == 'localhost' || /\.localhost$/.test(h)) return 'loopback';
-        if (h.indexOf('.') < 0 || /\.(local|lan|internal|intranet|home|home\.arpa|localdomain|corp|private)$/.test(h)) return 'private';
-        return 'public';
+        if (h.indexOf('.') < 0 || /\.(local|lan|internal|home\.arpa)$/.test(h)) return 'private';
+        return 'dns';   // a DNS name: only the server can resolve it
+      }
+      function elAiHost(text) {
+        try { var h = new URL(String(text).trim()).hostname.toLowerCase().replace(/\.$/, ''); return h.charAt(0) == '[' ? h.slice(1, -1) : h; } catch (e) { return null; }
+      }
+      // the server answered Fetch models / Test connection with the network it resolved the host to
+      function elAiServerNet(kind, network) {
+        if (elAi.edit == null || (network != 'loopback' && network != 'private' && network != 'public')) return;
+        var host = elAi.edit.sentHost && elAi.edit.sentHost[kind];
+        if (host == null) return;
+        elAi.edit.net = { host: host, network: network };
+        elAiUrlChanged();
       }
       function elAiUrlChanged() {
         var box = Q('elAiUrlHint'); if (box == null) return;
         var val = Q('elAiUrl').value.trim();
         box.textContent = '';
         if (val === '') return;
-        var kind = elAiAddrKind(val), d = document.createElement('div');
-        if (kind == 'loopback' || kind == 'private') {
+        var kind = elAiAddrKind(val), d = document.createElement('div'), net = elAi.edit && elAi.edit.net;
+        var checked = (net && net.host === elAiHost(val) && (kind == 'loopback' || kind == 'private' || kind == 'public' || kind == 'dns' || (kind == 'linklocal' && Q('elAiLinkLocal').checked))) ? net.network : null;
+        if (checked == 'loopback' || checked == 'private') {
+          d.className = 'elAiHint';
+          var stag = document.createElement('span'); stag.className = 'elAiTag local'; stag.textContent = elAiNetLabel(checked);
+          d.appendChild(stag);
+          d.appendChild(document.createTextNode(' (checked by the server)' + (checked == 'loopback' ? ': the model runs on the MeshCentral server itself.' : ': data stays on your network.')));
+        } else if (checked == 'public' || kind == 'public') {
+          d.className = 'elAiWarn'; d.setAttribute('role', 'note');
+          d.textContent = 'This address is outside your network' + (checked ? ' (checked by the server)' : '') + '. Questions, device data and events you allow below are sent to this service; personal values are always replaced before sending.';
+        } else if (kind == 'dns') {
+          d.className = 'elAiHint';
+          d.textContent = 'The server checks where this name points when you fetch models, test or save.';
+        } else if (kind == 'loopback' || kind == 'private') {
           d.className = 'elAiHint';
           var tag = document.createElement('span'); tag.className = 'elAiTag local'; tag.textContent = (kind == 'loopback') ? 'This server' : 'Local network';
           d.appendChild(tag);
           d.appendChild(document.createTextNode(kind == 'loopback' ? ' The model runs on the MeshCentral server itself; data stays on it.' : ' Data stays on your network. The server checks the address again when you test or save.'));
-        } else if (kind == 'public') {
-          d.className = 'elAiWarn'; d.setAttribute('role', 'note');
-          d.textContent = 'This address is outside your network. Questions, device data and events you allow below are sent to this service; personal values are always replaced before sending.';
         } else if (kind == 'linklocal') {
           d.className = Q('elAiLinkLocal').checked ? 'elAiWarn' : 'elAiErrBox';
           d.textContent = Q('elAiLinkLocal').checked ? 'Link-local address: allowed because "Allow link-local addresses" is on.' : 'Link-local addresses are blocked unless "Allow link-local addresses" is turned on below.';
@@ -590,7 +634,7 @@
           var td = function(text, cls) { var c = document.createElement('td'); if (cls) c.className = cls; if (text != null) c.textContent = text; tr.appendChild(c); return c; };
           var n = td(null); var b = document.createElement('b'); b.textContent = ep.name || '(no name)'; n.appendChild(b);
           if (ep.baseUrl) { var sm = document.createElement('div'); sm.className = 'elAiSub'; sm.textContent = ep.baseUrl; n.appendChild(sm); }
-          td(EL_AI_FORMATS[ep.format] || ep.format || '');
+          td(elAiTypeLabel(ep));
           td(ep.model || '\u2014');
           var t = td(null), tag = document.createElement('span');
           tag.className = 'elAiTag ' + ((ep.network == 'loopback' || ep.network == 'private') ? 'local' : (ep.network == 'public') ? 'cloud' : 'unknown');
@@ -631,12 +675,13 @@
       // ---- endpoint form ----
       function elAiOllamaVisible() {
         var caps = (elAi.edit && elAi.edit.caps) || {};
-        var on = (Q('elAiPreset').value == 'ollama') || /ollama/i.test(String(caps.server || ''));
+        var on = (elAiFormKind().preset == 'ollama') || /ollama/i.test(String(caps.server || ''));
         document.querySelectorAll('.elAiOllama').forEach(function(e) { e.hidden = !on; });
       }
-      function elAiPresetChanged() {
-        var p = Q('elAiPreset').value;
-        if (EL_AI_PRESETS[p]) { Q('elAiFormat').value = 'openai-chat'; Q('elAiUrl').value = EL_AI_PRESETS[p]; }
+      function elAiTypeChanged() {
+        var p = Q('elAiType').value, u = Q('elAiUrl'), cur = u.value.trim();
+        var isDefault = cur === '' || Object.keys(EL_AI_PRESETS).some(function(k) { return EL_AI_PRESETS[k] === cur; });
+        if (EL_AI_PRESETS[p] && isDefault) u.value = EL_AI_PRESETS[p];   // never overwrite an address the admin typed
         elAiUrlChanged();
         elAiOllamaVisible();
       }
@@ -644,11 +689,15 @@
         var f = Q('elAiEpForm');
         elAiClearErrors(f);
         ep = ep || null;
-        elAi.edit = { id: ep ? ep.id : null, hasKey: !!(ep && ep.hasKey), keyHint: (ep && ep.keyHint) || '', removeKey: false, caps: (ep && ep.caps) || null };
+        var type = ep ? (elAiTypeOf(ep.format, ep.preset) || 'custom') : 'ollama';
+        elAi.edit = {
+          id: ep ? ep.id : null, hasKey: !!(ep && ep.hasKey), keyHint: (ep && ep.keyHint) || '', removeKey: false, caps: (ep && ep.caps) || null,
+          origType: type, origPreset: (ep && ep.preset) || null,
+          net: (ep && ep.network && ep.baseUrl) ? { host: elAiHost(ep.baseUrl), network: ep.network } : null   // the server's last address check
+        };
         elAi.models = [];
         Q('elAiFormH').textContent = ep ? ('Edit endpoint \u201C' + (ep.name || '') + '\u201D') : 'Add endpoint';
-        Q('elAiPreset').value = (ep && ep.preset && (EL_AI_PRESETS[ep.preset] || ep.preset == 'custom')) ? ep.preset : (ep ? 'custom' : 'ollama');
-        Q('elAiFormat').value = (ep && EL_AI_FORMATS[ep.format]) ? ep.format : 'openai-chat';
+        Q('elAiType').value = type;
         Q('elAiName').value = ep ? (ep.name || '') : '';
         Q('elAiUrl').value = ep ? (ep.baseUrl || '') : EL_AI_PRESETS.ollama;
         Q('elAiKey').value = '';
@@ -670,7 +719,7 @@
         elAiModelFacts();
         f.hidden = false;
         try { f.scrollIntoView({ block: 'start' }); } catch (e) { }
-        Q(ep ? 'elAiName' : 'elAiPreset').focus();
+        Q(ep ? 'elAiName' : 'elAiType').focus();
         return false;
       }
       function elAiCloseForm() {
@@ -693,7 +742,7 @@
         var t = '';
         if (e.hasKey && e.removeKey) t = 'The stored key will be removed when you save.';
         else if (e.hasKey) t = 'A key is stored' + (e.keyHint ? ' (' + e.keyHint + ')' : '') + '. Type a new one to replace it.';
-        if (elAi.keySource) t += (t ? ' ' : '') + 'Keys are encrypted on the server (encryption key: ' + elAi.keySource + ').';
+        if (elAi.keySource == 'derived') t += (t ? ' ' : '') + 'The key file in meshcentral-data could not be used, so keys are encrypted with a key derived from the server\u2019s secret.';
         st.textContent = t;
       }
       function elAiKeyChanged() { if (elAi.edit && Q('elAiKey').value !== '') elAi.edit.removeKey = false; elAiKeyState(); }
@@ -704,26 +753,31 @@
         elAiKeyState();
         return false;
       }
-      // current form as an endpoint draft, or null (inline errors shown) when it is not valid.
-      // forSave: true = save (name and model required), false = test (model required), null = fetch models
-      function elAiDraft(forSave) {
-        var f = Q('elAiEpForm'), errs = [];
+      // current form as an endpoint draft, or null (inline errors shown) when it is not valid. Each action checks only
+      // what it needs: 'models' = server type, address and the key field; 'test' also the model and the numbers;
+      // 'save' everything, including the name.
+      function elAiDraft(mode) {
+        var f = Q('elAiEpForm'), errs = [], all = (mode != 'models');
         elAiClearErrors(f);
-        var name = Q('elAiName').value.trim(), url = Q('elAiUrl').value.trim(), model = Q('elAiModel').value.trim();
-        if (forSave && name === '') { elAiFieldError(Q('elAiName'), 'Enter a name.'); errs.push(Q('elAiName')); }
+        var name = Q('elAiName').value.trim(), url = Q('elAiUrl').value.trim(), model = Q('elAiModel').value.trim(), key = Q('elAiKey').value.trim();
+        if (mode == 'save' && name === '') { elAiFieldError(Q('elAiName'), 'Enter a name.'); errs.push(Q('elAiName')); }
         var kind = elAiAddrKind(url);
         if (url === '' || kind == 'invalid') { elAiFieldError(Q('elAiUrl'), 'Enter a full address starting with http:// or https://.'); errs.push(Q('elAiUrl')); }
         else if (kind == 'userinfo') { elAiFieldError(Q('elAiUrl'), 'Remove the user name or password from the address.'); errs.push(Q('elAiUrl')); }
         else if (kind == 'query') { elAiFieldError(Q('elAiUrl'), 'Remove the ? or # part from the address.'); errs.push(Q('elAiUrl')); }
-        if (forSave != null && model === '') { elAiFieldError(Q('elAiModel'), 'Enter a model name, or use Fetch models.'); errs.push(Q('elAiModel')); }
-        var numCtx = elAiReadInt('elAiNumCtx', 1024, 4194304, true, errs);
-        var maxOut = elAiReadInt('elAiMaxOut', 64, 128000, true, errs);
-        var timeout = elAiReadInt('elAiTimeout', 10, 900, true, errs);
-        var ctx = elAiReadInt('elAiCtx', 1024, 4194304, true, errs);
+        if (key !== '') {
+          if (/^env:/i.test(key)) { if (!/^env:\s*[A-Z_][A-Z0-9_]{0,63}$/.test(key)) { elAiFieldError(Q('elAiKey'), 'Environment variable names use A-Z, 0-9 and _ (for example env:LLM_API_KEY).'); errs.push(Q('elAiKey')); } }
+          else if (/[\s\u0000-\u001f\u007f]/.test(key)) { elAiFieldError(Q('elAiKey'), 'The API key must not contain spaces or line breaks.'); errs.push(Q('elAiKey')); }
+        }
+        if (all && model === '') { elAiFieldError(Q('elAiModel'), 'Enter a model name, or use Fetch models.'); errs.push(Q('elAiModel')); }
+        var numCtx = all ? elAiReadInt('elAiNumCtx', 1024, 4194304, true, errs) : null;
+        var maxOut = all ? elAiReadInt('elAiMaxOut', 64, 128000, true, errs) : null;
+        var timeout = all ? elAiReadInt('elAiTimeout', 10, 900, true, errs) : null;
+        var ctx = all ? elAiReadInt('elAiCtx', 1024, 4194304, true, errs) : null;
         if (errs.length) { errs[0].focus(); return null; }
-        var tm = document.querySelector('input[name="elAiToolMode"]:checked');
+        var tm = document.querySelector('input[name="elAiToolMode"]:checked'), fk = elAiFormKind();
         var ep = {
-          name: name, format: Q('elAiFormat').value, preset: Q('elAiPreset').value, baseUrl: url, model: model,
+          name: name, format: fk.format, preset: fk.preset, baseUrl: url, model: model,
           contextTokens: ctx, numCtx: numCtx, maxOutputTokens: maxOut, timeoutSec: timeout,
           toolMode: tm ? tm.value : 'auto', allowLinkLocal: Q('elAiLinkLocal').checked
         };
@@ -733,7 +787,7 @@
         return out;
       }
       function elAiSaveEndpoint() {
-        var d = elAiDraft(true);
+        var d = elAiDraft('save');
         if (d == null) { setStatus('elAiFormStatus', 'err', 'Check the marked fields.'); return false; }
         var p = { endpoint: d.endpoint, keyAction: d.keyAction };
         if (d.key != null) p.key = d.key;
@@ -742,8 +796,10 @@
         return false;
       }
       function elAiDraftPayload(forTest) {
-        var d = elAiDraft(forTest ? false : null);
+        var d = elAiDraft(forTest ? 'test' : 'models');
         if (d == null) return null;
+        elAi.edit.sentHost = elAi.edit.sentHost || {};
+        elAi.edit.sentHost[forTest ? 'test' : 'models'] = elAiHost(d.endpoint.baseUrl);   // the server's address verdict belongs to this host
         // a saved endpoint tested unchanged is sent by id only: the server then records the result as its last test
         var stored = (forTest && elAi.edit && elAi.edit.id) ? elAi.endpoints.filter(function(x) { return x.id === elAi.edit.id; })[0] : null;
         if (stored && d.keyAction == 'keep' && ['name', 'format', 'preset', 'baseUrl', 'model', 'contextTokens', 'numCtx', 'maxOutputTokens', 'timeoutSec', 'toolMode', 'allowLinkLocal'].every(function(k) {
@@ -813,11 +869,6 @@
           ul.appendChild(li);
         });
         out.appendChild(ul);
-        if (msg.network) {
-          var n = document.createElement('div'); n.className = 'elAiSub';
-          n.textContent = 'The server sees this address as: ' + elAiNetLabel(msg.network) + '.' + (msg.network == 'public' ? ' Personal values are always replaced before sending.' : '');
-          out.appendChild(n);
-        }
         out.hidden = false;
       }
 
@@ -1034,12 +1085,14 @@
         if (msg.caps && typeof msg.caps == 'object') elAi.edit.caps = msg.caps;
         setStatus('elAiFormStatus', msg.ok ? 'ok' : 'err', msg.ok ? '\u2713 Test passed.' : '\u2717 Test failed; see the steps above.', 'elAiTestBtn');
         elAiRenderTest(msg);
+        elAiServerNet('test', msg.network);
         elAiOllamaVisible();
         elAiModelFacts();
         if (elAi.edit.id) elAiRefresh();   // the server records the last test of a saved endpoint
       });
       parent.pluginHandler['eventlog'].aiAdminModelsResult = elAiHandler(function(msg) {
         if (elAiTake(msg) == null || elAi.edit == null) return;
+        elAiServerNet('models', msg.network);
         if (!msg.ok) { setStatus('elAiModelsStatus', 'err', '\u2717 ' + String(msg.error || 'The server did not return a model list.'), 'elAiFetchBtn'); return; }
         elAi.models = (Array.isArray(msg.models) ? msg.models : []).filter(function(m) { return m && typeof m.id == 'string'; });
         var dl = Q('elAiModelList'); dl.textContent = '';
@@ -1334,7 +1387,7 @@
           <div class="elAiScroll">
             <table id="elAiEpTbl" class="elAiTbl" hidden>
               <caption class="elSr">Assistant endpoints</caption>
-              <thead><tr><th scope="col">Name</th><th scope="col">API format</th><th scope="col">Model</th><th scope="col">Location</th><th scope="col">Used by</th><th scope="col">Last test</th><th scope="col"><span class="elSr">Actions</span></th></tr></thead>
+              <thead><tr><th scope="col">Name</th><th scope="col">Server type</th><th scope="col">Model</th><th scope="col">Location</th><th scope="col">Used by</th><th scope="col">Last test</th><th scope="col"><span class="elSr">Actions</span></th></tr></thead>
               <tbody id="elAiEpRows"></tbody>
             </table>
           </div>
@@ -1345,18 +1398,17 @@
         <section id="elAiEpForm" class="elAiSec elAiForm" aria-labelledby="elAiFormH" hidden>
           <h3 id="elAiFormH">Add endpoint</h3>
           <div class="elAiGrid">
-            <label for="elAiPreset">Preset</label>
-            <div><select id="elAiPreset" aria-describedby="elAiPresetHelp" onchange="elAiPresetChanged();">
-                <option value="ollama">Ollama</option><option value="vllm">vLLM</option><option value="lmstudio">LM Studio</option>
-                <option value="llamacpp">llama.cpp</option><option value="localai">LocalAI</option><option value="custom">Custom</option>
+            <label for="elAiType">Server type</label>
+            <div><select id="elAiType" aria-describedby="elAiTypeHelp" onchange="elAiTypeChanged();">
+                <optgroup label="Self-hosted servers">
+                  <option value="ollama">Ollama</option><option value="vllm">vLLM</option><option value="lmstudio">LM Studio</option>
+                  <option value="llamacpp">llama.cpp</option><option value="localai">LocalAI</option>
+                </optgroup>
+                <optgroup label="Other servers and APIs">
+                  <option value="custom">Other OpenAI-compatible server</option><option value="responses">OpenAI Responses API</option><option value="anthropic">Anthropic Messages API</option>
+                </optgroup>
               </select>
-              <small id="elAiPresetHelp" class="elAiHelp">Fills in the API format and the usual address of a self-hosted server. You can change both.</small></div>
-
-            <label for="elAiFormat">API format</label>
-            <div><select id="elAiFormat" aria-describedby="elAiFormatHelp">
-                <option value="openai-chat">OpenAI-compatible chat</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic">Anthropic Messages</option>
-              </select>
-              <small id="elAiFormatHelp" class="elAiHelp">Most self-hosted servers speak OpenAI-compatible chat.</small></div>
+              <small id="elAiTypeHelp" class="elAiHelp">How the MeshCentral server talks to the model. Self-hosted servers come first; pick <i>Other OpenAI-compatible server</i> for gateways such as LiteLLM or Open WebUI.</small></div>
 
             <label for="elAiName">Name</label>
             <div><input type="text" id="elAiName" class="elLongTxt" maxlength="100" autocomplete="off" aria-required="true"></div>
@@ -1369,7 +1421,7 @@
             <div><input type="password" id="elAiKey" class="elLongTxt" autocomplete="new-password" spellcheck="false" aria-describedby="elAiKeyState elAiKeyHelp" oninput="elAiKeyChanged();">
               <button id="elAiKeyRemove" onclick="return elAiToggleRemoveKey();" hidden>Remove key</button>
               <small id="elAiKeyState" class="elAiHelp"></small>
-              <small id="elAiKeyHelp" class="elAiHelp">Only needed if the server asks for one. The key is stored encrypted and never shown again. Enter <code>env:VAR_NAME</code> to read it from an environment variable of the MeshCentral server instead.</small></div>
+              <small id="elAiKeyHelp" class="elAiHelp">Only needed if the server asks for one. Stored encrypted on the MeshCentral server and never shown again. Enter <code>env:VAR_NAME</code> to read it from an environment variable of the MeshCentral server instead.</small></div>
 
             <label for="elAiModel">Model</label>
             <div><input type="text" id="elAiModel" class="elMidTxt" list="elAiModelList" spellcheck="false" autocomplete="off" aria-describedby="elAiModelFacts" oninput="elAiModelFacts();">

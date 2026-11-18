@@ -128,7 +128,7 @@ Supported API formats:
 
 ### Setup
 
-1. Admin page (*My Server → Plugins → Event Log*) → **Assistant** tab → **Add endpoint**: choose a preset or *Custom*, the API format, the address, an API key if the server needs one, and the model (*Fetch models* lists what the server offers).
+1. Admin page (*My Server → Plugins → Event Log*) → **Assistant** tab → **Add endpoint**: choose the server type (Ollama, vLLM, LM Studio, llama.cpp, LocalAI, *Other OpenAI-compatible server*, *OpenAI Responses API* or *Anthropic Messages API*), the address, an API key if the server needs one, and the model (*Fetch models* lists what the server offers).
 2. **Test connection** (address, connection, API key, model, tool calls, context size), then **Save endpoint**.
 3. Check **Data sent to the model** (what may be read, what is replaced, the preview policy) and the daily limits under **Access**, then **Save settings**.
 4. **Config Sets** tab → edit a set → **Assistant endpoint**: pick the endpoint. Devices using that set can now use the Assistant (the default is *None*).

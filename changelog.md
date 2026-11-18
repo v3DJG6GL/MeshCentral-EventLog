@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Changed
+- Assistant admin page: the *Preset* and *API format* dropdowns are one *Server type* choice (Ollama, vLLM, LM Studio, llama.cpp, LocalAI, Other OpenAI-compatible server, OpenAI Responses API, Anthropic Messages API). Choosing a self-hosted server fills in its usual address only while the address field is empty or still holds another server's default. The endpoints table shows the same *Server type*
+
+### Fixed
+- Assistant admin page: *Fetch models* no longer asks for a name (or a model): it only checks the address and the API key field. *Test connection* needs the address and the model, not a name. Only *Save endpoint* requires the name
+- Assistant admin page: for a host name the browser no longer guesses that the address is outside your network. It notes that the server checks where the name points; after *Fetch models*, *Test connection* or saving, the hint shows the server's verdict (local network, this server, or the cloud warning). A test or model list of a saved endpoint also updates its *Location* in the endpoints table
+- Assistant admin page: one short help line for the API key instead of two overlapping ones
 
 ## [0.2.0] - 2026-11-18
 ### Added

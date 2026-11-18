@@ -10,8 +10,10 @@
 //   aiAdminSaveSettings   -> aiAdminSettingsSaved { settings }                  | aiAdminError { scope:'settings' }
 //   aiAdminTest {id|draft}-> aiAdminTestResult { ok, steps:[{name,ok,ms,detail}], network, caps }
 //       steps resolve, connect, auth, model, tools, context; a step that could not run has ok:null.
-//       Only a test of a saved endpoint ({id} without draft) stores caps and lastTest.
-//   aiAdminModels {id|draft} -> aiAdminModelsResult { ok, models:[{id, ctx?, tools?}], error? }
+//       Only a test of a saved endpoint ({id} without draft) stores caps, lastTest and network.
+//   aiAdminModels {id|draft} -> aiAdminModelsResult { ok, models:[{id, ctx?, tools?}], network, error? }
+//       network: 'loopback'|'private'|'public' once the address was checked, else null (as in aiAdminTestResult)
+// A draft needs no name (it is never stored); a draft for aiAdminModels needs no model either.
 //   aiAdminAudit {since, until, filterUserid, filterNodeid, skip, limit, withTranscript} -> aiAdminAuditRows { rows, total }
 //       (filterUserid, not userid: MeshCentral overwrites command.userid with the caller's id on every plugin command)
 // A draft carries the unsaved form fields plus keyAction/key; keyAction 'keep' with an id uses the stored key.
@@ -54,7 +56,7 @@ function create(o) {
 
     // ---- endpoint resolution for test / models -----------------------------------------------------------
     // -> { ep (store fields), apiKey, saved (bool: the stored endpoint unchanged) }; throws Error{code:'invalid'}
-    async function resolveTarget(command) {
+    async function resolveTarget(command, vopts) {
         const id = typeof command.id === 'string' && command.id ? command.id : (isObj(command.draft) && typeof command.draft.id === 'string' && command.draft.id ? command.draft.id : null);
         const stored = id ? await store.getEndpoint(id) : null;
         if (id && !stored) throw mkErr('invalid', 'Endpoint not found');
@@ -63,7 +65,7 @@ function create(o) {
             return { ep: stored, apiKey: store.resolveKey(stored), saved: true, id: stored.id };
         }
         const d = command.draft;
-        const f = store.validateEndpoint(d);
+        const f = store.validateEndpoint(d, Object.assign({ draft: true }, vopts || {}));
         f.quirks = stored && stored.baseUrl === f.baseUrl ? stored.quirks || null : null;
         let apiKey = null;
         const ka = d.keyAction == null ? 'keep' : d.keyAction;
@@ -260,6 +262,7 @@ function create(o) {
         if (r.tgt.saved) {
             try {
                 if (r.caps) await store.setCaps(r.tgt.id, r.caps);
+                if (r.network) await store.setNetwork(r.tgt.id, r.network);
                 const failed = r.steps.find(function (s) { return s.ok === false && s.name !== 'tools'; });
                 await store.setLastTest(r.tgt.id, { ok: r.ok, at: Date.now(), ms: r.ms, detail: failed ? failed.detail : (r.steps.find(function (s) { return s.name === 'model'; }) || {}).detail });
             } catch (e) { warn('could not store the test result (' + errText(e) + ')'); }
@@ -284,13 +287,14 @@ function create(o) {
 
     async function listModels(command) {
         const t0 = Date.now();
-        const tgt = await resolveTarget(Object.assign({}, command, isObj(command.draft) && !command.draft.model ? { draft: Object.assign({}, command.draft, { model: '-' }) } : {}));
+        const tgt = await resolveTarget(command, { noModel: true });
         const ep = tgt.ep, key = tgt.apiKey;
         const adapter = adapters.get(ep.format);
         if (!adapter) throw mkErr('invalid', 'Unknown API format');
         const chk = await netguard.check(ep.baseUrl, { allowLinkLocal: ep.allowLinkLocal === true });
         if (!chk || !chk.ok) throw mkErr('invalid', chk && chk.error || 'Address is not allowed');
-        if (/^http:/i.test(ep.baseUrl) && chk.network === 'public' && key) throw mkErr('invalid', 'Refusing to send an API key over unencrypted http:// to a public address; use https://');
+        const withNet = function (e) { e.network = chk.network; e.key = key; return e; };
+        if (/^http:/i.test(ep.baseUrl) && chk.network === 'public' && key) throw withNet(mkErr('invalid', 'Refusing to send an API key over unencrypted http:// to a public address; use https://'));
         const aep = adapterEp(ep, key);
         return withBudget(chk, key, t0 + OVERALL_MS, async function (deps) {
             const ollama = adapters.ollama;
@@ -313,19 +317,20 @@ function create(o) {
                 return cleanModels(models);
             }
             return cleanModels(await adapter.listModels(aep, deps));
-        }).then(function (models) { return { models: models, key: key }; }, function (e) { e.key = key; throw e; });
+        }).then(function (models) { return { models: models, key: key, network: chk.network, tgt: tgt }; }, function (e) { throw withNet(e && typeof e === 'object' ? e : mkErr('internal', String(e))); });
     }
 
     async function doModels(command, myparent) {
         const reqId = command.reqId;
         try {
             const r = await listModels(command);
-            safeSend(myparent, { method: 'aiAdminModelsResult', reqId: reqId, ok: true, models: r.models });
+            if (r.tgt.saved && r.network) { try { await store.setNetwork(r.tgt.id, r.network); } catch (e) { warn('could not store the address check (' + errText(e) + ')'); } }
+            safeSend(myparent, { method: 'aiAdminModelsResult', reqId: reqId, ok: true, models: r.models, network: r.network });
         } catch (e) {
             const known = e && e.code && e.code !== 'internal';
             if (!known) warn('model list failed (' + errText(e) + ')');
             const prefix = e && e.code === 'auth' ? 'Authentication failed: ' : '';
-            safeSend(myparent, { method: 'aiAdminModelsResult', reqId: reqId, ok: false, models: [], error: short(known ? prefix + (e.message || 'Request failed') : 'The model list could not be loaded', e && e.key) });
+            safeSend(myparent, { method: 'aiAdminModelsResult', reqId: reqId, ok: false, models: [], network: (e && e.network) || null, error: short(known ? prefix + (e.message || 'Request failed') : 'The model list could not be loaded', e && e.key) });
         }
     }
 
@@ -414,7 +419,7 @@ function create(o) {
             if (inflight >= MAX_INFLIGHT) {
                 const busy = method === 'aiAdminTestResult'
                     ? { method: method, reqId: command.reqId, ok: false, steps: [{ name: 'resolve', ok: false, ms: 0, detail: 'Too many tests are running; try again in a moment' }], network: null, caps: null }
-                    : { method: method, reqId: command.reqId, ok: false, models: [], error: 'Too many requests are running; try again in a moment' };
+                    : { method: method, reqId: command.reqId, ok: false, models: [], network: null, error: 'Too many requests are running; try again in a moment' };
                 safeSend(myparent, busy);
                 return Promise.resolve();
             }

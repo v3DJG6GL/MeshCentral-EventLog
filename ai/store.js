@@ -22,7 +22,9 @@
 //   publicEndpoint(ep) -> copy without `key`, plus hasKey and keyHint ('…abcd' | 'env:VAR' | '')
 //   resolveKey(ep) -> plaintext | null (never throws)
 //   setCaps(id, caps) / setQuirks(id, quirks) (merged) / setLastTest(id, r) -> Promise<ep|null>
-//   validateEndpoint(input) -> fields (sync syntax check, throws Error{code:'invalid'}), used for drafts too
+//   setNetwork(id, network) -> Promise<ep|null> (the verdict of a later address check of the saved endpoint)
+//   validateEndpoint(input, opts?) -> fields (sync syntax check, throws Error{code:'invalid'}), used for drafts too;
+//       opts.draft: the name is optional (Test connection / Fetch models), opts.noModel: the model is optional too
 //   keySource() -> secrets.source
 // Settings (id 'aiSettings'): getSettings() -> defaults merged with the stored document (cached);
 //   saveSettings(input) -> Promise<settings>: known fields only, numbers clamped, enums checked; fields missing
@@ -76,12 +78,14 @@ function clampInt(v, range, fallback) {
 }
 
 // Syntax-only endpoint validation (no DNS). Throws Error{code:'invalid'}.
-function validateEndpoint(input) {
+// opts.draft: name optional (a draft is only tested or asked for its models, never stored); opts.noModel: model optional.
+function validateEndpoint(input, opts) {
+    opts = opts || {};
     if (!isObj(input)) throw invalid('Missing endpoint data');
     const out = {};
     const name = typeof input.name === 'string' ? input.name.replace(/[\u0000-\u001f\u007f]/g, ' ').trim() : '';
-    if (!name || name.length > 64) throw invalid('Name must be 1 to 64 characters');
-    out.name = name;
+    if (opts.draft !== true && (!name || name.length > 64)) throw invalid('Name must be 1 to 64 characters');
+    out.name = name.slice(0, 64);
     const format = input.format == null || input.format === '' ? 'openai-chat' : input.format;
     if (FORMATS.indexOf(format) < 0) throw invalid('Unknown API format');
     out.format = format;
@@ -99,7 +103,7 @@ function validateEndpoint(input) {
     out.baseUrl = (u.origin + u.pathname).replace(/\/+$/, '');
 
     const model = typeof input.model === 'string' ? input.model.trim() : '';
-    if (!model) throw invalid('Model is required');
+    if (!model && opts.noModel !== true) throw invalid('Model is required');
     if (model.length > 200 || /[\u0000-\u001f\u007f]/.test(model)) throw invalid('Model must be at most 200 characters without control characters');
     out.model = model;
 
@@ -279,6 +283,7 @@ function create(opts) {
         });
     }
     function setCaps(id, caps) { return patch(id, function (ep) { ep.caps = isObj(caps) ? sanitize(caps, 0) : null; }); }
+    function setNetwork(id, network) { return patch(id, function (ep) { if (['loopback', 'private', 'public'].indexOf(network) >= 0) ep.network = network; }); }
     function setQuirks(id, quirks) { return patch(id, function (ep) { ep.quirks = Object.assign({}, ep.quirks || {}, isObj(quirks) ? sanitize(quirks, 0) : {}); }); }
     function setLastTest(id, r) {
         return patch(id, function (ep) {
@@ -395,7 +400,7 @@ function create(opts) {
     }
 
     return {
-        listEndpoints, getEndpoint, saveEndpoint, deleteEndpoint, publicEndpoint, resolveKey, setCaps, setQuirks, setLastTest,
+        listEndpoints, getEndpoint, saveEndpoint, deleteEndpoint, publicEndpoint, resolveKey, setCaps, setNetwork, setQuirks, setLastTest,
         validateEndpoint, keySource: function () { return secrets && secrets.source; },
         getSettings, saveSettings, getAck, setAck, auditAdd, auditQuery, usage, sweep
     };
