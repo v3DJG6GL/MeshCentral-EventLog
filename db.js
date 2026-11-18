@@ -67,6 +67,7 @@ var normParams = function(params) {
         limit: Math.min(Math.max(intOr(params.limit, 250) || 250, 1), 1000),
         skip: Math.min(Math.max(intOr(params.skip, 0), 0), 10000000),
         since: params.since || null,
+        until: (params.until != null && isFinite(Number(params.until))) ? Number(params.until) : null,   // tc <= until (v0.2.0)
         levels: (function() { if (!Array.isArray(params.levels)) return null; var l = params.levels.slice(0, 10).map(Number).filter((n) => !isNaN(n)); return l.length ? l : null; })(),
         logs: cleanStrList(params.logs, 50),
         sources: cleanStrList(params.sources, 100),
@@ -85,6 +86,7 @@ var buildQuery = function(nodeid, opts, params) {
     if (levels) proj.Level = { $in: levels.map((n) => Number(n)) };
     if (params.sources) proj.ProviderName = { $in: params.sources };
     if (params.since) proj.tc = { $gte: Number(params.since) };
+    if (params.until != null) { proj.tc = proj.tc || {}; proj.tc.$lte = Number(params.until); }
     var ands = [];
     if (params.text) {
         var re = new RegExp(String(params.text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
@@ -105,6 +107,33 @@ var buildQuery = function(nodeid, opts, params) {
     if (ands.length) proj.$and = ands;
     return proj;
 };
+
+// Assistant audit log queries: { since, until, userid, nodeid, skip, limit } -> clamped values
+function auditQueryNorm(q) {
+    q = q || {};
+    var num = function (v) { return (v != null && isFinite(Number(v))) ? Number(v) : null; };
+    var str = function (v) { return (typeof v == 'string' && v.length > 0 && v.length <= 256) ? v : null; };
+    return {
+        since: num(q.since), until: num(q.until), userid: str(q.userid), nodeid: str(q.nodeid),
+        // a userid/nodeid filter that was given but is unusable matches nothing instead of being dropped
+        none: (q.userid != null && str(q.userid) == null) || (q.nodeid != null && str(q.nodeid) == null),
+        skip: Math.min(Math.max(intOr(q.skip, 0), 0), 10000000),
+        limit: Math.min(Math.max(intOr(q.limit, 100) || 100, 1), 5000)
+    };
+}
+function auditMatch(q) {
+    var m = {};
+    if (q.since != null || q.until != null) { m.time = {}; if (q.since != null) m.time.$gte = q.since; if (q.until != null) m.time.$lte = q.until; }
+    if (q.userid != null) m.userid = q.userid;
+    if (q.nodeid != null) m.nodeid = q.nodeid;
+    return m;
+}
+function auditRec(rec) {
+    var d = Object.assign({}, rec || {});
+    delete d._id;
+    d.time = (Number(d.time) > 0) ? Number(d.time) : Date.now();
+    return d;
+}
 
 // normalize an incoming collection batch in place; returns { count, maxTc }
 function prepEvents(nodeid, events) {
@@ -185,6 +214,26 @@ function installShared(obj) {
         return true;
     };
 
+    // Read up to `max` (default 5000) events matching a query, newest first, by paging getEventsFor (which caps a page at 1000).
+    // callback(events, truncated, total); events is [] when history is disabled for the device.
+    obj.scanEventsFor = function(nodeid, opts, params, max, callback) {
+        if (typeof max == 'function') { callback = max; max = null; }
+        max = Math.min(Math.max(((max == null) ? 5000 : intOr(max, 5000)) || 5000, 1), 20000);
+        var out = [], skip = 0;
+        var step = function() {
+            var p = Object.assign({}, params || {}, { skip: skip, limit: Math.min(1000, max - out.length) });
+            obj.getEventsFor(nodeid, opts, p, function(events, total) {
+                if (events == null) { callback([], false, 0); return; }
+                total = total || 0;
+                for (var i = 0; i < events.length; i++) out.push(events[i]);
+                skip += events.length;
+                if (events.length == 0 || out.length >= max || skip >= total) { callback(out, total > out.length, total); return; }
+                step();
+            });
+        };
+        step();
+    };
+
     obj.startMaintenance = function() {
         if (obj._maintStarted) return;
         obj._maintStarted = true;
@@ -216,7 +265,7 @@ module.exports.CreateDB = function(meshserver) {
         obj._closed = true;
         obj._timers.forEach(function(t) { try { clearInterval(t); } catch (e) { } try { clearTimeout(t); } catch (e) { } });
         obj._timers = [];
-        [obj.eventsFile, obj.settingsFile].forEach(function(f) {
+        [obj.eventsFile, obj.settingsFile, obj.auditFile].forEach(function(f) {
             if (f == null) return;
             try {
                 if (typeof f.stopAutocompaction == 'function') f.stopAutocompaction();
@@ -253,6 +302,8 @@ module.exports.CreateDB = function(meshserver) {
             parseIds: parseIds,
             normParams: normParams,
             cleanStrList: cleanStrList,
+            auditQueryNorm: auditQueryNorm,
+            auditRec: auditRec,
             DEFAULT_RETENTION_DAYS: DEFAULT_RETENTION_DAYS
         });
         return obj;
@@ -334,7 +385,7 @@ module.exports.CreateDB = function(meshserver) {
               var proj = buildQuery(nodeid, opts, params);
               obj.eventsFile.countDocuments(proj)
               .then(function (total) {
-                  return obj.eventsFile.find(proj).sort({ tc: -1 }).skip(params.skip).limit(params.limit).toArray()
+                  return obj.eventsFile.find(proj).sort({ tc: -1, _id: -1 }).skip(params.skip).limit(params.limit).toArray()
                   .then(function (events) { callback(events, total); });
               })
               .catch(function (e) { console.log('EVENTLOG: getEventsFor error: ' + e); callback([], 0); });
@@ -372,6 +423,66 @@ module.exports.CreateDB = function(meshserver) {
                   callback(out);
               })
               .catch(function () { callback(null); });
+          };
+          // facet counts over the same query History uses (config set filters + user filters), for the Assistant
+          obj.getFacetsQuery = function(nodeid, opts, params, callback) {
+              opts = opts || {};
+              if (opts.historyEnabled === false) { callback({ level: {}, log: {}, source: {} }); return; }
+              var match = buildQuery(nodeid, opts, normParams(params));
+              obj.eventsFile.aggregate([
+                  { $match: match },
+                  { $facet: {
+                      level: [ { $group: { _id: '$Level', n: { $sum: 1 } } } ],
+                      log: [ { $group: { _id: '$LogName', n: { $sum: 1 } } } ],
+                      source: [ { $group: { _id: '$ProviderName', n: { $sum: 1 } } }, { $sort: { n: -1 } }, { $limit: 200 } ]
+                  } }
+              ]).toArray()
+              .then(function (d) {
+                  var out = { level: {}, log: {}, source: {} };
+                  if (d && d[0]) { ['level','log','source'].forEach(function(k) { (d[0][k] || []).forEach(function(r) { if (r._id != null && r._id !== '') out[k][r._id] = r.n; }); }); }
+                  callback(out);
+              })
+              .catch(function (e) { console.log('EVENTLOG: getFacetsQuery error: ' + e); callback(null); });
+          };
+          // events by their stored id, always limited to one device
+          obj.getEventsByIds = function(nodeid, ids, callback) {
+              var mdb = loadModule(['mongodb']), oids = [];
+              (Array.isArray(ids) ? ids : []).slice(0, 200).forEach(function (id) {
+                  if (typeof id == 'string' && /^[0-9a-f]{24}$/i.test(id)) oids.push((typeof mdb.ObjectID == 'function') ? mdb.ObjectID(id) : new mdb.ObjectId(id));
+              });
+              if (oids.length == 0) { callback([]); return; }
+              obj.eventsFile.find({ nodeid: nodeid, _id: { $in: oids } }).toArray()
+              .then(function (events) { callback((events || []).map(function (e) { e._id = String(e._id); return e; })); })
+              .catch(function (e) { console.log('EVENTLOG: getEventsByIds error: ' + e); callback([]); });
+          };
+          // Assistant settings documents (endpoints, settings, acknowledgements) in the settings collection
+          obj.aiPutDoc = function(id, type, doc) {
+              var d = Object.assign({}, doc || {}, { _id: id, type: type });
+              return obj.settingsFile.replaceOne({ _id: id }, d, { upsert: true }).then(function () { return true; });
+          };
+          obj.aiGetDoc = function(id) {
+              return obj.settingsFile.find({ _id: id }).limit(1).toArray().then(function (d) { return (d && d[0]) ? d[0] : null; });
+          };
+          obj.aiDocs = function(type) { return obj.settingsFile.find({ type: type }).toArray(); };
+          obj.aiDelDoc = function(id) { return obj.settingsFile.deleteOne({ _id: id }).then(function (r) { return (r && r.deletedCount) || 0; }); };
+          // Assistant audit log: its own collection, it grows with use
+          obj.auditFile = db.collection('plugin_eventlog_ai_audit');
+          try { obj.auditFile.createIndex({ time: -1 }, { name: 'Time1' }).catch(function () { }); obj.auditFile.createIndex({ userid: 1, time: -1 }, { name: 'UserTime1' }).catch(function () { }); } catch (e) { }
+          obj.aiAuditAdd = function(rec) {
+              return Promise.resolve().then(function () { return obj.auditFile.insertOne(auditRec(rec)); }).then(function () { return true; })
+              .catch(function (e) { console.log('EVENTLOG AI: audit write failed: ' + (e.message || e)); return false; });
+          };
+          obj.aiAuditQuery = function(q) {
+              q = auditQueryNorm(q);
+              if (q.none) return Promise.resolve({ rows: [], total: 0 });
+              var m = auditMatch(q);
+              return obj.auditFile.countDocuments(m).then(function (total) {
+                  return obj.auditFile.find(m).sort({ time: -1 }).skip(q.skip).limit(q.limit).toArray()
+                  .then(function (rows) { return { rows: rows.map(function (r) { r._id = String(r._id); return r; }), total: total }; });
+              });
+          };
+          obj.aiAuditSweep = function(cutoffMs) {
+              return obj.auditFile.deleteMany({ time: { $lt: Number(cutoffMs) } }).then(function (r) { return (r && r.deletedCount) || 0; });
           };
           obj.updateDefaultConfig = function(args) {
               args.type = 'configSet';
@@ -549,9 +660,10 @@ module.exports.CreateDB = function(meshserver) {
         //     (measured: ~8 s for 25k), which is the class of stall this release exists to remove.
         // find() uses a different code path and is safe at any size, so collect the ids first and
         // delete them in bounded batches, yielding between batches.
-        var removeInChunks = function(query, callback) {
+        var removeInChunks = function(query, callback, store) {
             var removed = 0;
-            obj.eventsFile.find(query, { _id: 1 }).exec(function (err, docs) {
+            store = store || obj.eventsFile;
+            store.find(query, { _id: 1 }).exec(function (err, docs) {
                 if (err) { callback(err, 0); return; }
                 if (docs == null || docs.length == 0) { callback(null, 0); return; }
                 var ids = [];
@@ -561,7 +673,7 @@ module.exports.CreateDB = function(meshserver) {
                     if (obj._closed || at >= ids.length) { callback(null, removed); return; }
                     var slice = ids.slice(at, at + NEDB_DELETE_CHUNK);
                     at += NEDB_DELETE_CHUNK;
-                    obj.eventsFile.remove({ _id: { $in: slice } }, { multi: true }, function (e2, n) {
+                    store.remove({ _id: { $in: slice } }, { multi: true }, function (e2, n) {
                         if (e2) { callback(e2, removed); return; }
                         removed += n;
                         setTimeout(step, 10);   // let the server serve requests between batches
@@ -625,6 +737,85 @@ module.exports.CreateDB = function(meshserver) {
                     if (d.ProviderName != null && d.ProviderName !== '') out.source[d.ProviderName] = (out.source[d.ProviderName] || 0) + 1;
                 }
                 callback(out);
+            });
+        };
+        // facet counts over the same query History uses (config set filters + user filters), for the Assistant
+        obj.getFacetsQuery = function(nodeid, opts, params, callback) {
+            opts = opts || {};
+            if (opts.historyEnabled === false) { callback({ level: {}, log: {}, source: {} }); return; }
+            obj.eventsFile.find(buildQuery(nodeid, opts, normParams(params)), { Level: 1, LogName: 1, ProviderName: 1 }).exec(function (err, docs) {
+                if (err || docs == null) { callback(null); return; }
+                var out = { level: {}, log: {}, source: {} };
+                for (var i = 0; i < docs.length; i++) {
+                    var d = docs[i];
+                    if (d.Level != null) out.level[d.Level] = (out.level[d.Level] || 0) + 1;
+                    if (d.LogName != null && d.LogName !== '') out.log[d.LogName] = (out.log[d.LogName] || 0) + 1;
+                    if (d.ProviderName != null && d.ProviderName !== '') out.source[d.ProviderName] = (out.source[d.ProviderName] || 0) + 1;
+                }
+                callback(out);
+            });
+        };
+        // events by their stored id, always limited to one device
+        obj.getEventsByIds = function(nodeid, ids, callback) {
+            var list = (Array.isArray(ids) ? ids : []).slice(0, 200).filter(function (id) { return typeof id == 'string' && /^[A-Za-z0-9]{1,32}$/.test(id); });
+            if (list.length == 0) { callback([]); return; }
+            obj.eventsFile.find({ nodeid: nodeid, _id: { $in: list } }).exec(function (err, events) { callback(err ? [] : (events || [])); });
+        };
+        // Assistant settings documents (endpoints, settings, acknowledgements) in the settings file
+        obj.aiPutDoc = function(id, type, doc) {
+            var d = Object.assign({}, doc || {}, { _id: id, type: type });
+            return new Promise(function (resolve, reject) {
+                obj.settingsFile.update({ _id: id }, d, { upsert: true }, function (err) { if (err) reject(err); else resolve(true); });
+            });
+        };
+        obj.aiGetDoc = function(id) {
+            return new Promise(function (resolve, reject) {
+                obj.settingsFile.find({ _id: id }).limit(1).exec(function (err, d) { if (err) reject(err); else resolve((d && d[0]) ? d[0] : null); });
+            });
+        };
+        obj.aiDocs = function(type) {
+            return new Promise(function (resolve, reject) {
+                obj.settingsFile.find({ type: type }).exec(function (err, d) { if (err) reject(err); else resolve(d || []); });
+            });
+        };
+        obj.aiDelDoc = function(id) {
+            return new Promise(function (resolve, reject) {
+                obj.settingsFile.remove({ _id: id }, {}, function (err, n) { if (err) reject(err); else resolve(n); });
+            });
+        };
+        // Assistant audit log: its own file, it grows with use and is swept in chunks
+        if (obj.auditFile == null) {
+            obj.auditFile = new Datastore({ filename: meshserver.getConfigFilePath('plugin-eventlog-ai-audit.db'), autoload: true });
+            setCompaction(obj.auditFile);
+            obj.auditFile.ensureIndex({ fieldName: 'time' });
+        }
+        obj.aiAuditAdd = function(rec) {
+            return new Promise(function (resolve) {
+                obj.auditFile.insert(auditRec(rec), function (err) {
+                    if (err) console.log('EVENTLOG AI: audit write failed: ' + (err.message || err));
+                    resolve(!err);
+                });
+            });
+        };
+        obj.aiAuditQuery = function(q) {
+            q = auditQueryNorm(q);
+            if (q.none) return Promise.resolve({ rows: [], total: 0 });
+            var m = auditMatch(q);
+            return new Promise(function (resolve, reject) {
+                obj.auditFile.count(m, function (err, total) {
+                    if (err) { reject(err); return; }
+                    obj.auditFile.find(m).sort({ time: -1 }).skip(q.skip).limit(q.limit).exec(function (err2, rows) {
+                        if (err2) reject(err2); else resolve({ rows: rows || [], total: total || 0 });
+                    });
+                });
+            });
+        };
+        obj.aiAuditSweep = function(cutoffMs) {
+            return new Promise(function (resolve) {
+                removeInChunks({ time: { $lt: Number(cutoffMs) } }, function (err, removed) {
+                    if (err) console.log('EVENTLOG AI: audit sweep error: ' + (err.message || err));
+                    resolve(removed || 0);
+                }, obj.auditFile);
             });
         };
         obj.updateDefaultConfig = function(args) {

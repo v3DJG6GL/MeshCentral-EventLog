@@ -13,6 +13,7 @@
 
 const T_EV = 'plugin_eventlog_events';
 const T_SET = 'plugin_eventlog_settings';
+const T_AUD = 'plugin_eventlog_ai_audit';   // Assistant audit log (v0.2.0)
 const EVCOLS = ['nodeid', 'tc', 'time', 'level', 'logname', 'provider', 'eventid', 'eventid_num', 'message', 'extra'];
 const SWEEP_CHUNK = 5000;
 const ASSIGN_CHUNK = 500;
@@ -172,6 +173,10 @@ module.exports.install = function (obj, meshserver, kind, shared) {
                 'id VARCHAR(256) NOT NULL, type VARCHAR(32) NOT NULL, extra VARCHAR(256), doc JSON, ' +
                 'PRIMARY KEY (id), INDEX ' + T_SET + '_type_extra (type, extra)' +
                 ') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
+            stmts.push('CREATE TABLE IF NOT EXISTS ' + T_AUD + ' (' +
+                'id BIGINT NOT NULL AUTO_INCREMENT, time BIGINT NOT NULL, userid VARCHAR(256), nodeid VARCHAR(256), doc JSON, ' +
+                'PRIMARY KEY (id), INDEX ' + T_AUD + '_time (time), INDEX ' + T_AUD + '_user_time (userid, time)' +
+                ') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
         } else {
             var serial = (kind == 'pg') ? 'BIGSERIAL PRIMARY KEY' : 'INTEGER PRIMARY KEY';
             var vc = function (n) { return (kind == 'pg') ? ('VARCHAR(' + n + ')') : 'TEXT'; };
@@ -186,6 +191,10 @@ module.exports.install = function (obj, meshserver, kind, shared) {
             stmts.push('CREATE TABLE IF NOT EXISTS ' + T_SET + ' (' +
                 'id ' + vc(256) + ' PRIMARY KEY NOT NULL, type ' + vc(32) + ' NOT NULL, extra ' + vc(256) + ', doc ' + D.jsonType + ')');
             stmts.push('CREATE INDEX IF NOT EXISTS ' + T_SET + '_type_extra ON ' + T_SET + ' (type, extra)');
+            stmts.push('CREATE TABLE IF NOT EXISTS ' + T_AUD + ' (' +
+                'id ' + serial + ', time ' + big + ' NOT NULL, userid ' + vc(256) + ', nodeid ' + vc(256) + ', doc ' + D.jsonType + ')');
+            stmts.push('CREATE INDEX IF NOT EXISTS ' + T_AUD + '_time ON ' + T_AUD + ' (time)');
+            stmts.push('CREATE INDEX IF NOT EXISTS ' + T_AUD + '_user_time ON ' + T_AUD + ' (userid, time)');
         }
         return stmts.reduce(function (p, s) { return p.then(function () { return D.query(s, []); }); }, Promise.resolve());
     }
@@ -252,6 +261,7 @@ module.exports.install = function (obj, meshserver, kind, shared) {
                         if (d.type == 'configSet') { id = String(d._id); extra = d.uid || null; }        // keep the id: assignments point at it
                         else if (d.type == 'assignedConfig') { id = 'assign:' + d.asset; extra = d.asset; }
                         else if (d.type == 'nodeMeta') { id = 'nodeMeta:' + d.nodeid; extra = d.nodeid; }
+                        else if (d.type == 'aiEndpoint' || d.type == 'aiSettings' || d.type == 'aiAck') { id = String(d._id); extra = (d.extra != null) ? String(d.extra) : null; }
                         else return;   // db_version is per-backend
                         n++;
                         work = work.then(function () { return putDoc(id, d.type, extra, doc); });
@@ -293,6 +303,9 @@ module.exports.install = function (obj, meshserver, kind, shared) {
     function getDoc(id) {
         return D.query('SELECT id, doc FROM ' + T_SET + ' WHERE id = ' + D.ph(1), [id])
         .then(function (r) { return r.rows[0] ? rowToDoc(r.rows[0]) : null; });
+    }
+    function delDoc(id) {
+        return D.query('DELETE FROM ' + T_SET + ' WHERE id = ' + D.ph(1), [id]).then(function (r) { return r.affected; });
     }
 
     // ---- events ----------------------------------------------------------
@@ -384,6 +397,7 @@ module.exports.install = function (obj, meshserver, kind, shared) {
         if (levels) addIn('level', levels.map(Number));
         if (params.sources) addIn('provider', params.sources);
         if (params.since) { w.push('tc >= ' + D.ph(n++)); p.push(Number(params.since)); }
+        if (params.until != null) { w.push('tc <= ' + D.ph(n++)); p.push(Number(params.until)); }
         if (params.text) {
             // '!' as the escape character: a backslash would be ambiguous on MySQL/MariaDB, whose
             // string literals process backslashes unless NO_BACKSLASH_ESCAPES is set.
@@ -471,6 +485,90 @@ module.exports.install = function (obj, meshserver, kind, shared) {
             callback(out);
         })
         .catch(function (e) { console.log('EVENTLOG: getFacetsFor error: ' + (e.message || e)); callback(null); });
+    };
+
+    // facet counts over the same query History uses (config set filters + user filters), for the Assistant
+    obj.getFacetsQuery = function (nodeid, opts, params, callback) {
+        opts = opts || {};
+        if (opts.historyEnabled === false) { callback({ level: {}, log: {}, source: {} }); return; }
+        ready().then(function () {
+            var w = whereFor(nodeid, opts, shared.normParams(params));
+            var q = function (col, extra) {
+                return D.query('SELECT ' + col + ' AS k, COUNT(*) AS n FROM ' + T_EV + ' WHERE ' + w.sql + ' GROUP BY ' + col + (extra || ''), w.params);
+            };
+            return Promise.all([q('level'), q('logname'), q('provider', ' ORDER BY COUNT(*) DESC LIMIT 200')]);
+        })
+        .then(function (res) {
+            var out = { level: {}, log: {}, source: {} }, keys = ['level', 'log', 'source'];
+            res.forEach(function (r, i) { r.rows.forEach(function (row) { if (row.k == null || row.k === '') return; out[keys[i]][row.k] = toNum(row.n) || 0; }); });
+            callback(out);
+        })
+        .catch(function (e) { console.log('EVENTLOG: getFacetsQuery error: ' + (e.message || e)); callback(null); });
+    };
+    // events by their stored id, always limited to one device
+    obj.getEventsByIds = function (nodeid, ids, callback) {
+        var list = (Array.isArray(ids) ? ids : []).slice(0, 200).filter(function (id) { return typeof id == 'string' && /^\d{1,15}$/.test(id); });
+        if (list.length == 0) { callback([]); return; }
+        ready().then(function () {
+            var ph = [], p = [nodeid], n = 2;
+            list.forEach(function (id) { ph.push(D.ph(n++)); p.push(id); });
+            return D.query('SELECT * FROM ' + T_EV + ' WHERE nodeid = ' + D.ph(1) + ' AND id IN (' + ph.join(',') + ')', p);
+        })
+        .then(function (r) { callback(r.rows.map(rowToEvent)); })
+        .catch(function (e) { console.log('EVENTLOG: getEventsByIds error: ' + (e.message || e)); callback([]); });
+    };
+
+    // ---- Assistant settings documents (endpoints, settings, acknowledgements) ----
+    obj.aiPutDoc = function (id, type, doc) {
+        var d = Object.assign({}, doc || {}); delete d._id; d.type = type;
+        return ready().then(function () { return putDoc(id, type, (d.extra != null) ? String(d.extra) : null, d); }).then(function () { return true; });
+    };
+    obj.aiGetDoc = function (id) { return ready().then(function () { return getDoc(id); }); };
+    obj.aiDocs = function (type) { return ready().then(function () { return docsByType(type); }); };
+    obj.aiDelDoc = function (id) { return ready().then(function () { return delDoc(id); }); };
+
+    // ---- Assistant audit log ---------------------------------------------
+    function auditWhere(q) {
+        var w = [], p = [], n = 1;
+        if (q.since != null) { w.push('time >= ' + D.ph(n++)); p.push(q.since); }
+        if (q.until != null) { w.push('time <= ' + D.ph(n++)); p.push(q.until); }
+        if (q.userid != null) { w.push('userid = ' + D.ph(n++)); p.push(q.userid); }
+        if (q.nodeid != null) { w.push('nodeid = ' + D.ph(n++)); p.push(q.nodeid); }
+        return { sql: w.length ? (' WHERE ' + w.join(' AND ')) : '', params: p };
+    }
+    obj.aiAuditAdd = function (rec) {
+        return ready().then(function () {
+            rec = shared.auditRec(rec);
+            return D.query('INSERT INTO ' + T_AUD + ' (time,userid,nodeid,doc) VALUES (' + D.ph(1) + ',' + D.ph(2) + ',' + D.ph(3) + ',' + D.ph(4) + ')',
+                [rec.time, trunc(rec.userid, 256), trunc(rec.nodeid, 256), JSON.stringify(rec)]);
+        }).then(function () { return true; })
+        .catch(function (e) { console.log('EVENTLOG AI: audit write failed: ' + (e.message || e)); return false; });
+    };
+    obj.aiAuditQuery = function (q) {
+        q = shared.auditQueryNorm(q);
+        if (q.none) return Promise.resolve({ rows: [], total: 0 });
+        var w = auditWhere(q);
+        return ready().then(function () { return D.query('SELECT COUNT(*) AS n FROM ' + T_AUD + w.sql, w.params); })
+        .then(function (cr) {
+            var total = toNum(cr.rows[0] && cr.rows[0].n) || 0;
+            return D.query('SELECT id, doc FROM ' + T_AUD + w.sql + ' ORDER BY time DESC, id DESC LIMIT ' + q.limit + ' OFFSET ' + q.skip, w.params)
+            .then(function (r) { return { rows: r.rows.map(function (row) { var d = parseDoc(row.doc); d._id = String(row.id); return d; }), total: total }; });
+        });
+    };
+    obj.aiAuditSweep = function (cutoffMs) {
+        var removed = 0, cutoff = Number(cutoffMs) || 0;
+        var step = function () {
+            if (obj._closed) return removed;
+            var sql;
+            if (isMy) sql = 'DELETE FROM ' + T_AUD + ' WHERE time < ? ORDER BY time LIMIT ' + SWEEP_CHUNK;
+            else sql = 'DELETE FROM ' + T_AUD + ' WHERE id IN (SELECT id FROM ' + T_AUD + ' WHERE time < ' + D.ph(1) + ' ORDER BY time LIMIT ' + SWEEP_CHUNK + ')';
+            return D.query(sql, [cutoff]).then(function (r) {
+                removed += r.affected;
+                if (r.affected < SWEEP_CHUNK) return removed;
+                return new Promise(function (res) { setTimeout(res, 250); }).then(step);
+            });
+        };
+        return ready().then(step);
     };
 
     // ---- retention -------------------------------------------------------
