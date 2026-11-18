@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-11-18
 ### Changed
 - Assistant admin page: the *Preset* and *API format* dropdowns are one *Server type* choice (Ollama, vLLM, LM Studio, llama.cpp, LocalAI, Other OpenAI-compatible server, OpenAI Responses API, Anthropic Messages API). Choosing a self-hosted server fills in its usual address only while the address field is empty or still holds another server's default. The endpoints table shows the same *Server type*
 
