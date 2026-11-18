@@ -181,14 +181,14 @@ function installShared(obj) {
                     name: 'Default',
                     liveLogs: 'Application,System',
                     liveNum: 100,
-                    liveEntryTypes: [2,3],
+                    liveEntryTypes: [1,2,3],
                     liveCategories: [],          // Linux journald categories; empty = no filter
                     liveCategoriesMode: 'exclude',
                     liveSources: '',             // source / provider names, '*' wildcards; empty = no filter
                     liveSourcesMode: 'exclude',
                     historyEnabled: true,
                     historyLogs: 'Application,System',
-                    historyEntryTypes: [2,3],
+                    historyEntryTypes: [1,2,3],
                     historyCategories: [],
                     historyCategoriesMode: 'exclude',
                     historySources: '',

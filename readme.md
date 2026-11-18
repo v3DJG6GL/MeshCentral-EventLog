@@ -193,6 +193,17 @@ Some optional suites are skipped unless their modules can be found:
 - NeDB backend tests: install `@seald-io/nedb` and point `NODE_PATH` at its `node_modules` (`NODE_PATH=/path/to/node_modules node --test test/`). The SQLite tests use `node:sqlite` and are skipped where it is missing.
 - Answer rendering tests in a simulated browser: set `EVL_JSDOM` to a `jsdom` module and `EVL_MC_SCRIPTS` to MeshCentral's `public/scripts` folder (for its `marked` and DOMPurify copies).
 
+`node scripts/check-syntax.js` checks the syntax of every `.js` file and of the inline scripts of the admin page. CI (`.github/workflows/ci.yml`) runs it and all test suites, the optional ones included, on Node 22, 24 and 26 for every push to master and every pull request.
+
+### Releases
+
+Releases are made by `.github/workflows/release.yml`, not by hand:
+- Describe each change in `changelog.md` under `## [Unreleased]` ([Keep a Changelog](https://keepachangelog.com/en/1.0.0/) headings) and push to master. When CI has passed for that commit, a release follows automatically. The version step comes from the changelog: `### Added` or `### Changed` → minor, a `**Breaking` entry → major (minor while the version is 0.x), anything else (`### Fixed`, `### Security`, ...) → patch. An empty `[Unreleased]` section means no release, so documentation or housekeeping pushes don't release.
+- Put `[skip release]` in the commit message to push changelog entries without releasing yet.
+- To release on demand, or to pick the step yourself: Actions → Release → *Run workflow* on master, with bump `patch`, `minor` or `major` (`auto` uses the changelog). The commit still needs a successful CI run.
+- The release commit (`Release vX.Y.Z [skip ci]`) writes the version into `config.json`, the top of this readme and `changelog.md` (`[Unreleased]` becomes `[X.Y.Z] - date`). The commit is tagged `vX.Y.Z`, and a GitHub release is created with that changelog section as its notes. MeshCentral offers updates based on `config.json` on master and lists older versions from the tags. Don't change the version by hand.
+- The workflow pushes to master. If master is protected, allow GitHub Actions to push to it, or add a `RELEASE_TOKEN` repository secret (a token with *Contents: read and write* on this repository). Without the secret, the built-in `GITHUB_TOKEN` is used.
+
 # Future
 
 This project may be expanded to include:

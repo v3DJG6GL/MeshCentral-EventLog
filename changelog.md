@@ -41,6 +41,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - History and Collect now are checked on the server. The Live view runs through MeshCentral's relay tunnel, so its permission is enforced by the tab only
   - Without Live permission the tab never opens the live tunnel; without History permission it hides History. A user with neither sees a notice with a "Check again" link. Permission changes take effect on the next device refresh, without reloading the page
   - On a MeshCentral without the plugin permission framework, only full administrators can use the tab
+- **New installations collect Critical events too** (for example Kernel-Power 41 after an unexpected restart), in addition to Error and Warning: the Default config set now has Critical, Error and Warning as Entry Types for Live and History. Existing installations keep their config sets unchanged - add *Critical* under Config sets → Entry Types on the plugin admin page so History and the Assistant can see unexpected restarts
 ### Fixed
 - **Security:** History and Collect now checked the user's rights against the device group sent by the browser. A user with rights on one device group could read the stored events of a device in another group. The device group is now taken from MeshCentral's database
 - **Security:** a browser session could send messages meant for agents, for example to push messages into another user's open Event Log tab. Agent messages are now accepted only from agents, and device actions only from users
