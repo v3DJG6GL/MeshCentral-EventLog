@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Known Issues]
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
+## [0.1.14] - 2026-11-14
+### Added
+- **Alerts.** A config set can now hold alert rules. When incoming events match a rule, the plugin raises a MeshCentral device event (action `eventlogalert`), which is stored in the device's Events list
+  - A rule can filter by Entry Type, Log, Source (`*` wildcards), Event IDs (`1112, 100-199`) and message text, and can require *N matching events within M minutes*. A per-device cooldown stops one noisy event from alerting repeatedly
+  - Rules follow the same node / mesh assignment as the rest of the config set, so no new storage is involved on MongoDB, NeDB or SQL
+  - Rules are evaluated on the server as batches arrive, before the History include/exclude rules, so an event you choose not to store can still alert. No agent core update is needed
+  - Events older than one hour are ignored, so a newly installed agent's 24 h backlog does not fire a burst of alerts
+### Changed
+- **Saving a config set now tells you what happened.** A status line next to Save shows "Saving...", then a confirmation with the time, or the reason it failed (or a warning if the server does not answer within 10 seconds). Saving the Default set used to get no answer at all
+- Saving a *new* config set no longer leaves the form on "new": pressing Save a second time used to create a duplicate set
+- The admin actions (save, delete, assign) now check on the server that the caller is a MeshCentral administrator; before, only the admin page itself did
+- The admin page now uses the same look as the device page's Event Log tab: the same colors, buttons, inputs, table styling and segmented tab switch, full width, and it follows MeshCentral's light / night theme
+### Fixed
+- Saved text containing `$&` or `$'` was altered when the admin page was rendered (the page template used a string replacement). The values are now inserted verbatim
+
 ## [0.1.13] - 2026-09-19
 ### Fixed
 - **The event table now always fits the browser window.** Its height is measured against the window instead of a fixed estimate, and is re-fitted when the window is resized, so the details pane and the status line (with "Reset height") can no longer be pushed out of view

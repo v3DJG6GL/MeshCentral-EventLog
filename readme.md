@@ -1,4 +1,3 @@
-
 # MeshCentral-EventLog
 
 *Current Version: 0.1.12
@@ -32,6 +31,8 @@ Each set filters what is collected (History) and shown (Live), each with an Incl
 - **Categories (Linux)** — journald categories: System, Application, Kernel, Auth, Cron, Daemon, Audit. *Application* is program output and is usually the noisy one on desktops
 - **Sources** — source / provider names, comma-delimited, `*` wildcards (e.g. exclude `plasmashell, kwin*`). Works on both OSes
 - **Entry Types** — levels; on Linux they map onto syslog priorities (Critical 0–2, Error 3, Warning 4, Info 5–6, Verbose 7)
+
+- **Alerts** — rules that raise a MeshCentral device event when incoming events match. Each rule can filter by entry type, log, source (`*` wildcards), event IDs (`1112, 100-199`) and message text, and can require *N matching events within M minutes*, with a per-device cooldown. Alerts are evaluated on the server as events arrive (before the History include/exclude rules) and appear in the device's Events list. Events older than one hour are ignored.
 
 Retention (days) and the 100,000-events-per-device cap are server-wide.
 
@@ -90,7 +91,6 @@ How much is kept is controlled by **Retention (days)** in the Default config set
 # Future
 
 This project may be expanded to include:
-- Create alerts based on the log entries and user-defined filters
 - When used in conjunction with a task-scheduling plugin could fire off a task on an endpoint in response to an event
 - Thoughts welcome- please feel free to suggest something that might be useful to you
 

@@ -36,7 +36,8 @@ module.exports.admin = function(parent) {
           // plugin's page here.
           var path = require('path');
           var html = require('fs').readFileSync(path.join(__dirname, 'views', 'admin.handlebars')).toString();
-          html = html.replace('{{{configSets}}}', vars.configSets).replace('{{{configAssignments}}}', vars.configAssignments);
+          // function replacers: a string replacement would interpret '$&', "$'" etc. inside user-entered text (alert rules, names)
+          html = html.replace('{{{configSets}}}', function() { return vars.configSets; }).replace('{{{configAssignments}}}', function() { return vars.configAssignments; });
           res.set('Content-Type', 'text/html; charset=utf-8');
           res.send(html);
         })

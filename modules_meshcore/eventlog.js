@@ -79,7 +79,7 @@ var popTmpFile = function(fn) { // remove tmp file and other (possibly orphaned)
     db.Put('pluginEventLog_tmpfns', newFns);
 };
 var runPwshCollector = function(func, passedParams) {
-    const defaultParams = {
+    var defaultParams = {
         fromLog: 'Application',
         num: 10,
         entryType: 'Error,Warning',

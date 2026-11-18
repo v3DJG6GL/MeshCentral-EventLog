@@ -79,8 +79,12 @@
         } else { // get options from config
           if (typeof set == 'object') var options = set;
         }
+        renderAlertRules([]);
         for (var [k, v] of Object.entries(options)) {
           switch(k) {
+            case 'alerts':
+              renderAlertRules(Array.isArray(v) ? v : []);
+            break;
             case 'historyEnabled':
               if (v === true) {
                 Q('el'+k).checked = true;
@@ -126,6 +130,81 @@
         
       }
       
+      // ---- alert rules (stored in the config set as `alerts`) ----
+      var elAlertLevels = [[0, 'LogAlways'], [1, 'Critical'], [2, 'Error'], [3, 'Warning'], [4, 'Info'], [5, 'Verbose']];
+      function renderAlertRules(list) {
+        var box = document.getElementById('elalertRules');
+        if (box == null) return;
+        box.innerHTML = '';
+        (list || []).forEach(function(r) { addAlertRule(r); });
+      }
+      function addAlertRule(r) {
+        r = (r && typeof r == 'object') ? r : {};
+        var box = document.getElementById('elalertRules');
+        var d = document.createElement('div');
+        d.className = 'elAlertRule';
+        d.setAttribute('data-id', (typeof r.id == 'string' && r.id != '') ? r.id : ('a' + Math.random().toString(36).slice(2, 10)));
+        d.innerHTML =
+          '<div><label><input type="checkbox" class="elaEnabled"> Enabled</label> &nbsp; Name <input type="text" class="elaName" style="width:260px"> ' +
+          '<button class="elaRemove">Remove</button></div>' +
+          '<table class="elAlertTbl">' +
+          '<tr><td>Entry Types</td><td><select multiple class="elaLevels elMSel"></select> <small>none selected = any level</small></td></tr>' +
+          '<tr><td>Logs</td><td><input type="text" class="elaLogs elLongTxt"> <small>comma delimited, <code>*</code> wildcards. Empty = any</small></td></tr>' +
+          '<tr><td>Sources</td><td><input type="text" class="elaSources elLongTxt"> <small>comma delimited, <code>*</code> wildcards. Empty = any</small></td></tr>' +
+          '<tr><td>Event IDs</td><td><input type="text" class="elaIds elLongTxt"> <small>e.g. <code>1112, 100-199</code>. Empty = any</small></td></tr>' +
+          '<tr><td>Message contains</td><td><input type="text" class="elaText elLongTxt"> <small>case-insensitive text. Empty = any</small></td></tr>' +
+          '<tr><td>Fire when</td><td><input type="number" min="1" class="elaThreshold" style="width:60px"> matching events occur within <input type="number" min="1" class="elaWindow" style="width:60px"> minutes</td></tr>' +
+          '<tr><td>Cooldown</td><td><input type="number" min="0" class="elaCooldown" style="width:60px"> minutes before the same rule can alert again for the same device</td></tr>' +
+          '</table>';
+        var sel = d.querySelector('.elaLevels');
+        var lv = (Array.isArray(r.levels) ? r.levels : []).map(Number);
+        elAlertLevels.forEach(function(l) {
+          var o = document.createElement('option'); o.value = l[0]; o.textContent = l[1]; o.selected = lv.indexOf(l[0]) != -1; sel.appendChild(o);
+        });
+        d.querySelector('.elaEnabled').checked = (r.enabled !== false);
+        d.querySelector('.elaName').value = r.name || '';
+        d.querySelector('.elaLogs').value = r.logs || '';
+        d.querySelector('.elaSources').value = r.sources || '';
+        d.querySelector('.elaIds').value = r.ids || '';
+        d.querySelector('.elaText').value = r.text || '';
+        d.querySelector('.elaThreshold').value = (Number(r.threshold) >= 1) ? Number(r.threshold) : 1;
+        d.querySelector('.elaWindow').value = (Number(r.windowMin) >= 1) ? Number(r.windowMin) : 10;
+        d.querySelector('.elaCooldown').value = (r.cooldownMin != null && Number(r.cooldownMin) >= 0) ? Number(r.cooldownMin) : 5;
+        d.querySelector('.elaRemove').onclick = function() { box.removeChild(d); return false; };
+        box.appendChild(d);
+        return false;
+      }
+      function readAlertRules() {
+        var out = [];
+        document.querySelectorAll('#elalertRules .elAlertRule').forEach(function(d) {
+          var cd = Number(d.querySelector('.elaCooldown').value);
+          out.push({
+            id: d.getAttribute('data-id'),
+            enabled: d.querySelector('.elaEnabled').checked,
+            name: d.querySelector('.elaName').value.trim() || 'Unnamed rule',
+            levels: Array.from(d.querySelectorAll('.elaLevels option:checked')).map(function(o) { return Number(o.value); }),
+            logs: d.querySelector('.elaLogs').value.trim(),
+            sources: d.querySelector('.elaSources').value.trim(),
+            ids: d.querySelector('.elaIds').value.trim(),
+            text: d.querySelector('.elaText').value.trim(),
+            threshold: Math.max(1, Math.floor(Number(d.querySelector('.elaThreshold').value)) || 1),
+            windowMin: Math.max(1, Number(d.querySelector('.elaWindow').value) || 10),
+            cooldownMin: (isNaN(cd) || cd < 0) ? 5 : cd
+          });
+        });
+        return out;
+      }
+
+      var elSaveTimer = null;
+      function setSaveStatus(kind, text) {
+        var el = document.getElementById('elSaveStatus');
+        if (el == null) return;
+        el.className = 'elSaveStatus ' + kind;
+        el.textContent = text;
+        var btn = document.getElementById('elSaveBtn');
+        if (btn != null) btn.disabled = (kind == 'pending');
+        if (kind == 'ok') { clearTimeout(el._t); el._t = setTimeout(function() { if (el.className.indexOf('ok') != -1) { el.textContent = ''; el.className = 'elSaveStatus'; } }, 15000); }
+      }
       function saveConfig() {
         var configId = Q('elid').value;
 
@@ -145,25 +224,15 @@
           historyCategoriesMode: Q('elhistoryCategoriesMode').value,
           historySources: Q('elhistorySources').value,
           historySourcesMode: Q('elhistorySourcesMode').value,
-          retentionDays: Math.max(1, Number(Q('elretentionDays').value) || 30)
+          retentionDays: Math.max(1, Number(Q('elretentionDays').value) || 30),
+          alerts: readAlertRules()
         };
         
-        if (configId == '') { // save defaults
-          parent.meshserver.send({ action: 'plugin', plugin: 'eventlog', pluginaction: 'adminSaveConfig', id: '_default', opts: x });
-          configSets.forEach((s, i) => {
-            if (s.default == true) configSets.push({...x, ...{ default: true }});
-          });
-        } else { // save by id or _new
-          parent.meshserver.send({ action: 'plugin', plugin: 'eventlog', pluginaction: 'adminSaveConfig', id: configId, opts: x });
-          var upd = false;
-          configSets.forEach((s, i) => {
-            if (s._id == x.id) { 
-              configSets[i] = x;
-              upd = true;
-            }
-            if (!upd) configSets.push(x);
-          });
-        }
+        // the server answers with adminUpdateConfigSets (saved) or adminSaveFailed; the status text follows that answer
+        parent.meshserver.send({ action: 'plugin', plugin: 'eventlog', pluginaction: 'adminSaveConfig', id: (configId == '') ? '_default' : configId, opts: x });
+        setSaveStatus('pending', 'Saving\u2026');
+        clearTimeout(elSaveTimer);
+        elSaveTimer = setTimeout(function() { setSaveStatus('warn', 'No answer from the server \u2014 the save is not confirmed. Check the connection and try again.'); }, 10000);
         updateConfigSetName(configId, x.name);
         
       }
@@ -317,6 +386,16 @@
       parent.pluginHandler['eventlog'].adminUpdateConfigSets = function(args, msg) {
           configSets = msg.sets;
           updateConfigSetsSelects(msg.selected);
+          if (msg.saved) {
+              // a new set now has its real id: without this, pressing Save again would create another copy
+              if (Q('elid').value == '_new' && msg.selected) Q('elid').value = msg.selected;
+              clearTimeout(elSaveTimer);
+              setSaveStatus('ok', '\u2713 Saved \u201c' + (msg.name || 'configuration') + '\u201d at ' + new Date().toLocaleTimeString() + '. Endpoints pick up the change within a minute.');
+          }
+      }
+      parent.pluginHandler['eventlog'].adminSaveFailed = function(args, msg) {
+          clearTimeout(elSaveTimer);
+          setSaveStatus('err', '\u2717 Not saved: ' + (msg.error || 'unknown error'));
       }
       
       parent.pluginHandler['eventlog'].adminConfigDeleted = function(args, msg) {
@@ -339,47 +418,79 @@
     </script>
 </head>
 <style>
+    /* Theme: same palette, buttons, inputs and text as the device page's Event Log tab.
+       Night mode is mirrored from MeshCentral's own <body class="night"> (see the script at the end). */
     body {
+      --evl-ink:#1c1c1c; --evl-muted:#5a6360; --evl-line:#c9c9c9; --evl-line2:#e6e6e6; --evl-bg:#fff;
+      --evl-alt:#f4f6f5; --evl-hover:#e9f0f1; --evl-sel:#dbe9eb; --evl-chip:#eef1f0; --evl-input:#fff;
+      --evl-acc:#1F6F78; --evl-acc-ink:#fff; --evl-ok:#1e8a4c; --evl-bline:#c9c9c9;
+      margin: 0; padding: 4px 0;
       font-family: "Trebuchet MS", Arial, Helvetica, sans-serif;
+      background: var(--evl-bg); color: var(--evl-ink); color-scheme: light;
     }
-    #eventLogAdminNav {
-      overflow: hidden;
-      border: 1px solid #ccc;
-      background-color: #f1f1f1;
+    body.night {
+      --evl-ink:#bbbbbb; --evl-muted:#8b9591; --evl-line:#333; --evl-line2:#222; --evl-bg:#000;
+      --evl-alt:#0d1110; --evl-hover:#18201f; --evl-sel:#18302f; --evl-chip:#1a1f1e; --evl-input:#111;
+      --evl-acc:#5fb3bb; --evl-acc-ink:#000; --evl-ok:#3dbf7a; --evl-bline:#4a5250;
+      color-scheme: dark;
     }
-    .eventLogNavClass button {
-      background-color: inherit;
-      float: left;
-      border: none;
-      outline: none;
-      cursor: pointer;
-      padding: 10px 12px;
-      transition: 0.3s;
-    }
-    .eventLogNavClass button:hover {
-      background-color: #ddd;
-    }
-    .eventLogNavClass button.eventLogTabActive {
-      background-color: #ccc;
-    }
-    .eventLogPage {
-      padding: 6px 12px;
-      border: 1px solid #ccc;
-      border-top: none;
-    }
+    #eventLogAdmin { width: 100%; box-sizing: border-box; }
+    #eventLogAdmin small, #eventLogAdmin .evlLbl { color: var(--evl-muted); }
+    #eventLogAdmin code { font-family: Consolas, "DejaVu Sans Mono", monospace; font-size: 12px; background: var(--evl-chip); padding: 0 4px; border-radius: 3px; }
+    #eventLogAdmin a { color: var(--evl-acc); cursor: pointer; text-decoration: underline dotted; }
+    #eventLogAdmin a:hover { text-decoration-style: solid; }
 
-    .elMSel {
-      height: 100px;
-      width: 100px;
-    }
+    /* tabs: segmented control, like the Table / Viewer switch */
+    #eventLogAdminNav { display: inline-flex; margin: 2px 0 8px 12px; border: 1px solid var(--evl-bline); border-radius: 3px; overflow: hidden; background: var(--evl-input); }
+    .eventLogNavClass button { float: none; border: 0; outline: none; background: var(--evl-input); color: var(--evl-muted); padding: 4px 14px; cursor: pointer; font: inherit; transition: none; }
+    .eventLogNavClass button:hover:not(.eventLogTabActive) { background: var(--evl-hover); color: var(--evl-ink); }
+    .eventLogNavClass button:active:not(.eventLogTabActive) { background: var(--evl-sel); }
+    .eventLogNavClass button.eventLogTabActive { background: var(--evl-acc); color: var(--evl-acc-ink); font-weight: bold; }
+    .eventLogNavClass button:focus-visible { outline: 2px solid var(--evl-acc); outline-offset: -2px; }
+    .eventLogPage { padding: 6px 12px; border: 0; }
 
-    .elLongTxt {
-      width: 500px;
-    }
+    /* buttons: same as the device tab's .evlBtn; the first button of each group is the primary action */
+    #eventLogAdmin button:not(#eventLogAdminNav button) { border: 1px solid var(--evl-bline); background: var(--evl-input); color: var(--evl-ink); border-radius: 3px; padding: 4px 9px; cursor: pointer; font: inherit; }
+    #eventLogAdmin button:not(#eventLogAdminNav button):hover { background: var(--evl-hover); border-color: var(--evl-acc); }
+    #eventLogAdmin button:not(#eventLogAdminNav button):active { background: var(--evl-sel); transform: translateY(1px); }
+    #eventLogAdmin button:not(#eventLogAdminNav button):focus-visible { outline: 2px solid var(--evl-acc); outline-offset: -2px; }
+    #eventLogAdmin #elAssignChoice button:first-of-type, #eventLogAdmin #elConfigBtns button:first-of-type { background: var(--evl-acc); color: var(--evl-acc-ink); border-color: var(--evl-acc); }
+    #eventLogAdmin #elAssignChoice button:first-of-type:hover, #eventLogAdmin #elConfigBtns button:first-of-type:hover { background: var(--evl-acc); filter: brightness(1.08); }
+    .elaRemove { margin-left: 8px; }
 
-    #elConfigBtns {
-      float:right;
+    /* inputs */
+    #eventLogAdmin input[type=text], #eventLogAdmin input[type=number], #eventLogAdmin select {
+      border: 1px solid var(--evl-line); background: var(--evl-input); color: var(--evl-ink);
+      border-radius: 3px; padding: 4px 6px; font: inherit; box-sizing: border-box;
     }
+    #eventLogAdmin input[type=text]:focus, #eventLogAdmin input[type=number]:focus, #eventLogAdmin select:focus { outline: 2px solid var(--evl-acc); outline-offset: -1px; }
+    #eventLogAdmin input[type=checkbox] { accent-color: var(--evl-acc); }
+    #eventLogAdmin option { background: var(--evl-input); color: var(--evl-ink); }
+    #eventLogAdmin option:checked { background: var(--evl-acc); color: var(--evl-acc-ink); }
+    .elMSel { height: 122px; width: 140px; }
+    .elLongTxt { width: 100%; max-width: 640px; }
+
+    /* tables: header and row styling like the event table */
+    #eventLogAdmin table { border-collapse: collapse; }
+    #assignTbl { width: 100%; }
+    #assignTbl th { font-size: 12px; color: var(--evl-muted); padding: 5px 8px; border-bottom: 1px solid var(--evl-line); }
+    #assignTbl td { padding: 3px 8px; border-bottom: 1px solid var(--evl-line2); }
+    #assignTbl tr.eldataRow:hover td { background: var(--evl-hover); }
+    #editConfig > table > tbody > tr > td { padding: 6px 10px 6px 0; vertical-align: top; border-bottom: 1px solid var(--evl-line2); }
+    #editConfig > table > tbody > tr > td:first-child { color: var(--evl-ink); min-width: 220px; max-width: 320px; }
+    #editConfig > table > tbody > tr > td[colspan] { background: var(--evl-alt); color: var(--evl-ink); border-top: 1px solid var(--evl-line); border-bottom: 1px solid var(--evl-line); }
+
+    .elAlertRule { border: 1px solid var(--evl-line); background: var(--evl-alt); border-radius: 4px; padding: 6px 8px; margin-bottom: 8px; }
+    .elAlertTbl td { padding: 2px 8px 2px 0; vertical-align: top; border-bottom: 0; }
+    #elConfigBtns { float: right; }
+    .elSaveStatus { margin-right: 8px; font-size: 13px; }
+    .elSaveStatus.pending { color: var(--evl-muted); }
+    .elSaveStatus.ok { color: var(--evl-ok); font-weight: bold; }
+    .elSaveStatus.err { color: #C9352B; font-weight: bold; }
+    body.night .elSaveStatus.err { color: #ff8a7e; }
+    .elSaveStatus.warn { color: #B86F00; font-weight: bold; }
+    body.night .elSaveStatus.warn { color: #f0b848; }
+    #eventLogAdmin button:disabled { opacity: .55; cursor: default; }
 </style>
 <body>
 <div id="eventLogAdmin">
@@ -465,7 +576,8 @@
             </tr>
             <tr><td>Sources<br><small>Comma delimited source / provider names, <code>*</code> matches anything, case-insensitive. Empty = no filter. Example: <code>plasmashell, kwin*</code>. Applied on the server when events arrive, so it works for Windows and Linux alike.</small></td><td><select id="elhistorySourcesMode" name="historySourcesMode" class="elSel"><option value="include">Include selected</option><option value="exclude" selected>Exclude selected</option></select> <br><input type="text" id="elhistorySources" name="historySources" class="elLongTxt"></td></tr>
             <tr><td>Retention (days)<br><small>How long collected events are kept. Server-wide; taken from the Default set.</small></td><td><input type="text" id="elretentionDays" name="retentionDays" value="30"></td></tr>
-          <tr><td>&nbsp;</td><td><span id="elConfigBtns"><button onclick="return saveConfig();">Save</button> <button onclick="return deleteConfig();">Delete</button></span></td></tr>
+            <tr><td>Alerts<br><small>Raise a MeshCentral device event when incoming events match a rule. Evaluated on the server as events arrive, before the History rules above, so an event you do not store can still alert. Events older than one hour are ignored. The alert appears in the device's Events list.</small></td><td><div id="elalertRules"></div><button onclick="return addAlertRule();">Add alert rule</button></td></tr>
+          <tr><td>&nbsp;</td><td><span id="elConfigBtns"><span id="elSaveStatus" class="elSaveStatus" role="status" aria-live="polite"></span> <button id="elSaveBtn" onclick="return saveConfig();">Save</button> <button onclick="return deleteConfig();">Delete</button></span></td></tr>
           </table>
           <input type="hidden" name="configId" id="elid" value="" />
       </div>
@@ -485,5 +597,16 @@
     </div -->
   </div>
 </div>
+<script type="text/javascript">
+  // follow MeshCentral's light / night theme (this page is embedded in MeshCentral's own page)
+  (function () {
+    function sync() {
+      try { document.body.classList.toggle('night', parent.document.body.classList.contains('night')); }
+      catch (e) { document.body.classList.toggle('night', !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)); }
+    }
+    sync();
+    try { new MutationObserver(sync).observe(parent.document.body, { attributes: true, attributeFilter: ['class'] }); } catch (e) { }
+  })();
+</script>
 </body>
 </html>

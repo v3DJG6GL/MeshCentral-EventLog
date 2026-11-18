@@ -1567,6 +1567,11 @@ body.night #pluginEventLog {
         .catch(function (e) { console.log('EVENTLOG: config lookup failed for ' + nodeid + ': ' + (e.message || e)); return (c != null) ? c.cfg : null; });
     };
 
+    // True when the session belongs to a MeshCentral administrator (same test as the admin page itself, admin.js)
+    obj.isPluginAdmin = function(myparent) {
+        try { return (myparent != null && myparent.user != null && (myparent.user.siteadmin & 0xFFFFFFFF) != 0); } catch (e) { return false; }
+    };
+
     // Config set History rules, applied to a batch as it arrives. Categories only mean something for
     // journald (on Windows LogName is the event log, which historyLogs already selects); sources
     // apply everywhere. Returns the events to store.
@@ -1576,6 +1581,113 @@ body.night #pluginEventLog {
         var srcs = obj.elRules(cfg.historySources, cfg.historySourcesMode);
         if (cats == null && srcs == null) return events;
         return events.filter(function (e) { return e != null && obj.elAllowed(cats, e.LogName) && obj.elAllowed(srcs, e.ProviderName); });
+    };
+
+    // ---- Alerts -------------------------------------------------------------------------------
+    // Alert rules live in the config set (cfg.alerts), so they follow the same node / mesh
+    // assignment as the collection rules. They are evaluated on the server against every batch as
+    // it arrives - before the History include/exclude rules, so an event that is not stored can
+    // still raise an alert. A firing rule dispatches a MeshCentral device event (etype 'node',
+    // action 'eventlogalert'), which is stored in the device's Events list.
+    obj.ALERT_MAX_EVENT_AGE_MS = 60 * 60 * 1000; // ignore events older than this: a fresh agent sends up to 24 h of backlog
+    obj._alertHits = {};   // nodeid|ruleid -> [arrival ms, ...] of matches inside the rule's window
+    obj._alertFired = {};  // nodeid|ruleid -> ms of the last alert (cooldown)
+
+    // "1112, 100-199" -> matcher(value), or null when empty
+    obj.alertIdMatcher = function(str) {
+        var singles = {}, ranges = [], any = false;
+        String(str == null ? '' : str).split(',').forEach(function (part) {
+            part = part.trim(); if (part == '') return;
+            var m = part.match(/^(\d+)\s*-\s*(\d+)$/);
+            if (m) { var a = Number(m[1]), b = Number(m[2]); if (b >= a) { ranges.push([a, b]); any = true; } }
+            else if (/^\d+$/.test(part)) { singles[String(Number(part))] = true; any = true; }
+        });
+        if (!any) return null;
+        return function (id) {
+            if (id == null || !/^\d+$/.test(String(id))) return false;
+            var n = Number(id);
+            if (singles[String(n)]) return true;
+            for (var i = 0; i < ranges.length; i++) { if (n >= ranges[i][0] && n <= ranges[i][1]) return true; }
+            return false;
+        };
+    };
+
+    // compile one rule's filters once per batch. Empty filters match everything.
+    obj.alertCompile = function(rule) {
+        var levels = Array.isArray(rule.levels) ? rule.levels.map(Number).filter(function (n) { return !isNaN(n); }) : [];
+        var text = (typeof rule.text == 'string' && rule.text.trim() != '') ? rule.text.trim().substring(0, 256).toLowerCase() : null;
+        return {
+            levels: levels.length ? levels : null,
+            logs: obj.elRules(rule.logs, 'include'),
+            sources: obj.elRules(rule.sources, 'include'),
+            ids: obj.alertIdMatcher(rule.ids),
+            text: text
+        };
+    };
+    obj.alertMatches = function(c, e) {
+        if (e == null || typeof e != 'object') return false;
+        if (c.levels != null && c.levels.indexOf(Number(e.Level)) == -1) return false;
+        if (!obj.elAllowed(c.logs, e.LogName)) return false;
+        if (!obj.elAllowed(c.sources, e.ProviderName)) return false;
+        if (c.ids != null && !c.ids(e.Id)) return false;
+        if (c.text != null && String(e.Message == null ? '' : e.Message).toLowerCase().indexOf(c.text) == -1) return false;
+        return true;
+    };
+    obj.alertEventTime = function(e) { // ms since epoch of the event, 0 when unknown
+        var v = Array.isArray(e.TimeCreated) ? e.TimeCreated[0] : e.TimeCreated;
+        var m = String(v).match(/\d+/);
+        return m ? Number(m[0]) : 0;
+    };
+
+    // Evaluate the node's alert rules against a freshly received batch. Never throws.
+    obj.evaluateAlerts = function(myparent, cfg, batch) {
+        try {
+            if (cfg == null || !Array.isArray(cfg.alerts) || cfg.alerts.length == 0 || !Array.isArray(batch)) return;
+            var now = Date.now(), nodeid = myparent.dbNodeKey;
+            var fresh = batch.filter(function (e) { // only recent events can alert
+                if (e == null || typeof e != 'object') return false;
+                var t = obj.alertEventTime(e);
+                return (t == 0) || ((now - t) <= obj.ALERT_MAX_EVENT_AGE_MS);
+            });
+            if (fresh.length == 0) return;
+            cfg.alerts.slice(0, 50).forEach(function (rule, idx) {
+                if (rule == null || typeof rule != 'object' || rule.enabled === false) return;
+                var c = obj.alertCompile(rule);
+                var matches = fresh.filter(function (e) { return obj.alertMatches(c, e); });
+                if (matches.length == 0) return;
+                var key = nodeid + '|' + String(rule.id || ('r' + idx));
+                var threshold = Math.floor(Number(rule.threshold)); if (!(threshold >= 1)) threshold = 1;
+                var windowMin = Number(rule.windowMin); if (!(windowMin >= 1)) windowMin = 10;
+                var cooldownMin = Number(rule.cooldownMin); if (isNaN(cooldownMin) || cooldownMin < 0) cooldownMin = 5;
+                var hits = (obj._alertHits[key] || []).filter(function (t) { return (now - t) < windowMin * 60000; });
+                for (var i = 0; i < matches.length; i++) hits.push(now);
+                if (hits.length > 1000) hits = hits.slice(-1000);
+                obj._alertHits[key] = hits;
+                if (hits.length < threshold) return;
+                var last = obj._alertFired[key];
+                if (last != null && (now - last) < cooldownMin * 60000) return;
+                obj._alertFired[key] = now;
+                obj._alertHits[key] = [];
+                obj.dispatchAlert(myparent, rule, matches, hits.length, windowMin, threshold);
+            });
+        } catch (e) { console.log('EVENTLOG: alert evaluation error: ' + (e.message || e)); }
+    };
+
+    obj.dispatchAlert = function(myparent, rule, matches, total, windowMin, threshold) {
+        try {
+            var last = matches[matches.length - 1];
+            var oneLine = function (s, n) { s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim(); return (s.length > n) ? s.substring(0, n - 3) + '...' : s; };
+            var name = oneLine(rule.name || 'Unnamed rule', 80);
+            var msg = 'Event Log alert "' + name + '": ';
+            msg += (threshold > 1) ? (total + ' matching events within ' + windowMin + ' min') : 'matching event';
+            msg += ' - latest [' + oneLine(last.LogName, 40) + ' / ' + oneLine(last.ProviderName, 60) + ((last.Id != null && last.Id !== '') ? ' / ' + oneLine(last.Id, 20) : '') + '] ' + oneLine(last.Message, 200);
+            var event = {
+                etype: 'node', action: 'eventlogalert',
+                nodeid: myparent.dbNodeKey, meshid: myparent.dbMeshKey, domain: myparent.domain.id,
+                msg: msg, rule: name, count: total
+            };
+            obj.meshServer.DispatchEvent(['*', myparent.dbMeshKey, myparent.dbNodeKey], myparent, event);
+        } catch (e) { console.log('EVENTLOG: could not dispatch the alert event: ' + (e.message || e)); }
     };
 
     // send a message to a connected agent, if possible. Returns true when sent.
@@ -1681,6 +1793,7 @@ body.night #pluginEventLog {
                 batch.forEach(function (e) { var m = (e != null) ? String(e.TimeCreated).match(/\d+/) : null; if (m && Number(m[0]) > batchMaxTc) batchMaxTc = Number(m[0]); });
                 obj.nodeConfig(myparent.dbNodeKey, myparent.dbMeshKey, command.uid)
                 .then(function (cfg) {
+                    obj.evaluateAlerts(myparent, cfg, batch);   // before the History rules drop anything
                     return obj.meshServer.pluginHandler.eventlog_db.addEventsFor(myparent.dbNodeKey, obj.applyCollectionFilters(batch, cfg, command.os));
                 })
                 .then(function (res) {
@@ -1770,29 +1883,32 @@ body.night #pluginEventLog {
             break;
         }
         case 'adminSaveConfig': {
+            // Every outcome is reported back to the admin page, so it can show whether the save worked.
+            var sendAdmin = function(o) { try { o.action = 'plugin'; o.plugin = 'eventlog'; myobj.parent.ws.send(JSON.stringify(o)); } catch (e) { } };
+            if (!obj.isPluginAdmin(myparent)) { sendAdmin({ method: 'adminSaveFailed', error: 'Administrator rights are required to change the configuration.' }); break; }
             obj._cfgCache = {};   // ingest filters pick up the change with the next batch
-            let opts = {...command.opts, ...{}};
-            var selected = null;
-            if (command.id == '_default') {
-                obj.db.updateDefaultConfig(opts)
-                .then(() => { if (opts.retentionDays != null && typeof obj.db.setRetention == 'function') obj.db.setRetention(opts.retentionDays); })
-                .catch((e) => console.log('EVENTLOG: Something went wrong saving the config'));
-            } else {
-                obj.db.updateConfig(command.id, opts)
-                .then((d) => {
-                  selected = d.insertedId || command.id;
-                  return obj.db.getAllConfigSets();
-                })
-                .then((d) => {
-                  var x = { action: "plugin", plugin: "eventlog", method: "adminUpdateConfigSets", sets: d };
-                  x.selected = selected;
-                  myobj.parent.ws.send(JSON.stringify(x));
-                })
-                .catch((e) => console.log('EVENTLOG: Something went wrong saving the config', e));
-            }
+            var opts = {...command.opts, ...{}};
+            var isDefault = (command.id == '_default');
+            var saved = isDefault
+                ? obj.db.updateDefaultConfig(opts).then(function () {
+                    if (opts.retentionDays != null && typeof obj.db.setRetention == 'function') obj.db.setRetention(opts.retentionDays);
+                    return '';
+                  })
+                : obj.db.updateConfig(command.id, opts).then(function (d) { return (d != null && d.insertedId) || command.id; });
+            saved
+            .then(function (savedId) {
+                return obj.db.getAllConfigSets().then(function (sets) {
+                    sendAdmin({ method: 'adminUpdateConfigSets', sets: sets, selected: savedId, saved: true, defaultSet: isDefault, name: opts.name });
+                });
+            })
+            .catch(function (e) {
+                console.log('EVENTLOG: Something went wrong saving the config: ' + ((e && e.message) || e));
+                sendAdmin({ method: 'adminSaveFailed', error: String((e && e.message) || e).substring(0, 200) });
+            });
             break;
         }
         case 'adminDeleteConfig': {
+            if (!obj.isPluginAdmin(myparent)) break;
             obj._cfgCache = {};
             obj.db.deleteConfigSet(command.id)
             .then((d) => {
@@ -1803,6 +1919,7 @@ body.night #pluginEventLog {
             break;
         }
         case 'adminAssignConfig': { // configId, nodes, meshes
+            if (!obj.isPluginAdmin(myparent)) break;
             obj._cfgCache = {};
             obj.db.assignConfig(command.configId, command.selection)
             .then(obj.db.getConfigAssignments)
