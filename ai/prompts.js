@@ -105,6 +105,7 @@ const FACTORY = {
         'You are a read-only troubleshooting assistant for ONE MeshCentral device: "{{device}}"{{os}}.',
         'You help a technician understand its {{logKind}} and device data. You cannot change anything on the device and cannot run commands.',
         'Current time: {{now}}. Event times ("t") are Unix epoch milliseconds (UTC).',
+        '{{timezone}}',
         '{{window}}',
         '{{osNotes}}',
         '',
@@ -158,6 +159,7 @@ const PLACEHOLDERS = Object.freeze({
     logKind: 'What the logs are, e.g. "Windows Event Log events" or "systemd journal entries (journald)"',
     osNotes: 'Notes for the operating system (Linux: journal fields and commands); empty for Windows',
     now: 'Current time (ISO 8601, UTC)',
+    timezone: 'Line with the technician\'s time zone (from the browser) and the current time there, asking for times in that zone; empty when the browser sent none. A base template without it gets no time zone, and answers give times in UTC',
     window: 'Line with the time window of interest; empty when there is none',
     nonce: 'Random marker of this conversation that fences event data as untrusted',
     tools: 'The tools section, or the summary-only note when the model gets no tools',
@@ -173,6 +175,31 @@ function iso(t) {
     if (t == null || t === '') return null;
     const d = new Date(typeof t === 'number' ? t : String(t));
     return isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+// ctx.tz = { name: IANA zone or null, offsetMin: minutes east of UTC or null } (checked in ai/index.js tzOf)
+function tzOffset(min) {
+    const a = Math.abs(min);
+    return 'UTC' + (min < 0 ? '-' : '+') + String(Math.floor(a / 60)).padStart(2, '0') + ':' + String(a % 60).padStart(2, '0');
+}
+function tzLine(tz, now) {
+    if (!tz || typeof tz !== 'object') return '';
+    const name = typeof tz.name === 'string' && tz.name.length <= 64 && /^[A-Za-z_+\-\/0-9]+$/.test(tz.name) ? tz.name : null;
+    const off = Number.isInteger(tz.offsetMin) && tz.offsetMin >= -840 && tz.offsetMin <= 840 ? tz.offsetMin : null;
+    if (!name && off == null) return '';
+    const t = new Date(now).getTime();
+    let local = null;
+    if (name) {
+        try {
+            const f = new Intl.DateTimeFormat('en-CA', { timeZone: name, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+            const p = {}; f.formatToParts(new Date(t)).forEach((x) => { p[x.type] = x.value; });
+            local = p.year + '-' + p.month + '-' + p.day + ' ' + p.hour + ':' + p.minute;
+        } catch (e) { local = null; }
+    }
+    if (local == null && off != null) local = new Date(t + off * 60000).toISOString().slice(0, 16).replace('T', ' ');
+    const zone = name ? name + (off != null ? ' (' + tzOffset(off) + ')' : '') : tzOffset(off);
+    return 'The technician\'s time zone is ' + zone + (local ? '; the current time there is ' + local : '') +
+        '. Write times for the technician in that zone, e.g. "18:53", not in UTC (convert the epoch milliseconds).';
 }
 
 function values(ctx) {
@@ -204,12 +231,14 @@ function values(ctx) {
     }
     const win = ctx.window && (ctx.window.from != null || ctx.window.to != null)
         ? 'Time window of interest: ' + (iso(ctx.window.from) || 'start') + ' to ' + (iso(ctx.window.to) || 'now') + '.' : '';
+    const nowIso = iso(ctx.now) || new Date().toISOString();
     return {
         device: device,
         os: os ? ' (' + os + ')' : '',
         logKind: os === 'Linux' ? 'systemd journal entries (journald)' : (os === 'Windows' ? 'Windows Event Log events' : 'event log events'),
         osNotes: osNotes,
-        now: iso(ctx.now) || new Date().toISOString(),
+        now: nowIso,
+        timezone: tzLine(ctx.tz, nowIso),
         window: win,
         nonce: cleanNonce(ctx.nonce),
         tools: T.join('\n'),

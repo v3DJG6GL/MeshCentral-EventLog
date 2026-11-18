@@ -94,6 +94,7 @@ module.exports.eventlog = function (parent) {
       'elGripDown',
       'elGripReset',
       'elFitAvail',
+      'elViewBox',
       'elFitHeight',
       'elResetSizes',
       'elVSplitDown',
@@ -493,10 +494,11 @@ module.exports.eventlog = function (parent) {
         for (var i in rows) {
             var ev = rows[i];
             if (map[ev.sig] == null) {
-                map[ev.sig] = { ev: ev, count: 0, times: [] };
+                map[ev.sig] = { ev: ev, count: 0, times: [], evs: [] };
                 out.push(map[ev.sig]);
             }
             map[ev.sig].count++;
+            map[ev.sig].evs.push(ev);   // every occurrence, in display order (citations of the ones further down)
             if (map[ev.sig].times.length < 24) map[ev.sig].times.push(ev.time);
         }
         return out;
@@ -741,10 +743,11 @@ body.night #pluginEventLog {
                 '<div id=evlAiSay class=evlSr role=status aria-live=polite></div></div>');
             ph.elRenderShell();
             if (typeof ResizeObserver == 'function') {   // the page can change width without a window resize (side menu)
-                try { if (ph._aiRO) ph._aiRO.disconnect(); ph._aiRO = new ResizeObserver(function() { try { pluginHandler.eventlog.aiLayout(); } catch (e) { } }); ph._aiRO.observe(Q('evlWrap')); } catch (e) { }
+                try { if (ph._aiRO) ph._aiRO.disconnect(); ph._aiRO = new ResizeObserver(function() { try { pluginHandler.eventlog.aiLayout(); } catch (e) { } }); ph._aiRO.observe(Q('evlWrap')); ph._aiRO.observe(Q('evlToolbar')); } catch (e) { }
             }
         }
         ph.elFitHeight();   // the tab may have been hidden during the last render
+        ph.aiLayout();      // the Ask panel's height too (fit to the window, or the height set with its grip)
         if (!ph._fitBound) { ph._fitBound = true; window.addEventListener('resize', function() { pluginHandler.eventlog.elFitHeight(); pluginHandler.eventlog.aiLayout(); }); }
         return true;
     };
@@ -900,13 +903,16 @@ body.night #pluginEventLog {
         var dens = (st.rows == 'dense') ? ' evlDense' : (st.rows == 'wrap') ? ' evlWrap' : '';
         var hstyle = st.heights[st.layout] ? ' style="height:' + st.heights[st.layout] + 'px;max-height:none;min-height:0"' : '';
         // gutter column with the citation chips of the conversation in focus (only while it cites something)
-        var cm = ph.aiCiteMap(), gut = (cm.n > 0), gutTh = gut ? '<th class=evlCCite style=width:52px><span class=evlSr>Cited</span></th>' : '';
+        // (folded rows can carry several: the column is as wide as the widest row's chips)
+        var cm = ph.aiCiteMap(), gut = (cm.n > 0), gl = {}, gw = 52;
+        if (gut) frows.forEach(function(r) { var l = ph.aiRowCites(r, cm); gl[r.ev.key] = l; gw = Math.max(gw, ph.aiGutterW(l)); });
+        var gutTh = gut ? '<th class=evlCCite style=width:' + gw + 'px><span class=evlSr>Cited</span></th>' : '';
         var rowHtml = function(r, mode) {
             var ev = r.ev;
             var selCls = (mode == 'viewer' && st.selected == ev.key) || (mode == 'ledger' && st.expanded[ev.key]) ? ' class=evlSelRow' : '';
             var rep = (r.count > 1) ? '<span class=evlRep title="Identical event repeated"><b>&times;' + r.count + '</b></span>' : '';
             var h = '<tr id=evlR_' + ev.key + selCls + ' onclick="return pluginHandler.eventlog.elRowClick(\'' + ev.key + '\')">';
-            if (gut) h += ph.aiGutterTd(r, cm);
+            if (gut) h += ph.aiGutterTd(r, cm, gl[ev.key]);
             h += '<td class=evlCLv><span class="evlLv ' + ev.levelCls + '"><i></i>' + esc(ev.levelName) + '</span></td>';
             h += '<td class="evlCTm evlMono">' + ph.elFmtTime(ev.time) + '</td>';
             if (mode == 'ledger') h += '<td class=evlCLog title="' + esc(ev.log) + '">' + esc(ev.log) + '</td>';
@@ -932,25 +938,28 @@ body.night #pluginEventLog {
             h += '<div class=evlSplit title="Drag to change the list height &middot; double-click to reset" onpointerdown="return pluginHandler.eventlog.elGripDown(event,\'evlVList\')" ondblclick="return pluginHandler.eventlog.elGripReset()"></div>';
             if (selRep == null && frows.length) { selRep = frows[0]; st.selected = selRep.ev.key; }
             h += '<div class=evlDetails id=evlDetails>';
+            // a cited occurrence further down a folded group is shown with its own record (aiOccOf)
+            var occ = selRep ? ph.aiOccOf(selRep) : null, dev = (selRep && occ) ? occ.ev : (selRep ? selRep.ev : null);
             if (selRep) {
                 h += '<div class=evlDTabs>' +
                      '<button class="' + (st.dtab == 'general' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetDTab(\'general\')">General</button>' +
                      '<button class="' + (st.dtab == 'json' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetDTab(\'json\')">Details (JSON)</button><span class=sp></span>' +
-                     ph.aiExplainBtn(selRep.ev).replace('<button ', '<button style=margin:4px ') +
-                     '<button class="evlBtn mini" style=margin:4px title="' + (st.dtab == 'json' ? 'Copy the JSON shown below' : 'Copy this event as text (log, source, date, ID, level, message)') + '" onclick="return pluginHandler.eventlog.elCopy(\'' + selRep.ev.key + '\',\'' + (st.dtab == 'json' ? 'json' : 'details') + '\',this)">Copy</button>' +
+                     ph.aiExplainBtn(dev).replace('<button ', '<button style=margin:4px ') +
+                     (ph.byKey[dev.key] ? '<button class="evlBtn mini" style=margin:4px title="' + (st.dtab == 'json' ? 'Copy the JSON shown below' : 'Copy this event as text (log, source, date, ID, level, message)') + '" onclick="return pluginHandler.eventlog.elCopy(\'' + dev.key + '\',\'' + (st.dtab == 'json' ? 'json' : 'details') + '\',this)">Copy</button>' : '') +
                      '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elFilterBy(\'source\',\'' + selRep.ev.key + '\')">Filter: this source</button>' +
-                     '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elFilterBy(\'id\',\'' + selRep.ev.key + '\')">Filter: ID ' + esc(selRep.ev.id) + '</button></div>';
+                     '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elFilterBy(\'id\',\'' + selRep.ev.key + '\')">Filter: ID ' + esc(dev.id) + '</button></div>' +
+                     (occ ? ph.aiOccBarHtml(selRep, occ) : '');
                 if (st.dtab == 'json') {
-                    h += '<pre class=evlRaw style="margin:10px 13px">' + esc(JSON.stringify(ph.elRawOf(selRep.ev), null, 2)) + '</pre>';
+                    h += '<pre class=evlRaw style="margin:10px 13px">' + esc(JSON.stringify(ph.elRawOf(dev), null, 2)) + '</pre>';
                 } else {
-                    var exH = ph.aiExplainHtml(selRep.ev);   // the explanation sits beside the details
-                    h += '<div class="evlDBody' + (exH ? ' evlDBodyEx' : '') + '">' + (exH ? '<div>' : '') + '<div class=evlMsgFull>' + esc(selRep.ev.message) + '</div><dl class=evlKv>' +
-                         '<dt>' + ph.elLbl('log') + '</dt><dd>' + esc(selRep.ev.log) + '</dd><dt>Source</dt><dd title="' + esc(selRep.ev.source) + '">' + esc(selRep.ev.source) + '</dd>' +
-                         '<dt>' + ph.elLbl('id') + '</dt><dd class=evlMono>' + esc(selRep.ev.id) + '</dd><dt>Level</dt><dd>' + esc(selRep.ev.levelName) + ' (' + selRep.ev.level + ')</dd>' +
-                         (selRep.ev.unit ? '<dt>Unit</dt><dd title="' + esc(selRep.ev.unit) + '">' + esc(selRep.ev.unit) + '</dd>' : '') +
-                         (selRep.ev.pri != null ? '<dt>Priority</dt><dd>' + esc(ph.elPriName(selRep.ev.pri)) + ' (' + selRep.ev.pri + ')</dd>' : '') +
-                         '<dt>Recorded</dt><dd class=evlMono>' + ph.elFmtTime(selRep.ev.time) + '</dd>' +
-                         (selRep.count > 1 ? '<dt>Seen</dt><dd>' + selRep.count + '&times; &mdash; ' + selRep.times.slice(0, 6).map(function(t) { return ph.elFmtTime(t, true); }).join(', ') + (selRep.times.length > 6 ? '&hellip;' : '') + '</dd>' : '') +
+                    var exH = ph.aiExplainHtml(dev);   // the explanation sits beside the details
+                    h += '<div class="evlDBody' + (exH ? ' evlDBodyEx' : '') + '">' + (exH ? '<div>' : '') + '<div class=evlMsgFull>' + esc(dev.message) + '</div><dl class=evlKv>' +
+                         '<dt>' + ph.elLbl('log') + '</dt><dd>' + esc(dev.log) + '</dd><dt>Source</dt><dd title="' + esc(dev.source) + '">' + esc(dev.source) + '</dd>' +
+                         '<dt>' + ph.elLbl('id') + '</dt><dd class=evlMono>' + esc(dev.id) + '</dd><dt>Level</dt><dd>' + esc(dev.levelName) + ' (' + dev.level + ')</dd>' +
+                         (dev.unit ? '<dt>Unit</dt><dd title="' + esc(dev.unit) + '">' + esc(dev.unit) + '</dd>' : '') +
+                         (dev.pri != null ? '<dt>Priority</dt><dd>' + esc(ph.elPriName(dev.pri)) + ' (' + dev.pri + ')</dd>' : '') +
+                         '<dt>Recorded</dt><dd class=evlMono>' + ph.elFmtTime(dev.time) + '</dd>' +
+                         (selRep.count > 1 ? '<dt>Seen</dt><dd class=evlOccDd>' + selRep.count + '&times; &mdash; ' + ph.aiOccTimesHtml(selRep, 6, ', ', occ) + '</dd>' : '') +
                          '</dl>' + (exH ? '</div><div>' + exH + '</div>' : '') + '</div>';
                 }
             } else { h += '<div class=evlEmpty>Select an event to see its details.</div>'; }
@@ -985,19 +994,19 @@ body.night #pluginEventLog {
 
     obj.elRenderDetailHtml = function(r) {
         var ph = pluginHandler.eventlog, st = ph.elState();
-        var esc = EscapeHtml, ev = r.ev;
-        var h = '<div class=evlMsgFull>' + esc(ev.message) + '</div>';
+        var esc = EscapeHtml, occ = ph.aiOccOf(r), ev = occ ? occ.ev : r.ev;   // a cited occurrence further down the group
+        var h = (occ ? ph.aiOccBarHtml(r, occ) : '') + '<div class=evlMsgFull>' + esc(ev.message) + '</div>';
         h += '<div class=evlMeta><span>' + ph.elLbl('log') + ' <b>' + esc(ev.log) + '</b></span><span>Source <b>' + esc(ev.source) + '</b></span>' +
              '<span>' + ph.elLbl('id') + ' <b class=evlMono>' + esc(ev.id) + '</b></span><span>Level <b>' + esc(ev.levelName) + ' (' + ev.level + ')</b></span>' +
              (ev.unit ? '<span>Unit <b>' + esc(ev.unit) + '</b></span>' : '') +
              (ev.pri != null ? '<span>Priority <b>' + esc(ph.elPriName(ev.pri)) + ' (' + ev.pri + ')</b></span>' : '') +
              '<span>Recorded <b class=evlMono>' + ph.elFmtTime(ev.time) + '</b></span></div>';
         if (r.count > 1) {
-            h += '<div class=evlMeta><span>Occurrences (' + r.count + ')</span><span class=evlMono>' + r.times.slice(0, 12).map(function(t) { return ph.elFmtTime(t, true); }).join(' &middot; ') + (r.times.length > 12 ? ' &hellip;' : '') + '</span></div>';
+            h += '<div class=evlMeta><span>Occurrences (' + r.count + ')</span><span class="evlMono evlOccDd">' + ph.aiOccTimesHtml(r, 12, ' &middot; ', occ) + '</span></div>';
         }
         h += '<div class=evlActs>' +
-             '<button class="evlBtn mini" title="Copy this event as text (log, source, date, ID, level, message)" onclick="return pluginHandler.eventlog.elCopy(\'' + ev.key + '\',\'details\',this)">Copy details</button>' +
-             '<button class="evlBtn mini" title="Copy only the message text" onclick="return pluginHandler.eventlog.elCopy(\'' + ev.key + '\',\'message\',this)">Copy message</button>' +
+             (ph.byKey[ev.key] ? '<button class="evlBtn mini" title="Copy this event as text (log, source, date, ID, level, message)" onclick="return pluginHandler.eventlog.elCopy(\'' + ev.key + '\',\'details\',this)">Copy details</button>' +
+             '<button class="evlBtn mini" title="Copy only the message text" onclick="return pluginHandler.eventlog.elCopy(\'' + ev.key + '\',\'message\',this)">Copy message</button>' : '') +
              '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elFilterBy(\'source\',\'' + ev.key + '\')">Filter: this source</button>' +
              '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elFilterBy(\'id\',\'' + ev.key + '\')">Filter: ID ' + esc(ev.id) + '</button>' +
              '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elToggleRaw(\'' + ev.key + '\')">' + (st.raw[ev.key] ? 'Hide' : 'Show') + ' raw JSON</button>' +
@@ -1284,19 +1293,32 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         var t = Q(st.layout == 'viewer' ? 'evlVList' : 'evlScroll'), wrap = Q('evlWrap');
         if (!t || !wrap || !t.offsetParent) return 0;
-        var r = t.getBoundingClientRect(), top = r.top, bottom = window.innerHeight, sc = null;
-        for (var p = wrap.parentNode; p && p.nodeType == 1 && p != document.body && p != document.documentElement; p = p.parentNode) {
-            var oy = getComputedStyle(p).overflowY;
-            if (oy == 'auto' || oy == 'scroll') { sc = p; break; }
-        }
-        // measure from where the table sits when the page is scrolled to the top
-        if (sc) { top += sc.scrollTop; bottom = Math.min(bottom, sc.getBoundingClientRect().bottom); }
-        else top += (window.pageYOffset || 0);
+        var r = t.getBoundingClientRect(), vb = ph.elViewBox();
+        var top = r.top + vb.scroll, bottom = vb.bottom;   // measured from where the table sits when the page is scrolled to the top
         // only what sits below the table in its own column (grip, details pane, status line) counts: the Ask panel,
         // stacked below on narrow screens, must not shrink the table (that would feed back into the layout)
         var body = Q('evlBody'), stl = Q('evlStatus');
         var below = (body ? Math.max(0, body.getBoundingClientRect().bottom - r.bottom) : 0) + (stl ? stl.getBoundingClientRect().height : 0);
         return Math.max(90, Math.floor(bottom - top - below - 6));
+    };
+    // The visible part of the page that holds the tab: top/bottom in viewport px and how far it is scrolled. MeshCentral
+    // scrolls either the window or an ancestor with overflow:auto. Shared by the table fit and the Ask panel's height.
+    // Besides a scrolling ancestor, a grid cell that clips (MeshCentral's full-window layout: #column_l is overflow:hidden
+    // in a grid row between the tab bar and the footer) ends the visible part; its size never depends on the content.
+    obj.elViewBox = function() {
+        var wrap = Q('evlWrap'), sc = null, ck = null;
+        for (var p = wrap ? wrap.parentNode : null; p && p.nodeType == 1 && p != document.body && p != document.documentElement; p = p.parentNode) {
+            var cs = getComputedStyle(p), oy = cs.overflowY;
+            if (oy == 'auto' || oy == 'scroll') { sc = p; break; }
+            if (!ck && (oy == 'hidden' || oy == 'clip') && p.parentNode && p.parentNode.nodeType == 1) {
+                var pd = getComputedStyle(p.parentNode).display;
+                if (pd == 'grid' || pd == 'inline-grid' || pd == '-ms-grid') ck = p;
+            }
+        }
+        var top = 0, bottom = window.innerHeight, scroll = sc ? sc.scrollTop : (window.pageYOffset || 0);
+        if (sc) { var r = sc.getBoundingClientRect(); top = Math.max(0, r.top); bottom = Math.min(bottom, r.bottom); }
+        if (ck) { var rk = ck.getBoundingClientRect(); top = Math.max(top, rk.top); bottom = Math.min(bottom, rk.bottom); scroll += ck.scrollTop; }
+        return { top: top, bottom: bottom, scroll: scroll };
     };
     // Automatic height fills the window; a user-dragged height is kept but never grows past it.
     obj.elFitHeight = function() {
@@ -1357,6 +1379,7 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         if (st.layout == 'viewer') { st.selected = key; }
         else { st.expanded[key] = !st.expanded[key]; }
+        if (st.ai) st.ai.occ = null;   // a click on the row shows its own (top) event again
         ph.elUpdate();
         return false;
     };

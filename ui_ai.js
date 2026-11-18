@@ -78,6 +78,10 @@ module.exports.attach = function (obj) {
         var m = o || {};
         m.action = 'plugin'; m.plugin = 'eventlog'; m.pluginaction = pluginaction;
         m.nodeid = nodeid || ((typeof currentNode != 'undefined' && currentNode) ? currentNode._id : null);
+        if (pluginaction == 'aiStart' || pluginaction == 'aiSend') {   // answers give times in the technician's zone
+            try { var tz = Intl.DateTimeFormat().resolvedOptions().timeZone; if (typeof tz == 'string' && tz) m.tz = tz.slice(0, 64); } catch (e) { }
+            try { m.tzOffsetMin = -new Date().getTimezoneOffset(); } catch (e) { }
+        }
         try { meshserver.send(m); return true; } catch (e) { return false; }
     };
     obj.aiSay = function (text) {
@@ -1177,44 +1181,142 @@ module.exports.attach = function (obj) {
     obj.aiCiteMap = function () {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, fid = a.focus || a.chat;
         if (a._cm && a._cm.v == a.citeVer && a._cm.f == fid) return a._cm;
-        var cm = { v: a.citeVer, f: fid, cid: fid, byKey: {}, bySig: {}, byId: {}, n: 0 };
+        var cm = { v: a.citeVer, f: fid, cid: fid, byKey: {}, bySig: {}, byId: {}, refs: {}, n: 0 };
         var push = function (map, k, r) { if (k == null) return; if (!map[k]) map[k] = []; if (map[k].indexOf(r) < 0) map[k].push(r); };
         var c = fid ? a.convs[fid] : null;
         if (c) c.turns.forEach(function (t) {
-            for (var r in t.cites) { var ci = t.cites[r]; push(cm.byKey, ci.ev.key, r); push(cm.bySig, ci.ev.sig, r); push(cm.byId, ci.id, r); cm.n++; }
+            for (var r in t.cites) { var ci = t.cites[r]; cm.refs[r] = ci; push(cm.byKey, ci.ev.key, r); push(cm.bySig, ci.ev.sig, r); push(cm.byId, ci.id, r); cm.n++; }
         });
         a._cm = cm;
         return cm;
     };
-    obj.aiRowRefs = function (r, cm) {
-        var ev = r.ev, id = (ev._raw && ev._raw._id != null) ? String(ev._raw._id) : null;
-        var refs = cm.byKey[ev.key] || (id != null ? cm.byId[id] : null) || null, inside = false;
-        if (!refs && r.count > 1 && cm.bySig[ev.sig]) { refs = cm.bySig[ev.sig]; inside = true; }
-        return refs ? { refs: refs, inside: inside } : null;
+    obj.aiRecId = function (ev) { return (ev && ev._raw && ev._raw._id != null) ? String(ev._raw._id) : null; };
+    // The citations that belong to a displayed row: its own event or, when folded, any of its occurrences (matched by
+    // key or record id, then by signature and time), ordered by E-number. Each { ref, ci, n, ev }: n is the position
+    // of the cited occurrence in the group (1 = the row's own event, 0 = same event text but not among the loaded
+    // events), ev the loaded occurrence (null when n == 0).
+    obj.aiRowCites = function (r, cm) {
+        var ph = pluginHandler.eventlog, ev = r.ev, cand = [], out = [];
+        var add = function (l) { if (l) l.forEach(function (x) { if (cand.indexOf(x) < 0) cand.push(x); }); };
+        add(cm.byKey[ev.key]);
+        var id = ph.aiRecId(ev); if (id != null) add(cm.byId[id]);
+        if (r.count > 1) add(cm.bySig[ev.sig]);
+        var evs = (r.evs && r.evs.length) ? r.evs : [ev];
+        cand.forEach(function (ref) {
+            var ci = cm.refs[ref], n = 0;
+            if (!ci) return;
+            for (var i = 0; i < evs.length && !n; i++) { var e = evs[i]; if (e.key == ci.ev.key || (ci.id != null && ph.aiRecId(e) == ci.id)) n = i + 1; }
+            for (var j = 0; j < evs.length && !n; j++) { if (evs[j].sig == ci.ev.sig && evs[j].time == ci.ev.time) n = j + 1; }
+            out.push({ ref: ref, ci: ci, n: n, ev: n ? evs[n - 1] : null });
+        });
+        out.sort(function (x, y) { return Number(x.ref.slice(1)) - Number(y.ref.slice(1)); });
+        return out;
     };
-    obj.aiGutterTd = function (r, cm) {
-        var ph = pluginHandler.eventlog, a = ph.elState().ai, x = ph.aiRowRefs(r, cm);
-        if (!x || !/^c\d+$/.test(cm.cid)) return '<td class=evlCCite></td>';
-        var ref = x.refs[0];
-        var lab = x.inside ? ('Cited as ' + ref + '. The cited occurrence is inside this group of ' + r.count) : ('Cited as ' + ref);
-        return '<td class=evlCCite><button type=button class="evlCite' + (x.inside ? ' in' : '') + (a.sel == ref ? ' sel' : '') + '" data-c=' + cm.cid + ' data-r=' + ref +
-               ' aria-label="' + lab + '" title="' + (x.inside ? 'Cited occurrence inside &times;' + r.count : 'Cited as ' + ref) + '"' +
-               ' onclick="event.stopPropagation();return pluginHandler.eventlog.aiGutter(\'' + cm.cid + '\',\'' + ref + '\')">' + ref + '</button>' +
-               (x.refs.length > 1 ? '<span class=evlCiteMore>+' + (x.refs.length - 1) + '</span>' : '') + '</td>';
+    // width (px) of the gutter for a row's chips: up to three, then a "+N" chip
+    obj.aiGutterW = function (l) {
+        var w = 12;
+        (l || []).slice(0, 3).forEach(function (x) { w += 16 + 7 * x.ref.length; });
+        if (l && l.length > 3) w += 16 + 7 * String(l.length - 3).length + 7;
+        return w;
+    };
+    obj.aiGutterTd = function (r, cm, l) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        l = l || ph.aiRowCites(r, cm);
+        if (!l.length || !/^c\d+$/.test(cm.cid)) return '<td class=evlCCite></td>';
+        var h = '<td class=evlCCite>';
+        l.slice(0, 3).forEach(function (x) {
+            var inner = (x.n != 1), lab = !inner ? 'Cited as ' + x.ref : (x.n ? 'Cited as ' + x.ref + ', occurrence ' + x.n + ' of ' + r.count : 'Cited as ' + x.ref + ', an occurrence inside this group of ' + r.count);
+            h += '<button type=button class="evlCite' + (inner ? ' in' : '') + (a.sel == x.ref ? ' sel' : '') + '" data-c=' + cm.cid + ' data-r=' + x.ref +
+                 ' aria-label="' + lab + '" title="' + lab + '"' +
+                 ' onclick="event.stopPropagation();return pluginHandler.eventlog.aiGutter(\'' + cm.cid + '\',\'' + x.ref + '\',\'' + r.ev.key + '\')">' + x.ref + '</button>';
+        });
+        if (l.length > 3) {
+            var rest = l.slice(3).map(function (x) { return x.ref; }).join(', ');
+            h += '<button type=button class="evlCite more" title="Also cited: ' + rest + '" aria-label="' + (l.length - 3) + ' more citations in this row: ' + rest + '"' +
+                 ' onclick="event.stopPropagation();return pluginHandler.eventlog.aiGutterMore(\'' + r.ev.key + '\')">+' + (l.length - 3) + '</button>';
+        }
+        return h + '</td>';
     };
     obj.aiApplySel = function () {
         var a = pluginHandler.eventlog.elState().ai, f = a.focus || a.chat;
         var nodes = document.querySelectorAll('#pluginEventLog .evlCite[data-r]');
         for (var i = 0; i < nodes.length; i++) nodes[i].classList.toggle('sel', !!a.sel && nodes[i].getAttribute('data-r') == a.sel && nodes[i].getAttribute('data-c') == f);
     };
-    // Gutter chip: highlight the ref in the answer that cited it.
-    obj.aiGutter = function (cid, ref) {
-        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+    // Gutter chip: highlight the ref in the answer that cited it; one further down a folded group also opens that
+    // occurrence in the details.
+    obj.aiGutter = function (cid, ref, key) {
+        var ph = pluginHandler.eventlog, st = ph.elState(), a = st.ai;
         a.sel = ref; a.focus = cid;
+        if (key != null && st.fold) {
+            var r = ph.elRowFor(key), x = null;
+            if (r && r.count > 1) ph.aiRowCites(r, ph.aiCiteMap()).forEach(function (y) { if (y.ref == ref) x = y; });
+            if (x && x.n != 1) { ph.aiOccShow(r, cid, ref); ph.aiFlashRow(key); }
+            else if (a.occ && a.occ.key == key) { a.occ = null; ph.elUpdate(); }
+        }
         ph.aiApplySel();
         var log = Q('evlAiLog'), chip = log ? log.querySelector('.evlCite[data-c="' + cid + '"][data-r="' + ref + '"]') : null;
         if (chip) { var r1 = chip.getBoundingClientRect(), r0 = log.getBoundingClientRect(); if (r1.top < r0.top || r1.bottom > r0.bottom) log.scrollTop += (r1.top - r0.top) - log.clientHeight / 3; }
         return false;
+    };
+    // "+N" in the gutter: open the row; its details list every cited occurrence with its chip
+    obj.aiGutterMore = function (key) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (st.layout == 'viewer') st.selected = key; else st.expanded[key] = true;
+        st.ai.occ = null;
+        ph.elUpdate();
+        return false;
+    };
+    // ---- a cited occurrence inside a folded group -----------------------------------------------------------------
+    // a.occ = { key: the group's row, cid, ref }: the details of that row show the cited occurrence instead of the top
+    obj.aiOccShow = function (r, cid, ref) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        st.ai.occ = { key: r.ev.key, cid: cid, ref: ref };
+        if (st.layout == 'viewer') st.selected = r.ev.key; else st.expanded[r.ev.key] = true;
+        ph.elUpdate();
+    };
+    // the occurrence to show for a folded row: { ref, cid, n, ev, loaded } or null (show the row's own event)
+    obj.aiOccOf = function (r) {
+        var ph = pluginHandler.eventlog, st = ph.elState(), o = st.ai ? st.ai.occ : null;
+        if (!o || !r || !st.fold || r.count < 2 || o.key != r.ev.key) return null;
+        var cm = ph.aiCiteMap();
+        if (cm.cid != o.cid) return null;
+        var x = null;
+        ph.aiRowCites(r, cm).forEach(function (y) { if (y.ref == o.ref) x = y; });
+        if (!x || x.n == 1) return null;
+        return { ref: x.ref, cid: o.cid, n: x.n, ev: x.ev || x.ci.ev, loaded: !!x.ev };
+    };
+    obj.aiOccBarHtml = function (r, o) {
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        var back = (st.sort.key == 'time' && st.sort.dir == 1) ? 'Show the oldest occurrence' : 'Show the newest occurrence';
+        var where = o.n ? 'Occurrence ' + o.n + ' of ' + r.count : 'Cited occurrence, not among the loaded events';
+        return '<div class=evlOccBar role=note><span class="evlCite static" aria-label="Cited as ' + o.ref + '">' + o.ref + '</span>' +
+               '<span>' + where + ', recorded <span class=evlMono>' + ph.elFmtTime(o.ev.time) + '</span></span>' +
+               '<button class=evlLinkBtn onclick="event.stopPropagation();return pluginHandler.eventlog.aiOccClear()">' + back + '</button></div>';
+    };
+    obj.aiOccClear = function () {
+        var ph = pluginHandler.eventlog;
+        ph.elState().ai.occ = null;
+        ph.elUpdate();
+        return false;
+    };
+    // the "Seen"/"Occurrences" times of a folded row: the first max, plus any cited one further down; cited times
+    // carry their chip, the one shown in the details is marked
+    obj.aiOccTimesHtml = function (r, max, sep, o) {
+        var ph = pluginHandler.eventlog, cm = ph.aiCiteMap(), evs = (r.evs && r.evs.length) ? r.evs : null;
+        if (!evs) return r.times.slice(0, max).map(function (t) { return ph.elFmtTime(t, true); }).join(sep) + (r.times.length > max ? '&hellip;' : '');
+        var by = {}, cid = /^c\d+$/.test(String(cm.cid)) ? cm.cid : null;
+        if (cid && cm.n) ph.aiRowCites(r, cm).forEach(function (x) { if (x.n) (by[x.n] = by[x.n] || []).push(x.ref); });
+        var parts = [], gap = false;
+        evs.forEach(function (e, i) {
+            var n = i + 1, refs = by[n];
+            if (n > max && !refs) { gap = true; return; }
+            var t = ph.elFmtTime(e.time, true);
+            var h = (gap ? '&hellip; ' : '') + '<span class="evlOcc' + (refs ? ' cited' : '') + (o && o.n == n ? ' cur' : '') + '"' + (o && o.n == n ? ' aria-current=true' : '') + '><span class=t>' + t + '</span>';
+            if (refs) refs.forEach(function (ref) { h += ' ' + ph.aiChipHtml(cid, ref, n == 1 ? '' : 'in', 'Show occurrence ' + n + ', cited as ' + ref); });
+            parts.push(h + '</span>');
+            gap = false;
+        });
+        return parts.join(sep) + (gap ? '&hellip;' : '');
     };
     // Answer chip: find the cited event in the table, select it, flash it and scroll it into view.
     obj.aiGotoCite = function (cid, ref) {
@@ -1244,6 +1346,8 @@ module.exports.attach = function (obj) {
         for (var i = 0; i < rows.length && !hit; i++) { if (same(rows[i].ev)) hit = rows[i]; }
         if (!hit && st.fold) { for (var j = 0; j < rows.length && !hit; j++) { if (rows[j].ev.sig == ev.sig && rows[j].count > 1) hit = rows[j]; } }
         if (hit) {
+            a.occ = null;
+            if (st.fold && hit.count > 1 && !same(hit.ev)) a.occ = { key: hit.ev.key, cid: cid, ref: ref };   // shown in the details
             if (st.layout == 'viewer') st.selected = hit.ev.key; else st.expanded[hit.ev.key] = true;
             ph.elUpdate();
             ph.aiFlashRow(hit.ev.key);
@@ -1368,6 +1472,90 @@ module.exports.attach = function (obj) {
         main.classList.toggle('evlDiagOn', st.view == 'diag');
         main.style.setProperty('--evl-ai-w', (st.ai.w || 400) + 'px');
         if (stack != was) ph.elFitHeight();
+        ph.aiFitPanel();
+    };
+    // ---- Ask panel height -----------------------------------------------------------------------------------------
+    // The panel's height does not follow the event table: by default it fits the window (docked: from its top edge to
+    // the bottom of the visible page; stacked below the table: the visible height), at least AI_MIN_H. A height set
+    // with the grip at its bottom edge is kept per browser (evl_ai_h; empty = automatic) but never grows past the fit.
+    // The table's own fit (elFitAvail) only measures its column, so the two never feed into each other.
+    obj.aiUserH = function () {
+        var ph = pluginHandler.eventlog;
+        if (typeof ph._aiH != 'number') { var v = 0; try { v = Number(getstore('evl_ai_h', '')) || 0; } catch (e) { } ph._aiH = (v >= 360) ? Math.round(v) : 0; }
+        return ph._aiH;
+    };
+    obj.aiSetUserH = function (h) {
+        var ph = pluginHandler.eventlog;
+        ph._aiH = h ? Math.max(360, Math.round(h)) : 0;
+        try { putstore('evl_ai_h', ph._aiH ? String(ph._aiH) : ''); } catch (e) { }
+        ph.aiFitPanel();
+    };
+    // the automatic (fit to window) height in px; 0 = unknown (tab hidden)
+    obj.aiFitH = function () {
+        var ph = pluginHandler.eventlog, main = Q('evlMain'), MIN = 360;
+        if (!main || !main.offsetParent) return 0;
+        var vb = ph.elViewBox();
+        if (main.classList.contains('evlStack')) return Math.max(MIN, Math.floor(vb.bottom - vb.top - 24));
+        // docked: the panel's top is the row's top (the panel itself may be sticky in Diagnosis, so measure the row),
+        // taken as if the page were scrolled to the top; 6 px below like the table, so both end on the same line
+        var top = main.getBoundingClientRect().top + vb.scroll;
+        return Math.max(MIN, Math.floor(vb.bottom - top - 6));
+    };
+    obj.aiFitPanel = function () {
+        var ph = pluginHandler.eventlog, el = Q('evlAi');
+        if (!el || el.hidden) return;
+        var fit = ph.aiFitH(), uh = ph.aiUserH();
+        if (!fit) return;   // hidden tab: keep the last height, the ResizeObserver comes back when it is shown
+        var h = uh ? Math.min(uh, fit) : fit;
+        ph.aiApplyH(h);
+        var g = Q('evlAiHGrip');
+        if (g) {
+            g.setAttribute('aria-valuemin', '360'); g.setAttribute('aria-valuemax', String(fit)); g.setAttribute('aria-valuenow', String(h));
+            g.setAttribute('aria-valuetext', h + ' pixels' + (uh ? '' : ', fits the window'));
+        }
+        var rb = Q('evlAiHReset'); if (rb) rb.hidden = !uh;
+    };
+    // set the height and keep the conversation pinned to its end if it was there (streaming keeps following)
+    obj.aiApplyH = function (h) {
+        var el = Q('evlAi'), log = Q('evlAiLog');
+        if (!el || el.style.height == h + 'px') return;
+        var stick = log ? (log.scrollHeight - log.scrollTop - log.clientHeight < 48) : false;
+        el.style.height = h + 'px';
+        if (stick && log) log.scrollTop = log.scrollHeight;
+    };
+    obj.aiHGripDown = function (ev) {
+        var ph = pluginHandler.eventlog, el = Q('evlAi'), g = ev.currentTarget || ev.target;
+        if (!el || (ev.button != null && ev.button > 0)) return false;
+        ev.preventDefault();
+        try { g.setPointerCapture(ev.pointerId); } catch (e) { }
+        g.classList.add('active');
+        var y0 = ev.clientY, h0 = el.getBoundingClientRect().height, fit = ph.aiFitH() || 1e6, h = 0;
+        var mv = function (e) { h = Math.round(Math.max(360, Math.min(fit, h0 + e.clientY - y0))); ph.aiApplyH(h); };
+        var up = function () {
+            g.removeEventListener('pointermove', mv); g.removeEventListener('pointerup', up); g.removeEventListener('pointercancel', up);
+            g.classList.remove('active');
+            if (h) ph.aiSetUserH(h >= fit ? 0 : h);   // dragged all the way down: back to the automatic height
+        };
+        g.addEventListener('pointermove', mv); g.addEventListener('pointerup', up); g.addEventListener('pointercancel', up);
+        return false;
+    };
+    obj.aiHGripKey = function (ev) {
+        var ph = pluginHandler.eventlog, el = Q('evlAi');
+        var d = { ArrowUp: -24, ArrowDown: 24, PageUp: -120, PageDown: 120 }[ev.key];
+        if (!el || (d == null && ev.key != 'Home' && ev.key != 'End')) return true;
+        ev.preventDefault();
+        var fit = ph.aiFitH() || 1e6, cur = Math.round(el.getBoundingClientRect().height) || Number(String(el.style.height).replace('px', '')) || fit;
+        if (ev.key == 'Home') ph.aiSetUserH(360);
+        else if (ev.key == 'End') ph.aiSetUserH(0);
+        else { var h = Math.max(360, Math.min(fit, cur + d)); ph.aiSetUserH(h >= fit ? 0 : h); }
+        return false;
+    };
+    obj.aiHGripReset = function () {
+        var ph = pluginHandler.eventlog, rb = Q('evlAiHReset'), back = (rb && document.activeElement === rb);
+        ph.aiSetUserH(0);
+        if (back) { var g = Q('evlAiHGrip'); if (g) g.focus(); }   // the Reset height button hides itself
+        ph.aiSay('The assistant panel fits the window again.');
+        return false;
     };
     obj.aiSplitDown = function (ev) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, panel = Q('evlAi'), main = Q('evlMain'), g = ev.currentTarget || ev.target;
@@ -1434,7 +1622,10 @@ module.exports.attach = function (obj) {
                 ' onpointerdown="return pluginHandler.eventlog.aiSplitDown(event)" ondblclick="return pluginHandler.eventlog.aiSplitReset()" onkeydown="return pluginHandler.eventlog.aiSplitKey(event)"></div>' +
                 '<div class=evlAiHd id=evlAiHd></div><div class=evlAiStripSlot id=evlAiStripSlot></div>' +
                 '<div class=evlAiLog id=evlAiLog role=log aria-live=polite aria-busy=false aria-label="Conversation"></div>' +
-                '<div class=evlAiFt id=evlAiFt></div></div>';
+                '<div class=evlAiFt id=evlAiFt></div>' +
+                '<div class=evlAiHGrip id=evlAiHGrip role=separator tabindex=0 aria-orientation=horizontal aria-controls=evlAi aria-label="Height of the assistant panel" aria-valuemin=360' +
+                ' title="Drag to change the height, double-click to fit the window again"' +
+                ' onpointerdown="return pluginHandler.eventlog.aiHGripDown(event)" ondblclick="return pluginHandler.eventlog.aiHGripReset()" onkeydown="return pluginHandler.eventlog.aiHGripKey(event)"></div></div>';
         }
         var c = a.convs[a.chat] || null;
         QH('evlAiHd', ph.aiHeadHtml(c));
@@ -1561,7 +1752,8 @@ module.exports.attach = function (obj) {
             ft.innerHTML = '<div id=evlAiPeekSlot></div><label for=evlAiIn class=evlAiLbl>Ask about ' + ph.aiEsc(name) + '</label>' +
                 '<div class=evlAiRow><textarea id=evlAiIn rows=2 maxlength=4000 onkeydown="return pluginHandler.eventlog.aiKey(event)" oninput="pluginHandler.eventlog.aiDraft(this)"></textarea>' +
                 '<button id=evlAiSend class="evlBtn on" onclick="return pluginHandler.eventlog.aiSubmit()">Send</button></div>' +
-                '<div class=evlAiDisc>Answers can be wrong. Check the cited events before acting.' + ((function (r) { var q = (typeof r == 'number') ? r : ((r != null && typeof r.questions == 'number') ? r.questions : null); return (q != null && q <= 10) ? ' ' + q + ' questions left today.' : ''; })(acc.remaining)) + '</div>';
+                '<div class=evlAiDisc><span>Answers can be wrong. Check the cited events before acting.' + ((function (r) { var q = (typeof r == 'number') ? r : ((r != null && typeof r.questions == 'number') ? r.questions : null); return (q != null && q <= 10) ? ' ' + q + ' questions left today.' : ''; })(acc.remaining)) + '</span>' +
+                '<button id=evlAiHReset class=evlLinkBtn hidden title="Fit the panel to the window again" onclick="return pluginHandler.eventlog.aiHGripReset()">Reset height</button></div>';
             Q('evlAiIn').value = a.draft || '';
         }
         var b = Q('evlAiSend');
@@ -2127,16 +2319,21 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlCol { flex:1 1 0; min-width:0; align-self:flex-start; }
 #pluginEventLog .evlAiBtn { margin-left:auto; display:inline-flex; align-items:center; gap:6px; }
 #pluginEventLog .evlAiWhy { margin-left:auto; color:var(--evl-muted); font-size:12px; }
-#pluginEventLog .evlAi { flex:0 0 var(--evl-ai-w, 400px); max-width:60%; align-self:stretch; position:relative; min-height:440px; margin-left:10px; border:1px solid var(--evl-line); border-radius:3px; background:var(--evl-panel); }
+#pluginEventLog .evlAi { flex:0 0 var(--evl-ai-w, 400px); max-width:60%; align-self:flex-start; position:relative; height:min(82vh, 780px); min-height:360px; box-sizing:border-box; margin-left:10px; border:1px solid var(--evl-line); border-radius:3px; background:var(--evl-panel); }
 #pluginEventLog .evlAiIn { position:absolute; top:0; right:0; bottom:0; left:0; display:flex; flex-direction:column; min-height:0; }
 #pluginEventLog .evlMain.evlStack { flex-direction:column; align-items:stretch; }
 #pluginEventLog .evlMain.evlStack .evlCol { align-self:stretch; }
-#pluginEventLog .evlMain.evlStack .evlAi { flex:none; max-width:none; margin:10px 0 0; height:min(75vh, 680px); min-height:360px; }
-#pluginEventLog .evlMain.evlDiagOn:not(.evlStack) .evlAi { align-self:flex-start; position:sticky; top:0; height:min(82vh, 780px); }
+#pluginEventLog .evlMain.evlStack .evlAi { flex:none; align-self:stretch; max-width:none; margin:10px 0 0; }
+#pluginEventLog .evlMain.evlDiagOn:not(.evlStack) .evlAi { position:sticky; top:0; }
+#pluginEventLog .evlAiHGrip { flex:none; position:relative; height:9px; cursor:row-resize; touch-action:none; user-select:none; background:var(--evl-bg); border-top:1px solid var(--evl-line2); border-radius:0 0 3px 3px; outline:none; }
+#pluginEventLog .evlAiHGrip::after { content:""; position:absolute; left:50%; top:3px; width:34px; height:1px; margin-left:-17px; background:var(--evl-line); box-shadow:0 2px 0 var(--evl-line); }
+#pluginEventLog .evlAiHGrip:hover, #pluginEventLog .evlAiHGrip.active, #pluginEventLog .evlAiHGrip:focus-visible { background:var(--evl-sel); }
+#pluginEventLog .evlAiHGrip:hover::after, #pluginEventLog .evlAiHGrip.active::after, #pluginEventLog .evlAiHGrip:focus-visible::after { background:var(--evl-acc); box-shadow:0 2px 0 var(--evl-acc); }
+#pluginEventLog .evlAiHGrip:focus-visible { box-shadow:inset 0 0 0 2px var(--evl-acc); }
 #pluginEventLog .evlAiSplit { position:absolute; left:-7px; top:0; bottom:0; width:11px; cursor:col-resize; z-index:2; touch-action:none; outline:none; }
 #pluginEventLog .evlAiSplit:hover, #pluginEventLog .evlAiSplit.active, #pluginEventLog .evlAiSplit:focus-visible { background:linear-gradient(to right, transparent 5px, var(--evl-acc) 5px, var(--evl-acc) 7px, transparent 7px); }
 #pluginEventLog .evlStack .evlAiSplit { display:none; }
-#pluginEventLog .evlAiHd { display:flex; align-items:flex-start; gap:6px; padding:9px 10px 9px 13px; border-bottom:1px solid var(--evl-line2); }
+#pluginEventLog .evlAiHd { flex:none; display:flex; align-items:flex-start; gap:6px; padding:9px 10px 9px 13px; border-bottom:1px solid var(--evl-line2); }
 #pluginEventLog .evlAiTitle { flex:1 1 auto; min-width:0; }
 #pluginEventLog .evlAiHd h2 { margin:0; font-size:15px; font-weight:bold; color:var(--evl-ink); line-height:1.3; }
 #pluginEventLog .evlAiSub { font-size:12px; color:var(--evl-muted); overflow-wrap:anywhere; }
@@ -2193,13 +2390,16 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlAiStep .n, #pluginEventLog .evlAiStep .r { color:var(--evl-muted); }
 #pluginEventLog .evlAiStep .r.err { color:var(--evl-err); }
 #pluginEventLog .evlAiStep code { font-family:Consolas,"DejaVu Sans Mono",monospace; font-size:11px; background:none; color:var(--evl-ink); padding:0; overflow-wrap:anywhere; }
-#pluginEventLog .evlAiFt { border-top:1px solid var(--evl-line2); padding:9px 12px 10px; background:var(--evl-bg); border-radius:0 0 3px 3px; }
+#pluginEventLog .evlAiFt { flex:none; border-top:1px solid var(--evl-line2); padding:9px 12px 8px; background:var(--evl-bg); }
 #pluginEventLog .evlAiLbl { display:block; font-size:12px; color:var(--evl-muted); margin:0 0 4px; font-weight:normal; }
 #pluginEventLog .evlAiRow { display:flex; gap:8px; align-items:flex-end; }
 #pluginEventLog .evlAiRow textarea { flex:1 1 auto; min-width:0; font:inherit; border:1px solid var(--evl-line); background:var(--evl-input); color:var(--evl-ink); border-radius:3px; padding:6px 8px; resize:vertical; min-height:42px; max-height:220px; box-sizing:border-box; }
 #pluginEventLog .evlAiRow textarea:focus-visible { outline:2px solid var(--evl-acc); outline-offset:-1px; }
 #pluginEventLog .evlAiRow .evlBtn { min-height:42px; min-width:66px; }
-#pluginEventLog .evlAiDisc { font-size:11px; color:var(--evl-muted); margin-top:6px; line-height:1.4; }
+#pluginEventLog .evlAiDisc { font-size:11px; color:var(--evl-muted); margin-top:6px; line-height:1.4; display:flex; align-items:baseline; gap:10px; }
+#pluginEventLog .evlAiDisc > span { flex:1 1 auto; min-width:0; }
+#pluginEventLog .evlAiDisc .evlLinkBtn { flex:none; color:var(--evl-muted); white-space:nowrap; }
+#pluginEventLog .evlAiDisc .evlLinkBtn:hover, #pluginEventLog .evlAiDisc .evlLinkBtn:focus-visible { color:var(--evl-acc); }
 #pluginEventLog .evlAiPeek { border:1px solid var(--evl-acc); border-radius:3px; background:var(--evl-bg); margin:0 0 8px; font-size:12px; }
 #pluginEventLog .evlAiPeekH { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:5px 6px 5px 8px; border-bottom:1px solid var(--evl-line2); }
 #pluginEventLog .evlAiPeekH .evlBtn { margin-left:auto; }
@@ -2268,6 +2468,16 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlCite:focus-visible { outline:2px solid var(--evl-acc); outline-offset:1px; }
 #pluginEventLog .evlCitePend { border-color:var(--evl-line); color:var(--evl-muted); border-style:dashed; cursor:default; }
 #pluginEventLog .evlCiteMore { font-size:11px; color:var(--evl-muted); margin-left:2px; }
+#pluginEventLog td.evlCCite { white-space:nowrap; }
+#pluginEventLog .evlCite.more { border-color:var(--evl-line); color:var(--evl-muted); font-weight:normal; }
+#pluginEventLog .evlCite.more:hover, #pluginEventLog .evlCite.more:focus-visible { border-color:var(--evl-acc); color:var(--evl-acc); }
+#pluginEventLog .evlOccBar { display:flex; flex-wrap:wrap; align-items:center; gap:4px 10px; margin:0 0 8px; padding:6px 10px; border-left:3px solid var(--evl-acc); background:var(--evl-alt); font-size:12px; color:var(--evl-ink); }
+#pluginEventLog .evlDTabs + .evlOccBar { margin:8px 13px 0; }
+#pluginEventLog .evlOccBar .evlLinkBtn { margin-left:auto; }
+#pluginEventLog .evlKv dd.evlOccDd, #pluginEventLog .evlOccDd { white-space:normal; overflow:visible; line-height:1.7; }
+#pluginEventLog .evlOcc { white-space:nowrap; }
+#pluginEventLog .evlOcc.cited { color:var(--evl-ink); }
+#pluginEventLog .evlOcc.cur .t { font-weight:bold; color:var(--evl-acc); box-shadow:inset 0 -2px 0 var(--evl-acc); }
 #pluginEventLog table.evlLog th.evlCCite, #pluginEventLog table.evlLog td.evlCCite { padding-left:6px; padding-right:2px; overflow:visible; cursor:default; }
 #pluginEventLog table.evlLog tr.evlFlash td { animation:evlFlash 1.5s ease-out 1; }
 #pluginEventLog table.evlLog tr.evlFlash td:first-child { box-shadow:inset 3px 0 0 var(--evl-acc); }
@@ -2414,9 +2624,10 @@ body.night #evlAiDlg {
         'aiUnavailText', 'aiErrText', 'aiErrHtml', 'aiArgsShort', 'aiStepResult', 'aiUsageText', 'aiStepsHtml', 'aiStepsClick', 'aiWaitHtml', 'aiInfoLine', 'aiNotesHtml', 'aiVoteHtml',
         'aiToolWords', 'aiThinkCount', 'aiPhase', 'aiElapsed', 'aiLiveHtml', 'aiStripHtml', 'aiCaret', 'aiAnnounce', 'aiTickStart', 'aiTick', 'aiTimersStop', 'aiBtnSync',
         'aiTurnText', 'aiCopyTurn', 'aiVote', 'aiRetry', 'aiStop',
-        'aiCiteMap', 'aiRowRefs', 'aiGutterTd', 'aiApplySel', 'aiGutter', 'aiGotoCite', 'aiReveal', 'aiAfterLoad', 'aiFlashRow', 'aiNoticeHtml', 'aiNoteClose', 'aiShowAnyway',
+        'aiCiteMap', 'aiRecId', 'aiRowCites', 'aiGutterW', 'aiGutterTd', 'aiApplySel', 'aiGutter', 'aiGutterMore',
+        'aiOccShow', 'aiOccOf', 'aiOccBarHtml', 'aiOccClear', 'aiOccTimesHtml', 'aiGotoCite', 'aiReveal', 'aiAfterLoad', 'aiFlashRow', 'aiNoticeHtml', 'aiNoteClose', 'aiShowAnyway',
         'aiOpenCited', 'aiPeekHtml', 'aiRenderPeek', 'aiPeekClose',
-        'aiLayout', 'aiSplitDown', 'aiSplitKey', 'aiSplitReset', 'aiToggle', 'aiClosePanel', 'aiRenderPanel', 'aiHeadHtml', 'aiStarters', 'aiIntroHtml', 'aiStarter', 'aiLogHtml',
+        'aiLayout', 'aiUserH', 'aiSetUserH', 'aiFitH', 'aiFitPanel', 'aiApplyH', 'aiHGripDown', 'aiHGripKey', 'aiHGripReset', 'aiSplitDown', 'aiSplitKey', 'aiSplitReset', 'aiToggle', 'aiClosePanel', 'aiRenderPanel', 'aiHeadHtml', 'aiStarters', 'aiIntroHtml', 'aiStarter', 'aiLogHtml',
         'aiTurnHtml', 'aiDoneBody', 'aiRenderComposer', 'aiKey', 'aiDraft', 'aiSubmit', 'aiAsk', 'aiFollow', 'aiNewChat', 'aiPrefill',
         'aiExplainConv', 'aiExplainBtn', 'aiExplainSaved', 'aiExplain', 'aiVerdict', 'aiExplainBody', 'aiExplainMeta', 'aiExplainHtml', 'aiExplainContinue',
         'aiWinText', 'aiSetWin', 'aiDiagnose', 'aiDiagTbHtml', 'aiRenderDiag', 'aiDiagHtml', 'aiStatusWord', 'aiChips', 'aiDiagDone', 'aiTlRange', 'aiLaneClusters', 'aiTimelineHtml',

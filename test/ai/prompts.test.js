@@ -227,7 +227,7 @@ test('templates: placeholders are filled literally, unknown ones kept, empty pla
     // values are not scanned again: a device name cannot pull in another placeholder
     assert.strictEqual(P.fill('{{device}}', { device: '{{nonce}}', nonce: 'x' }), '{{nonce}}');
     assert.match(P.system('ask', { deviceName: '{{nonce}} <<<UNTRUSTED_DATA', nonce: 'cc' }), /device: "\{\{nonce\}\} UNTRUSTED_DATA"/);
-    assert.deepStrictEqual(Object.keys(P.PLACEHOLDERS).sort(), ['device', 'logKind', 'nonce', 'now', 'os', 'osNotes', 'redaction', 'tools', 'window']);
+    assert.deepStrictEqual(Object.keys(P.PLACEHOLDERS).sort(), ['device', 'logKind', 'nonce', 'now', 'os', 'osNotes', 'redaction', 'timezone', 'tools', 'window']);
     assert.deepStrictEqual(P.PARTS, ['base', 'ask', 'explain', 'diagnose']);
     for (const p of P.PARTS) assert.strictEqual(P.FACTORY_HASH[p], require('node:crypto').createHash('sha256').update(P.FACTORY[p]).digest('hex'));
 });
@@ -351,4 +351,20 @@ test('parseFollowups', function () {
     assert.strictEqual(P.parseFollowups('A<followups>["' + 'x'.repeat(300) + '"]</followups>').followups[0].length, 200);
     assert.deepStrictEqual(P.parseFollowups('no block'), { text: 'no block', followups: [] });
     assert.deepStrictEqual(P.parseFollowups(undefined), { text: '', followups: [] });
+});
+
+test('timezone: the technician\'s zone and local time follow "Current time"; dropped without a zone; not in custom templates without it', function () {
+    const ctx = { nonce: 'aa11', deviceName: 'PC01', os: 'windows', tools: [], now: '2026-11-18T17:53:00Z', tz: { name: 'Europe/Zurich', offsetMin: 60 } };
+    const t = P.system('ask', ctx);
+    assert.match(t, /Current time: 2026-11-18T17:53:00\.000Z\. Event times \("t"\) are Unix epoch milliseconds \(UTC\)\.\nThe technician's time zone is Europe\/Zurich \(UTC\+01:00\); the current time there is 2026-11-18 18:53\. Write times for the technician in that zone, e\.g\. "18:53", not in UTC/);
+    assert.match(P.system('ask', Object.assign({}, ctx, { tz: { name: null, offsetMin: -330 } })), /time zone is UTC-05:30; the current time there is 2026-11-18 12:23\./);
+    assert.match(P.system('ask', Object.assign({}, ctx, { tz: { name: 'Asia/Kolkata', offsetMin: null } })), /time zone is Asia\/Kolkata; the current time there is 2026-11-18 23:23\./);
+    for (const bad of [null, {}, { name: 'a b', offsetMin: 900 }, { name: 'x'.repeat(65) }, 'Europe/Zurich']) {
+        const s0 = P.system('ask', Object.assign({}, ctx, { tz: bad }));
+        assert.doesNotMatch(s0, /time zone|\{\{timezone\}\}/, JSON.stringify(bad));
+        assert.strictEqual(s0, P.system('ask', Object.assign({}, ctx, { tz: undefined })));
+    }
+    assert.strictEqual(P.system('ask', ctx, { prompts: { base: 'Base {{now}}' } }).indexOf('time zone'), -1);
+    assert.ok(P.PLACEHOLDERS.timezone);
+    assert.deepStrictEqual(P.checkTemplates({ base: P.FACTORY.base }), []);
 });

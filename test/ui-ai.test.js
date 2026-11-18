@@ -822,3 +822,179 @@ test('starter questions: the list the server chose for the device; none when the
     var w3 = makeDom(); grant(w3); w3.ph.aiToggle();
     assert.strictEqual(w3.document.querySelectorAll('#evlAiLog .evlAiFollow button')[0].textContent, 'Why did this device restart recently?', 'an older server: the built-in list');
 });
+
+// layout mocks: jsdom has no layout, so give the row a top, the window a height and the panel its inline height
+function mockLayout(w, o) {
+    o = o || {};
+    Object.defineProperty(w, 'innerHeight', { value: o.vh || 1350, configurable: true });
+    Object.defineProperty(w.HTMLElement.prototype, 'offsetParent', { get: function () { return this.parentNode; }, configurable: true });
+    w.HTMLElement.prototype.getBoundingClientRect = function () {
+        var top = (this.id == 'evlMain' || this.id == 'evlAi') ? (o.top || 120) : 0, h = parseFloat(this.style.height) || 0;
+        return { top: top, bottom: top + h, left: 0, right: 0, width: 0, height: h, x: 0, y: top };
+    };
+    if (o.width) Object.defineProperty(w.document.getElementById('evlWrap'), 'clientWidth', { value: o.width, configurable: true });
+}
+function key(k) { return { key: k, preventDefault: function () { } }; }
+
+test('Ask panel height: fits the window, not the table; the grip sets it, it persists and survives a rebuild; double-click resets', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w); loadHistory(w);
+    await sleep(5);
+    mockLayout(w, { vh: 1350, top: 120 });
+    ph.aiToggle();
+    var panel = doc.getElementById('evlAi'), g = doc.getElementById('evlAiHGrip');
+    assert.strictEqual(panel.style.height, (1350 - 120 - 6) + 'px');   // from its top edge to the bottom of the window
+    assert.strictEqual(g.getAttribute('role'), 'separator');
+    assert.strictEqual(g.getAttribute('aria-orientation'), 'horizontal');
+    assert.strictEqual(g.getAttribute('tabindex'), '0');
+    assert.strictEqual(g.getAttribute('aria-valuenow'), '1224');
+    assert.strictEqual(doc.getElementById('evlAiHReset').hidden, true);
+    // the window grows: so does the panel
+    Object.defineProperty(w, 'innerHeight', { value: 1000, configurable: true });
+    ph.aiLayout();
+    assert.strictEqual(panel.style.height, '874px');
+    // keyboard: up 24, page up 120, home = minimum, end = fit
+    ph.aiHGripKey(key('ArrowUp'));
+    assert.strictEqual(panel.style.height, '850px');
+    assert.strictEqual(w.store.evl_ai_h, '850');
+    ph.aiHGripKey(key('PageUp'));
+    assert.strictEqual(panel.style.height, '730px');
+    assert.strictEqual(w.store.evl_ai_h, '730');
+    assert.strictEqual(doc.getElementById('evlAiHReset').hidden, false);
+    ph.aiHGripKey(key('Home'));
+    assert.strictEqual(panel.style.height, '360px');
+    ph.aiHGripKey(key('PageDown'));
+    assert.strictEqual(w.store.evl_ai_h, '480');
+    assert.strictEqual(ph.aiHGripKey(key('a')), true);   // other keys pass through
+    // a manual height never grows past the window
+    Object.defineProperty(w, 'innerHeight', { value: 500, configurable: true });
+    ph.aiLayout();
+    assert.strictEqual(panel.style.height, '374px');
+    Object.defineProperty(w, 'innerHeight', { value: 1000, configurable: true });
+    ph.aiLayout();
+    assert.strictEqual(panel.style.height, '480px');
+    // MeshCentral rebuilds the tab: the height comes back
+    w.QH('pluginEventLog', '');
+    ph.elEnsureShell();
+    assert.strictEqual(doc.getElementById('evlAi').style.height, '480px');
+    assert.strictEqual(doc.getElementById('evlAiHGrip').getAttribute('aria-valuenow'), '480');
+    // a new page load reads it from the store
+    var w2 = makeDom(); w2.store.evl_ai_h = '600'; grant(w2); loadHistory(w2); await sleep(5);
+    mockLayout(w2, { vh: 1000, top: 120 }); w2.ph.aiToggle();
+    assert.strictEqual(w2.document.getElementById('evlAi').style.height, '600px');
+    // double-click on the grip (and the Reset height button) returns to the automatic height
+    ph.aiHGripReset();
+    assert.strictEqual(w.store.evl_ai_h, '');
+    assert.strictEqual(doc.getElementById('evlAi').style.height, '874px');
+    assert.strictEqual(doc.getElementById('evlAiHReset').hidden, true);
+    // End also means automatic
+    ph.aiHGripKey(key('ArrowUp')); assert.strictEqual(w.store.evl_ai_h, '850');
+    ph.aiHGripKey(key('End')); assert.strictEqual(w.store.evl_ai_h, '');
+});
+
+test('Ask panel height: stacked below the table it takes the visible height, at least 360 px', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w); loadHistory(w);
+    await sleep(5);
+    mockLayout(w, { vh: 900, top: 700, width: 600 });
+    ph.aiToggle();
+    assert.ok(doc.getElementById('evlMain').classList.contains('evlStack'));
+    assert.strictEqual(doc.getElementById('evlAi').style.height, (900 - 24) + 'px');   // its own top does not matter
+    ph.aiHGripKey(key('PageUp'));
+    assert.strictEqual(doc.getElementById('evlAi').style.height, '756px');
+    assert.strictEqual(w.store.evl_ai_h, '756');
+    Object.defineProperty(w, 'innerHeight', { value: 300, configurable: true });
+    ph.aiHGripReset();
+    assert.strictEqual(doc.getElementById('evlAi').style.height, '360px');   // small window: the minimum, the page scrolls
+});
+
+// three occurrences of one event (same text, different times) and one other event
+function occRec(n, t) { return Object.assign({}, REC, { _id: 'occ' + n, tc: t, TimeCreated: [String(t)] }); }
+var TO = Date.now() - 600000, OCC = [occRec(1, TO), occRec(2, TO - 60000), occRec(3, TO - 120000)];
+function citeFolded(w, cites) {
+    var ph = w.ph;
+    ph.aiAsk('What about the resets?');
+    var s = sentOf(w, 'aiStart').pop();
+    ph.onAiStarted(null, { nodeid: NODE, reqId: s.reqId, convId: 'cvF' });
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvF', turn: 1, text: 'Resets ' + Object.keys(cites).map(function (r) { return '[' + r + ']'; }).join(' ') + '.', citations: cites, usage: {} });
+    return ph.st.ai.chat;
+}
+
+test('Fold repeats: every cited occurrence of a folded row gets its chip; a chip further down opens exactly that occurrence', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w); loadHistory(w, OCC.concat([REC2]));
+    assert.strictEqual(ph.st.fold, true);
+    var cid = citeFolded(w, { E57: OCC[0], E59: OCC[1], E60: OCC[2], E58: REC2 });
+    var top = ph.elNormalize(OCC[0]).key, k2 = ph.elNormalize(OCC[1]).key;
+    var chips = function (key) { return Array.prototype.map.call(doc.querySelectorAll('#evlR_' + key + ' td.evlCCite button.evlCite'), function (b) { return b.textContent; }); };
+    assert.deepStrictEqual(chips(top), ['E57', 'E59', 'E60']);   // in E-number order, one row for the group
+    assert.strictEqual(doc.getElementById('evlR_' + k2), null);
+    assert.deepStrictEqual(chips(ph.elNormalize(REC2).key), ['E58']);
+    assert.ok(doc.querySelector('#evlR_' + top + ' button[data-r=E59]').classList.contains('in'));
+    assert.ok(!doc.querySelector('#evlR_' + top + ' button[data-r=E57]').classList.contains('in'));
+    // Table layout: the answer chip expands the group and marks the cited occurrence
+    ph.aiGotoCite(cid, 'E59');
+    assert.strictEqual(ph.st.expanded[top], true);
+    var exp = doc.querySelector('tr.evlExpand');
+    assert.ok(exp.querySelector('.evlOccBar').textContent.indexOf('Occurrence 2 of 3') >= 0);
+    assert.ok(exp.querySelector('.evlOcc.cur button[data-r=E59]'), 'the cited time is marked and carries its chip');
+    assert.strictEqual(exp.querySelectorAll('.evlOccDd button.evlCite').length, 3);
+    // Viewer: the details show the cited record itself, with a way back to the group's own event
+    ph.elSetLayout('viewer');
+    ph.aiGotoCite(cid, 'E60');
+    assert.strictEqual(ph.st.selected, top);
+    var det = doc.getElementById('evlDetails');
+    assert.ok(det.querySelector('.evlOccBar').textContent.indexOf('Occurrence 3 of 3') >= 0);
+    assert.ok(det.textContent.indexOf(ph.elFmtTime(ph.elNormalize(OCC[2]).time)) >= 0);
+    assert.ok(det.querySelector('dd.evlOccDd .evlOcc.cur button[data-r=E60]'));
+    ph.elSetDTab('json');
+    assert.ok(doc.querySelector('#evlDetails pre.evlRaw').textContent.indexOf('"occ3"') >= 0, 'Details (JSON) is the cited record');
+    ph.elSetDTab('general');
+    ph.aiOccClear();
+    assert.strictEqual(doc.querySelector('#evlDetails .evlOccBar'), null);
+    // the gutter chip of an inner occurrence opens it too; the top chip shows the row's own event
+    ph.aiGutter(cid, 'E59', top);
+    assert.ok(doc.querySelector('#evlDetails .evlOccBar').textContent.indexOf('Occurrence 2 of 3') >= 0);
+    ph.aiGutter(cid, 'E57', top);
+    assert.strictEqual(doc.querySelector('#evlDetails .evlOccBar'), null);
+    // a click on the row itself also goes back to its own event
+    ph.aiGotoCite(cid, 'E59'); ph.elRowClick(top);
+    assert.strictEqual(doc.querySelector('#evlDetails .evlOccBar'), null);
+});
+
+test('Fold repeats: more than three citations in a row show three chips and "+N"; saved chats after a reload too', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    var recs = [0, 1, 2, 3, 4].map(function (i) { return occRec(10 + i, TO - i * 1000); });
+    grantSaved(w); loadHistory(w, recs);
+    // a saved chat as the server sends it after a reload ({ ref: stored record })
+    var cites = {}; recs.forEach(function (r, i) { cites['E' + (i + 1)] = r; });
+    ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'Resets', updated: Date.now() - 1000, count: 1 }], diagnosis: null, explains: [] });
+    ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: { id: CH1, title: 'Resets', created: TO, updated: TO, messages: [{ time: TO, q: 'Resets?', a: 'See [E1] [E2] [E3] [E4] [E5].', cites: cites, steps: [], followups: [] }] } });
+    assert.ok(ph.st.ai.convs[ph.st.ai.chat].restored);
+    var top = ph.elNormalize(recs[0]).key;
+    var td = doc.querySelector('#evlR_' + top + ' td.evlCCite');
+    var btns = Array.prototype.map.call(td.querySelectorAll('button'), function (b) { return b.textContent; });
+    assert.deepStrictEqual(btns, ['E1', 'E2', 'E3', '+2']);
+    assert.strictEqual(td.querySelector('button.more').getAttribute('title'), 'Also cited: E4, E5');
+    var th = doc.querySelector('th.evlCCite');
+    assert.ok(parseInt(th.style.width, 10) > 52, 'the gutter widens for the chips');
+    ph.aiGutterMore(top);
+    assert.strictEqual(doc.querySelectorAll('tr.evlExpand .evlOccDd button.evlCite').length, 5);
+    ph.aiGotoCite(ph.st.ai.chat, 'E4');
+    assert.ok(doc.querySelector('tr.evlExpand .evlOccBar').textContent.indexOf('Occurrence 4 of 5') >= 0);
+});
+
+test('aiStart and aiSend carry the browser\'s time zone', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph;
+    grant(w); loadHistory(w);
+    ph.aiAsk('q');
+    var s = sentOf(w, 'aiStart')[0];
+    assert.strictEqual(s.tz, w.Intl.DateTimeFormat().resolvedOptions().timeZone);
+    assert.strictEqual(s.tzOffsetMin, -new w.Date().getTimezoneOffset());
+    ph.onAiStarted(null, { nodeid: NODE, reqId: s.reqId, convId: 'cvT' });
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvT', turn: 1, text: 'ok', citations: {}, usage: {} });
+    ph.aiAsk('again');
+    var m = sentOf(w, 'aiSend')[0];
+    assert.ok(typeof m.tz == 'string' && typeof m.tzOffsetMin == 'number');
+    assert.strictEqual(sentOf(w, 'aiHistoryList').concat(sentOf(w, 'getNodeHistory')).some(function (x) { return x.tz != null; }), false, 'only the two that start answers');
+});

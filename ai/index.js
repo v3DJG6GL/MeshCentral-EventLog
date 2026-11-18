@@ -372,9 +372,17 @@ function create(o) {
         if (!found) return { from: t - DAY, to: t, restartAt: null };
         return { from: found - 6 * HOUR, to: Math.min(found + HOUR, t), restartAt: found };
     }
+    // the browser's time zone (aiStart / aiSend: tz = IANA name, tzOffsetMin = minutes east of UTC); null when neither
+    // is usable. An unknown zone name is dropped (Intl throws), the offset alone still says how to convert.
+    function tzOf(command) {
+        let name = (typeof command.tz === 'string' && command.tz.length <= 64 && /^[A-Za-z_+\-\/0-9]+$/.test(command.tz)) ? command.tz : null;
+        if (name) { try { new Intl.DateTimeFormat('en', { timeZone: name }); } catch (e) { name = null; } }
+        const off = (typeof command.tzOffsetMin === 'number' && Number.isInteger(command.tzOffsetMin) && command.tzOffsetMin >= -840 && command.tzOffsetMin <= 840) ? command.tzOffsetMin : null;
+        return (name || off != null) ? { name: name, offsetMin: off } : null;
+    }
     function systemPrompt(S, toolNames) {
         const st = S.settings || {};
-        return prompts.system(S.mode, { nonce: S.nonce, deviceName: S.redactor.redact(String((S.node && S.node.name) || 'this device')), os: S.os, tools: toolNames, redacted: !!S.redacted, now: now(), window: S.window || null },
+        return prompts.system(S.mode, { nonce: S.nonce, deviceName: S.redactor.redact(String((S.node && S.node.name) || 'this device')), os: S.os, tools: toolNames, redacted: !!S.redacted, now: now(), window: S.window || null, tz: S.tz || null },
             { prompts: isObj(st.prompts) ? st.prompts : null, extraInstructions: st.extraInstructions, endpointExtra: S.ep && S.ep.extraInstructions });
     }
     async function compose(S) {
@@ -609,7 +617,7 @@ function create(o) {
             domain: (myparent.domain && myparent.domain.id) || node.domain || '', nodeid: nodeid, meshid: node.meshid, node: node, rights: rights,
             mode: mode, ep: epSafe, net: net, redactor: redactor, redacted: redacted, settings: settings, reqId: reqId, os: os, histOpts: histOpts,
             nonce: prompts.newNonce(), answers: [], suspicious: new Set(), event: ev, question: question,
-            historyOn: historyOn, chatId: chatId, pendingQ: question, contPending: !!prior, windowKey: windowKey
+            historyOn: historyOn, chatId: chatId, pendingQ: question, contPending: !!prior, windowKey: windowKey, tz: tzOf(command)
         });
         if (!opened.ok) return fail('busy', 'Too many conversations are open', true);
         const S = opened.S;
@@ -681,6 +689,7 @@ function create(o) {
         if (!rightsAllowDetails(S.rights)) return sendError(myparent, S.nodeid, S.convId, null, 'denied', REASON_MSG.deviceRights);
         const q = await quota(S.userid, S.settings);
         if (!q.ok) return sendError(myparent, S.nodeid, S.convId, null, 'quota', 'Your daily Assistant limit is used up');
+        const tz = tzOf(command); if (tz) S.tz = tz;
         S.pendingQ = command.text.trim();
         let text = S.redactor.redact(S.pendingQ);
         // the first question of a continued chat failed: the recap was rolled back with it and goes along again

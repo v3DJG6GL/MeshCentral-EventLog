@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Fixed
+- Assistant: the Ask panel fills the window height instead of following the event table, and its height can be changed with a grip at the bottom edge (double-click restores the automatic height)
+- Assistant: with “Fold repeats” on, every cited occurrence shows its citation chip and opens exactly that occurrence
+- Assistant: answers give times in the technician's time zone instead of UTC
 
 ## [0.4.0] - 2026-11-18
 ### Added
