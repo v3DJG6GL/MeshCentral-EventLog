@@ -401,6 +401,7 @@
               if (Q('elid').value == '_new' && msg.selected) Q('elid').value = msg.selected;
               clearTimeout(elSaveTimer);
               setSaveStatus('ok', '\u2713 Saved \u201c' + (msg.name || 'configuration') + '\u201d at ' + new Date().toLocaleTimeString() + '. Endpoints pick up the change within a minute.');
+              if (elAiIsOn() && elAi.loaded) elAiRefresh();   // the Assistant tab's "Used by" column
           }
       }
       parent.pluginHandler['eventlog'].adminSaveFailed = function(args, msg) {
@@ -419,6 +420,7 @@
           }
           loadConfigSet();
           updateConfigSetsSelects();
+          if (elAiIsOn() && elAi.loaded) elAiRefresh();
       }
       
       parent.pluginHandler['eventlog'].setsAssigned = function(args, msg) {
@@ -763,14 +765,14 @@
         if (p == null) { setStatus('elAiFormStatus', 'err', 'Check the marked fields.'); return false; }
         Q('elAiTestOut').hidden = true;
         setStatus('elAiFormStatus', 'pending', 'Testing the connection\u2026', 'elAiTestBtn');
-        elAiSend('test', 'aiAdminTest', p, 30000, function() { setStatus('elAiFormStatus', 'err', '\u2717 The test did not finish within 30 seconds.', 'elAiTestBtn'); });
+        elAiSend('test', 'aiAdminTest', p, 40000, function() { setStatus('elAiFormStatus', 'err', '\u2717 No answer from the server within 40 seconds.', 'elAiTestBtn'); });   // the server gives up after 30 s and reports the failing step
         return false;
       }
       function elAiFetchModels() {
         var p = elAiDraftPayload(false);
         if (p == null) { setStatus('elAiModelsStatus', 'err', 'Check the marked fields.'); return false; }
         setStatus('elAiModelsStatus', 'pending', 'Asking the server\u2026', 'elAiFetchBtn');
-        elAiSend('models', 'aiAdminModels', p, 30000, function() { setStatus('elAiModelsStatus', 'err', '\u2717 No list within 30 seconds.', 'elAiFetchBtn'); });
+        elAiSend('models', 'aiAdminModels', p, 40000, function() { setStatus('elAiModelsStatus', 'err', '\u2717 No list within 40 seconds.', 'elAiFetchBtn'); });
         return false;
       }
       function elAiModelFacts() {
@@ -1030,7 +1032,7 @@
       parent.pluginHandler['eventlog'].aiAdminTestResult = elAiHandler(function(msg) {
         if (elAiTake(msg) == null || elAi.edit == null) return;
         if (msg.caps && typeof msg.caps == 'object') elAi.edit.caps = msg.caps;
-        setStatus('elAiFormStatus', msg.ok ? 'ok' : 'err', msg.ok ? '\u2713 Test passed.' : '\u2717 Test failed; see the steps below.', 'elAiTestBtn');
+        setStatus('elAiFormStatus', msg.ok ? 'ok' : 'err', msg.ok ? '\u2713 Test passed.' : '\u2717 Test failed; see the steps above.', 'elAiTestBtn');
         elAiRenderTest(msg);
         elAiOllamaVisible();
         elAiModelFacts();
@@ -1190,8 +1192,9 @@
     .elAiTbl .elNum { text-align: right; white-space: nowrap; }
     .elAiActs { white-space: nowrap; text-align: right; }
     .elAiBtns { margin: 8px 0; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-    #eventLogAdmin button.elPrimary { background: var(--evl-acc); color: var(--evl-acc-ink); border-color: var(--evl-acc); }
-    #eventLogAdmin button.elPrimary:hover { background: var(--evl-acc); filter: brightness(1.08); }
+    /* same :not() as the generic button rules above, so these win on specificity */
+    #eventLogAdmin button.elPrimary:not(#eventLogAdminNav button) { background: var(--evl-acc); color: var(--evl-acc-ink); border-color: var(--evl-acc); }
+    #eventLogAdmin button.elPrimary:not(#eventLogAdminNav button):hover, #eventLogAdmin button.elPrimary:not(#eventLogAdminNav button):active { background: var(--evl-acc); color: var(--evl-acc-ink); border-color: var(--evl-acc); filter: brightness(1.08); }
     .elAiForm { border: 1px solid var(--evl-line); background: var(--evl-alt); border-radius: 4px; padding: 4px 12px 6px 12px; }
     .elAiGrid { display: grid; grid-template-columns: minmax(160px, 230px) minmax(0, 1fr); gap: 8px 14px; align-items: start; }
     .elAiGrid > label, .elAiGrid > .elAiLbl { padding-top: 5px; color: var(--evl-ink); }

@@ -15,7 +15,8 @@
 // handle(command, myparent, grandparent) -> Promise (never rejects) for pluginaction aiStart / aiConfirm / aiSend /
 //   aiFeedback (device rights and the permission were checked by eventlog.js; command._node / _rights are set) and
 //   aiStop / aiClose (authorized here by session ownership: same user and same connection).
-//   Every failure is answered with onAiError { nodeid, convId|null, reqId, code, message, retryable }.
+//   Every failure is answered with onAiError { nodeid, convId|null, reqId, code, message, retryable, phase? } (phase on
+//   timeouts: 'connect' = the endpoint was never reached, 'idle', 'total').
 // onAgentData(command, agentObj) -> bool   agent 'software' replies for get_installed_software
 // close()                                   aborts every conversation (plugin reload / shutdown)
 
@@ -197,6 +198,15 @@ function create(o) {
         try { const c = await netguard.check(ep.baseUrl, { allowLinkLocal: !!ep.allowLinkLocal }); return c; } catch (e) { return { ok: false, error: 'check failed' }; }
     }
 
+    // the redaction categories in effect for an endpoint on `network`: everything outside the private networks,
+    // otherwise the admin's toggles
+    function redactionFor(network, rt) {
+        rt = rt || {};
+        if (network !== 'loopback' && network !== 'private') return { secrets: true, emails: true, sids: true, macs: true, ips: true, users: true, paths: true, hosts: true, serials: true };
+        return { secrets: !!rt.secrets, emails: !!rt.emails, sids: !!rt.sids, macs: !!rt.macs, ips: !!rt.ips, users: !!rt.users, paths: !!rt.paths, hosts: !!(rt.hosts || rt.domains), serials: !!rt.serials };
+    }
+    function anyOn(enabled) { return Object.keys(enabled).some(function (k) { return enabled[k]; }); }
+
     async function accessInfo(myparent, node, rights) {
         const out = { assistant: false, assistantReason: null, endpoint: null, categories: {}, remaining: null };
         try {
@@ -205,9 +215,11 @@ function create(o) {
             if (!g.ok) { out.assistantReason = g.reason; return out; }
             const c = await networkOf(g.ep);
             const network = c.ok ? c.network : null;
+            const forced = network !== 'loopback' && network !== 'private';
             out.endpoint = {
                 name: str(g.ep.name, 120) || '', model: str(g.ep.model, 200) || '', network: network,
-                redactionForced: network !== 'loopback' && network !== 'private', previewPolicy: g.settings.previewPolicy, toolMode: g.ep.toolMode || 'auto'
+                redactionForced: forced, redaction: forced ? 'forced' : (anyOn(redactionFor(network, g.settings.redact)) ? 'on' : 'off'),
+                previewPolicy: g.settings.previewPolicy, toolMode: g.ep.toolMode || 'auto'
             };
             const q = await quota(myparent.user._id, g.settings);
             out.remaining = q.remaining;
@@ -474,12 +486,8 @@ function create(o) {
         if (os === 'linux' && histOpts.historyLogs != null) delete histOpts.historyLogs;
         const si = await devicedata.getDoc(meshDb(), 'si' + nodeid);
 
-        const forced = network !== 'loopback' && network !== 'private';
-        const rt = settings.redact;
-        const enabled = forced
-            ? { secrets: true, emails: true, sids: true, macs: true, ips: true, users: true, paths: true, hosts: true, serials: true }
-            : { secrets: !!rt.secrets, emails: !!rt.emails, sids: !!rt.sids, macs: !!rt.macs, ips: !!rt.ips, users: !!rt.users, paths: !!rt.paths, hosts: !!(rt.hosts || rt.domains), serials: !!rt.serials };
-        const redacted = Object.keys(enabled).some(function (k) { return enabled[k]; });
+        const enabled = redactionFor(network, settings.redact);
+        const redacted = anyOn(enabled);
         const redactor = redacted ? redactMod.create({ seeds: devicedata.seeds(node, si), enabled: enabled }) : nullRedactor();
 
         const https = /^https:/i.test(String(ep.baseUrl));

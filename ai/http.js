@@ -90,7 +90,11 @@ function request(opts, onChunk) {
     if (opts.agent) ropts.agent = opts.agent;
     if (u.protocol === 'https:' && u.hostname && !/^[\d.]+$|^\[/.test(u.hostname)) ropts.servername = u.hostname;
 
-    if (opts.totalTimeoutMs > 0) tTotal = setTimeout(function () { settle(mkErr('timeout', 'The request took longer than ' + Math.round(opts.totalTimeoutMs / 1000) + ' s', { phase: 'total' })); }, opts.totalTimeoutMs);
+    if (opts.totalTimeoutMs > 0) tTotal = setTimeout(function () {
+        // not even connected yet: report it as the connect failure it is
+        if (tConnect) settle(mkErr('timeout', 'Could not connect within ' + Math.round(opts.totalTimeoutMs / 1000) + ' s', { phase: 'connect' }));
+        else settle(mkErr('timeout', 'The request took longer than ' + Math.round(opts.totalTimeoutMs / 1000) + ' s', { phase: 'total' }));
+    }, opts.totalTimeoutMs);
     tConnect = setTimeout(function () { settle(mkErr('timeout', 'Could not connect within ' + Math.round(connectTimeoutMs / 1000) + ' s', { phase: 'connect' })); }, connectTimeoutMs);
 
     try {

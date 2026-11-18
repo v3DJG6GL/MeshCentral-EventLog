@@ -243,7 +243,7 @@ async function turn(S, userText, deps) {
         }
     }
 
-    let result = 'answered', errCode = null, errMsg = null, errRetryable = false;
+    let result = 'answered', errCode = null, errMsg = null, errRetryable = false, errPhase = null;
     try {
         for (;;) {
             try { await loop(); break; }
@@ -273,12 +273,13 @@ async function turn(S, userText, deps) {
         errCode = (e && CODE_MAP[e.code]) || 'internal';
         errMsg = e && e.code ? String(e.message || errCode) : 'Internal error';
         errRetryable = !!(e && e.retryable);
+        if (errCode === 'timeout' && e && (e.phase === 'connect' || e.phase === 'idle' || e.phase === 'total')) errPhase = e.phase;   // connect: never reached the endpoint
         if (e && e.code === 'toolsUnsupported') errMsg = 'The model does not accept tool calls. Set the endpoint to "Summary only".';
         if (abortReason) {
             result = abortReason === 'denied' ? 'error' : 'cancelled';
             errCode = abortReason === 'denied' ? 'denied' : 'aborted';
             errMsg = abortReason === 'denied' ? 'Access to this device was revoked' : (abortReason === 'stopped' ? 'Stopped' : 'The conversation was closed');
-            errRetryable = false;
+            errRetryable = false; errPhase = null;
         } else if (errCode === 'denied') { try { S.abort('denied'); } catch (e2) { } }
         if (errCode === 'internal') log('EVENTLOG AI: internal error in a turn (' + ((e && e.name) || 'Error') + ')');
     } finally {
@@ -299,7 +300,9 @@ async function turn(S, userText, deps) {
         S.transcript = saved.transcript;
         S.transcript.items.length = Math.min(S.transcript.items.length, saved.len);
         S.segment = saved.segment;
-        deps.send('onAiError', { reqId: turnNo === 1 ? (S.reqId || null) : null, turn: turnNo, code: errCode, message: errMsg, retryable: errRetryable });
+        const em = { reqId: turnNo === 1 ? (S.reqId || null) : null, turn: turnNo, code: errCode, message: errMsg, retryable: errRetryable };
+        if (errPhase) em.phase = errPhase;
+        deps.send('onAiError', em);
     }
     S.abort = null;
     S.lastActive = now();

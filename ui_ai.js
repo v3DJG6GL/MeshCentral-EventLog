@@ -326,13 +326,13 @@ module.exports.attach = function (obj) {
         ph.aiDlgClose(true, c.id);
         if (code == 'aborted' && t.status == 'stopped') { c.status = 'stopped'; ph.aiRefresh(c); return; }
         t.status = (code == 'aborted') ? 'stopped' : 'error';
-        t.error = { code: code, message: msg.slice(0, 300), retryable: m.retryable === true };
+        t.error = { code: code, message: msg.slice(0, 300), retryable: m.retryable === true, phase: typeof m.phase == 'string' ? m.phase : null };
         if (t.text) t.live = ph.aiMd(ph.aiVisible(t.text), c, { streaming: true });
         c.status = (code == 'aborted') ? 'stopped' : 'error';
         if (c.convId == null || code == 'invalid' && /no longer open/i.test(msg)) c.closed = (c.convId != null);
         if (code == 'denied') { try { ph.elRequestAccess(true); } catch (e) { } }
         ph.aiRefresh(c);
-        if (code != 'aborted') ph.aiSay(ph.aiErrText(code));
+        if (code != 'aborted') ph.aiSay(ph.aiErrText(code, t.error.phase));
     };
 
     // Re-render whatever shows this conversation.
@@ -556,7 +556,9 @@ module.exports.attach = function (obj) {
     };
 
     // ---- shared pieces --------------------------------------------------------------------------------------------
-    obj.aiErrText = function (code) {
+    // phase: for 'timeout', where it happened (connect = the endpoint was never reached)
+    obj.aiErrText = function (code, phase) {
+        if (code == 'timeout' && phase == 'connect') return 'Could not connect to the endpoint. Try again; if it keeps failing, an administrator needs to check the endpoint address.';
         return ({
             denied: 'You do not have access to the Assistant on this device any more.',
             quota: 'You reached today\'s limit for the Assistant.',
@@ -581,8 +583,8 @@ module.exports.attach = function (obj) {
     };
     obj.aiErrHtml = function (c, t) {
         var ph = pluginHandler.eventlog, e = t.error || {}, code = e.code || 'internal', esc = ph.aiEsc;
-        var h = '<div class=evlAiErr role=alert><p>' + esc(ph.aiErrText(code)) + '</p>';
-        if (e.message && ['model', 'badResponse', 'blocked', 'network', 'auth', 'invalid', 'refusal'].indexOf(code) >= 0) h += '<p class=evlAiMuted>' + esc(e.message) + '</p>';
+        var h = '<div class=evlAiErr role=alert><p>' + esc(ph.aiErrText(code, e.phase)) + '</p>';
+        if (e.message && (['model', 'badResponse', 'blocked', 'network', 'auth', 'invalid', 'refusal'].indexOf(code) >= 0 || (code == 'timeout' && e.phase == 'connect'))) h += '<p class=evlAiMuted>' + esc(e.message) + '</p>';
         h += '<div class=evlAiActs>';
         var transient = ['timeout', 'noReply', 'network', 'overloaded', 'rateLimit', 'badResponse', 'internal', 'busy'];
         if (e.retryable || transient.indexOf(code) >= 0) h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiRetry(\'' + c.id + '\')">Try again</button>';
@@ -651,15 +653,16 @@ module.exports.attach = function (obj) {
         else txt = 'Writing the answer…';
         return '<p class=evlAiWait>' + txt + '</p>';
     };
-    // "qwen3:14b on gpu-01.lan (local, nothing replaced)"
+    // "qwen3:14b on gpu-01.lan (local, personal values replaced)"
     obj.aiInfoLine = function (c, short) {
         var ph = pluginHandler.eventlog, acc = (ph.elAccess && ph.elAccess.endpoint) || {}, info = (c && c.info) || {};
         var model = info.model || acc.model || '', name = info.endpointName || acc.name || '', net = ph.aiNetWord(info.network || acc.network);
-        var red = (info.redacted != null && c && c.info) ? info.redacted : (acc.redactionForced === true);
+        // before the first question: the server's effective state for this endpoint (forced | on | off)
+        var red = (info.redacted != null && c && c.info) ? info.redacted : (acc.redaction ? acc.redaction != 'off' : acc.redactionForced === true);
         var cnt = ph.aiCounts(c && c.red), rep;
         if (cnt.total > 0) rep = cnt.total + (cnt.total == 1 ? ' value replaced' : ' values replaced');
         else if (c && c.red) rep = 'nothing replaced';
-        else rep = red ? 'values are replaced before sending' : 'nothing replaced';
+        else rep = red ? 'personal values replaced' : 'nothing replaced';
         if (!model && !name) return '';
         var s = (model || 'Model') + (name ? (short ? ' via ' : ' on ') + name : '');
         var extra = [net, short ? '' : rep].filter(function (x) { return x; });
@@ -1354,9 +1357,11 @@ module.exports.attach = function (obj) {
     obj.aiStatusWord = function (s) {
         return ({ likely: 'Likely', possible: 'Possible', ruled_out: 'Ruled out' })[s] || 'Possible';
     };
-    obj.aiChips = function (c, refs) {
+    // asText: plain refs ("E1, E4") for the visually hidden timeline table, which must not hold focusable controls
+    obj.aiChips = function (c, refs, asText) {
         var ph = pluginHandler.eventlog, out = [];
         (Array.isArray(refs) ? refs : []).forEach(function (r) { if (typeof r == 'string' && /^E\d{1,6}$/.test(r) && ph.aiCite(c, r) && out.indexOf(r) < 0) out.push(r); });
+        if (asText) return out.join(', ');
         return out.map(function (r) { return ph.aiChipHtml(c.id, r); }).join(' ');
     };
     obj.aiDiagDone = function (c, t) {
@@ -1496,7 +1501,7 @@ module.exports.attach = function (obj) {
             h += '</div></div>';
             lane.markers.forEach(function (m) {
                 if (!m || typeof m.t != 'number') return;
-                sr += '<tr><td>' + ph.aiPlain(lane.label) + '</td><td>' + esc(ph.elFmtTime(m.t)) + (typeof m.t2 == 'number' && m.t2 > m.t ? ' to ' + esc(ph.elFmtTime(m.t2)) : '') + '</td><td>' + ph.aiPlain(m.label) + '</td><td>' + ph.aiChips(c, m.cites) + '</td></tr>';
+                sr += '<tr><td>' + ph.aiPlain(lane.label) + '</td><td>' + esc(ph.elFmtTime(m.t)) + (typeof m.t2 == 'number' && m.t2 > m.t ? ' to ' + esc(ph.elFmtTime(m.t2)) : '') + '</td><td>' + ph.aiPlain(m.label) + '</td><td>' + ph.aiChips(c, m.cites, true) + '</td></tr>';
             });
         });
         return h + '</div></div>' + sr + '</tbody></table>';
@@ -1559,7 +1564,9 @@ module.exports.attach = function (obj) {
         if (cnt.total > 0) h += '<div class=evlDlgRed>' + cnt.total + (cnt.total == 1 ? ' value' : ' values') + ' replaced: ' + esc(cnt.list) + '.</div>';
         else if (info.redacted) h += '<div class=evlDlgRed>Nothing needed replacing so far. Events the model reads later are replaced the same way.</div>';
         h += '</section></div>';
-        h += '<div class=evlDlgFt><label class=evlDlgRem><input type=checkbox' + (d.remember ? ' checked' : '') + ' onchange="pluginHandler.eventlog.aiDlgRem(this.checked)"> Do not ask again for this endpoint</label>' +
+        // the server only honours "remember" when the admin chose to ask once per endpoint
+        var once = ((ph.elAccess && ph.elAccess.endpoint) || {}).previewPolicy == 'once';
+        h += '<div class=evlDlgFt>' + (once ? '<label class=evlDlgRem><input type=checkbox' + (d.remember ? ' checked' : '') + ' onchange="pluginHandler.eventlog.aiDlgRem(this.checked)"> Do not ask again for this endpoint</label>' : '<span class=evlDlgRem></span>') +
              '<button class=evlBtn onclick="return pluginHandler.eventlog.aiDlgCancel()">Cancel</button><button class="evlBtn on" onclick="return pluginHandler.eventlog.aiDlgSend()">Send and ask</button></div></div>';
         return h;
     };
@@ -1737,7 +1744,7 @@ module.exports.attach = function (obj) {
 @media (prefers-reduced-motion: reduce) { #pluginEventLog table.evlLog tr.evlFlash td { animation:none; } }
 #pluginEventLog .evlAiNote { flex-basis:100%; display:flex; align-items:center; gap:8px; flex-wrap:wrap; border:1px solid var(--evl-acc); border-radius:3px; background:var(--evl-bg); padding:4px 6px 4px 10px; font-size:12px; }
 /* Explain */
-#pluginEventLog .evlAiEx { margin-top:12px; padding:11px 14px 12px; background:var(--evl-panel); border:1px solid var(--evl-line2); border-radius:3px; max-width:110ch; cursor:auto; white-space:normal; }
+#pluginEventLog .evlAiEx { margin-top:12px; padding:11px 14px 12px; background:var(--evl-panel); border:1px solid var(--evl-line2); border-radius:3px; max-width:min(110ch, 100%); min-width:0; box-sizing:border-box; overflow-wrap:anywhere; cursor:auto; white-space:normal; }
 #pluginEventLog .evlAiExHd { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:2px; }
 #pluginEventLog .evlAiExHd h3 { margin:0; font-size:14px; font-weight:bold; flex:1 1 auto; color:var(--evl-ink); }
 #pluginEventLog .evlAiEx h4, #pluginEventLog .evlAiTurn h4 { font-size:13px; font-weight:bold; margin:12px 0 3px; color:var(--evl-ink); }
@@ -1750,6 +1757,7 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlDBody.evlDBodyEx { grid-template-columns:minmax(0,1fr) minmax(0,1.4fr); }
 #pluginEventLog .evlDBodyEx .evlKv { margin-top:10px; }
 #pluginEventLog .evlDBodyEx .evlAiEx { margin-top:0; }
+#pluginEventLog tr.evlExpand td > .evlAiEx { max-width:min(110ch, calc(100cqw - 44px)); }
 /* Diagnosis */
 #pluginEventLog .evlDiag { padding:2px 2px 14px; }
 #pluginEventLog .evlDiag h2 { font-size:18px; font-weight:bold; margin:8px 0 4px; color:var(--evl-ink); }
@@ -1811,7 +1819,7 @@ module.exports.attach = function (obj) {
   #pluginEventLog .evlHyp { grid-template-columns:1fr; }
   #pluginEventLog .evlLane { grid-template-columns:120px minmax(0,1fr); }
 }
-@media (max-width: 1000px) { #pluginEventLog .evlDBody.evlDBodyEx { grid-template-columns:1fr; } }
+@media (max-width: 1000px) { #pluginEventLog .evlDBody.evlDBodyEx { grid-template-columns:minmax(0,1fr); } }
 /* data preview dialog: appended to <body>, so it carries its own tokens */
 #evlAiDlg {
   --evl-ink:#1c1c1c; --evl-muted:#5a6360; --evl-line:#c9c9c9; --evl-line2:#e6e6e6; --evl-bg:#fff; --evl-alt:#f4f6f5; --evl-hover:#e9f0f1; --evl-sel:#dbe9eb;
@@ -1848,7 +1856,8 @@ body.night #evlAiDlg {
 #evlAiDlg .evlDlgRem { display:inline-flex; gap:8px; align-items:center; flex:1 1 auto; min-height:34px; font-weight:normal; margin:0; }
 #evlAiDlg .evlBtn { border:1px solid var(--evl-bline); background:var(--evl-input); color:var(--evl-ink); border-radius:3px; padding:6px 13px; cursor:pointer; font:inherit; min-height:34px; }
 #evlAiDlg .evlBtn:hover { background:var(--evl-hover); border-color:var(--evl-acc); }
-#evlAiDlg .evlBtn.on { background:var(--evl-acc); color:var(--evl-acc-ink); border-color:var(--evl-acc); }
+#evlAiDlg .evlBtn.on, #evlAiDlg .evlBtn.on:hover, #evlAiDlg .evlBtn.on:active { background:var(--evl-acc); color:var(--evl-acc-ink); border-color:var(--evl-acc); }
+#evlAiDlg .evlBtn.on:hover { filter:brightness(1.08); }
 #evlAiDlg .evlSeg { display:inline-flex; border:1px solid var(--evl-bline); border-radius:3px; overflow:hidden; }
 #evlAiDlg .evlSeg button { border:0; background:var(--evl-input); color:var(--evl-muted); padding:4px 11px; cursor:pointer; font:inherit; font-size:12px; }
 #evlAiDlg .evlSeg button.on { background:var(--evl-acc); color:var(--evl-acc-ink); font-weight:bold; }

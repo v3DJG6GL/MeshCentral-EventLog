@@ -205,6 +205,10 @@ module.exports.eventlog = function (parent) {
         if (ph != null) ph.eventlog_ai = null;
         try {
             obj.ai = require(__dirname + '/ai/index.js').create({ plugin: obj, log: function (m) { console.log(String(m)); } });
+            if (obj.ai != null && obj.ai.store != null) {
+                var src = null; try { src = obj.ai.store.keySource(); } catch (e2) { }
+                console.log('EVENTLOG AI: assistant ready (key source: ' + (src || 'unknown') + ')');
+            }
         } catch (e) {
             obj.ai = null;
             console.log('EVENTLOG AI: the Assistant could not be started: ' + ((e && e.message) || e));
@@ -509,7 +513,7 @@ module.exports.eventlog = function (parent) {
   --evl-acc:#1F6F78; --evl-acc-ink:#fff; --evl-ok:#1e8a4c; --evl-bline:#c9c9c9;
   --evl-crit:#8E1B1B; --evl-err:#C9352B; --evl-warn:#B86F00; --evl-info:#2E6DBF; --evl-verb:#7F8A86;
   --evl-ps-bg:#F3E8D2; --evl-ps-ink:#6B4E16; --evl-bubble:#e9f0f1; --evl-bubble-line:#cfe0e2; --evl-code:#f4f6f5; --evl-code-line:#dfe3e1; --evl-panel:#fafbfa;
-  color: var(--evl-ink);
+  color: var(--evl-ink); background: var(--evl-bg);
 }
 body.night #pluginEventLog {
   --evl-ink:#bbbbbb; --evl-muted:#8b9591; --evl-line:#333; --evl-line2:#222; --evl-bg:#000;
@@ -532,7 +536,7 @@ body.night #pluginEventLog {
 #pluginEventLog .evlBtn.mini { padding:1px 7px; font-size:12px; }
 #pluginEventLog .evlBtn:hover { background:var(--evl-hover); border-color:var(--evl-acc); }
 #pluginEventLog .evlBtn:active { background:var(--evl-sel); transform:translateY(1px); }
-#pluginEventLog .evlBtn.on:hover { border-color:var(--evl-acc); filter:brightness(1.08); }
+#pluginEventLog .evlBtn.on:hover, #pluginEventLog .evlBtn.on:active { background:var(--evl-acc); color:var(--evl-acc-ink); border-color:var(--evl-acc); filter:brightness(1.08); }
 #pluginEventLog .evlBtn.ok { color:var(--evl-ok); border-color:var(--evl-ok); }
 #pluginEventLog .evlSeg button:hover:not(.on) { background:var(--evl-hover); color:var(--evl-ink); }
 #pluginEventLog .evlSeg button:active:not(.on) { background:var(--evl-sel); }
@@ -608,7 +612,9 @@ body.night #pluginEventLog {
 #pluginEventLog .evlFacet .t { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #pluginEventLog .evlFacet .n { margin-left:auto; color:var(--evl-muted); font-variant-numeric:tabular-nums; font-size:12px; }
 #pluginEventLog .evlMore { color:var(--evl-acc); font-size:12px; cursor:pointer; display:inline-block; margin-top:3px; }
-#pluginEventLog .evlScroll { overflow:auto; max-height:calc(100vh - 270px); min-height:160px; position:relative; }
+#pluginEventLog .evlScroll { overflow:auto; max-height:calc(100vh - 270px); min-height:160px; position:relative; container-type:inline-size; }
+/* an expanded row spans the whole table, which can be wider than the visible area: keep its content within view (100cqw = .evlScroll) */
+#pluginEventLog tr.evlExpand td > * { max-width:calc(100cqw - 44px); min-width:0; box-sizing:border-box; }
 #pluginEventLog .evlVList { overflow:auto; max-height:max(200px, calc(100vh - 520px)); outline:none; position:relative; }
 #pluginEventLog .evlVList table.evlLog th { top:0; }
 #pluginEventLog .evlDetails { border-top:1px solid var(--evl-line); max-height:40vh; overflow:auto; }

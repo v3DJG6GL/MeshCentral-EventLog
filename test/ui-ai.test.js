@@ -346,7 +346,8 @@ test('Diagnosis: structured result with timeline, causes, next steps, evidence',
     var dg = doc.getElementById('evlDiag');
     assert.ok(dg.textContent.indexOf('What happened in the last 7 days') >= 0);
     assert.ok(dg.querySelector('.evlMk.crit'));
-    assert.ok(dg.querySelector('table.evlSr button.evlCite[data-r=E2]'), 'screen-reader table carries the cites');
+    assert.ok(dg.querySelector('table.evlSr').textContent.indexOf('E2') >= 0, 'screen-reader table carries the cites');
+    assert.strictEqual(dg.querySelectorAll('table.evlSr button, table.evlSr [tabindex]').length, 0, 'no focusable controls in the visually hidden table');
     assert.ok(dg.textContent.indexOf('about 70%') >= 0);
     assert.ok(dg.textContent.indexOf('Ruled out') >= 0);
     assert.ok(dg.textContent.indexOf('Open these 2 events in History') >= 0);
@@ -365,7 +366,7 @@ test('Diagnosis: structured result with timeline, causes, next steps, evidence',
 
 test('preview dialog: under <body>, modal, categories, Esc cancels, Send confirms', { skip: SKIP }, async function () {
     var w = makeDom(), ph = w.ph, doc = w.document;
-    grant(w); loadHistory(w);
+    grant(w, { endpoint: { name: 'api.example', model: 'claude', network: 'public', redactionForced: true, redaction: 'forced', previewPolicy: 'once' } }); loadHistory(w);
     ph.aiAsk('q1');
     var s = sentOf(w, 'aiStart')[0];
     ph.onAiStarted(null, { nodeid: NODE, reqId: s.reqId, convId: 'cv5', model: 'claude', endpointName: 'api.example', network: 'public', redacted: true });
@@ -378,6 +379,7 @@ test('preview dialog: under <body>, modal, categories, Esc cancels, Send confirm
     assert.strictEqual(dlg.querySelector('.evlDlgPv mark.evlPs').textContent, 'HOST_1');
     assert.strictEqual(dlg.querySelectorAll('b').length, 0);
     assert.ok(dlg.textContent.indexOf('1 value replaced: 1 computer name.') >= 0);
+    assert.ok(dlg.textContent.indexOf('Do not ask again for this endpoint') >= 0, 'previewPolicy once: "do not ask again" offered');
     ph.aiDlgTab('raw');
     assert.ok(doc.getElementById('evlAiDlgPv').textContent.indexOf('{"a":"HOST_1"}') >= 0);
     ph.aiDlgCat(1, false);
@@ -386,12 +388,14 @@ test('preview dialog: under <body>, modal, categories, Esc cancels, Send confirm
     var cf = sentOf(w, 'aiConfirm')[0];
     assert.deepStrictEqual(plain([cf.convId, cf.categories, cf.remember]), ['cv5', ['deviceSummary'], true]);
     assert.strictEqual(doc.getElementById('evlAiDlg'), null);
-    // second conversation: Escape cancels and closes the session
+    // second conversation (the admin now wants a review every time): Escape cancels and closes the session
+    grant(w, { endpoint: { name: 'api.example', model: 'claude', network: 'public', redactionForced: true, redaction: 'forced', previewPolicy: 'every' } });
     ph.aiNewChat();
     ph.aiAsk('q2');
     var s2 = sentOf(w, 'aiStart')[1];
     ph.onAiStarted(null, { nodeid: NODE, reqId: s2.reqId, convId: 'cv6', network: 'public', redacted: true });
     ph.onAiPreview(null, { nodeid: NODE, convId: 'cv6', readable: [], raw: '', categories: [] });
+    assert.ok(doc.getElementById('evlAiDlg').textContent.indexOf('Do not ask again') < 0, 'previewPolicy every: the server would ignore it, so it is not offered');
     ph.aiDlgKey({ key: 'Escape', preventDefault: function () { } });
     assert.ok(sentOf(w, 'aiClose').some(function (m) { return m.convId == 'cv6'; }));
     assert.strictEqual(doc.getElementById('evlAiDlg'), null);
@@ -418,6 +422,33 @@ test('errors: plain direction, denied asks for access again, watchdog after 90 s
     assert.strictEqual(c.status, 'error');
     assert.ok(doc.getElementById('evlAiLog').textContent.indexOf('No reply from the server for 90 seconds') >= 0);
     w.clearInterval(ph._aiDog);
+});
+
+test('Ask header before the first question shows the effective redaction state', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph;
+    var ep = function (x) { return { endpoint: Object.assign({ name: 'gpu-01.lan', model: 'qwen3:14b', network: 'private', redactionForced: false }, x) }; };
+    grant(w, ep({ redaction: 'on' }));
+    assert.strictEqual(ph.aiInfoLine(null), 'qwen3:14b on gpu-01.lan (local, personal values replaced)');
+    grant(w, ep({ redaction: 'off' }));
+    assert.strictEqual(ph.aiInfoLine(null), 'qwen3:14b on gpu-01.lan (local, nothing replaced)');
+    grant(w, ep({ network: 'public', redactionForced: true, redaction: 'forced' }));
+    assert.strictEqual(ph.aiInfoLine(null), 'qwen3:14b on gpu-01.lan (cloud, personal values replaced)');
+    grant(w, ep({}));   // a server without the field: only the forced state is known
+    assert.strictEqual(ph.aiInfoLine(null), 'qwen3:14b on gpu-01.lan (local, nothing replaced)');
+});
+
+test('errors: a connect timeout says the endpoint could not be reached, other timeouts that it was slow', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w); loadHistory(w);
+    ph.aiAsk('q');
+    var s = sentOf(w, 'aiStart')[0];
+    ph.onAiStarted(null, { nodeid: NODE, reqId: s.reqId, convId: 'cv9', network: 'public', redacted: true });
+    ph.onAiError(null, { nodeid: NODE, convId: 'cv9', turn: 1, code: 'timeout', phase: 'connect', message: 'Could not connect within 10 s', retryable: false });
+    var log = doc.getElementById('evlAiLog').textContent;
+    assert.ok(log.indexOf('Could not connect to the endpoint.') >= 0);
+    assert.ok(log.indexOf('Could not connect within 10 s') >= 0);
+    assert.ok(log.indexOf('took too long') < 0);
+    assert.ok(ph.aiErrText('timeout', 'idle').indexOf('took too long') >= 0);
 });
 
 test('device change stops running requests and restores the chat on return', { skip: SKIP }, async function () {

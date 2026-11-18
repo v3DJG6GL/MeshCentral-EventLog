@@ -91,6 +91,8 @@ The plugin registers three permissions with MeshCentral's plugin permission fram
 
 > **Breaking change in 0.2.0:** all three permissions are **denied by default**. After updating, only full administrators can use the Event Log tab until you grant the permissions.
 
+> **Loaded via `settings.plugins.list`?** Such plugins are not shown on the *My Server → Plugins* page, so the Permissions dialog cannot be opened there. Install the plugin normally (configuration URL above) to grant the permissions, or, for advanced setups, edit the `pluginpermission//eventlog` document in MeshCentral's plugin permissions store (`pluginpermissions` collection or table) while MeshCentral is stopped.
+
 - Users still need their normal MeshCentral rights on the device; the permissions only add to them. Device rights are taken from MeshCentral's database, never from what the browser sends.
 - A user with neither Live nor History sees a notice with a "Check again" link. Permission changes take effect on the next device refresh, without reloading the page.
 - On a MeshCentral without the plugin permission framework, only full administrators can use the tab. When the framework is present, the startup log shows `EVENTLOG: plugin permissions registered ...`.

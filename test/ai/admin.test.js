@@ -60,7 +60,7 @@ function setup(opts) {
     const secrets = secretsMod.create({ keyFile: path.join(tmp, 'k' + (++n) + '.key'), fallbackSecret: 'x', log: log, env: { LLM_KEY: 'env-key-value-0000' } });
     const store = storeMod.create({ db: db, secrets: secrets, netguard: netguard, log: log });
     let proxyCalls = 0;
-    const admin = adminMod.create({ store: store, db: db, netguard: netguard, adapters: adapters, llm: llm, http: http, getProxyAgent: function () { proxyCalls++; return opts.agent; }, log: log });
+    const admin = adminMod.create({ store: store, db: db, netguard: netguard, adapters: adapters, llm: llm, http: opts.http || http, getProxyAgent: function () { proxyCalls++; return opts.agent; }, log: log });
     const sent = [];
     const myparent = { user: { _id: 'user/d/admin', siteadmin: 0xFFFFFFFF }, ws: { readyState: 1, send: function (s) { sent.push(JSON.parse(s)); } } };
     let rid = 0;
@@ -347,6 +347,36 @@ test('draft env key reference and remove', async function () {
     noKeyAnywhere(t);
 });
 
+test('test: stops at the first connect-level failure, later steps skipped', async function () {
+    for (const fail of [
+        { err: http.mkErr('timeout', 'Could not connect within 8 s', { phase: 'connect' }), detail: /Could not connect within 8 s/ },
+        { err: http.mkErr('network', 'Connection failed (ECONNREFUSED)', { sysCode: 'ECONNREFUSED' }), detail: /ECONNREFUSED/ }
+    ]) {
+        const urls = [];
+        const fakeHttp = { request: function (ro) { urls.push(ro.url); const p = Promise.reject(fail.err); p.catch(function () { }); return { promise: p, abort: function () { } }; } };
+        const t = setup({ http: fakeHttp });
+        for (const ep of [chatEp({ baseUrl: 'http://llm.lan:8000/v1' }), chatEp({ baseUrl: 'http://llm.lan:11434/v1', preset: 'ollama' }), { name: 'A', format: 'anthropic', baseUrl: 'http://llm.lan:8000', model: 'c' }]) {
+            urls.length = 0;
+            const r = await t.call({ pluginaction: 'aiAdminTest', draft: Object.assign(ep, { keyAction: 'remove' }) });
+            assert.strictEqual(r.ok, false);
+            assert.strictEqual(urls.length, 1, 'one request only, got ' + urls.join(' '));
+            const by = {}; r.steps.forEach(function (x) { by[x.name] = x; });
+            assert.strictEqual(by.resolve.ok, true);
+            assert.strictEqual(by.connect.ok, false);
+            assert.match(by.connect.detail, fail.detail);
+            for (const n of ['auth', 'model', 'tools', 'context']) assert.deepStrictEqual([n, by[n].ok, by[n].detail], [n, null, 'Skipped']);
+        }
+    }
+});
+
+test('test: an HTTP error answer is not a connect failure (the probe goes on)', async function () {
+    const t = setup();
+    mock.script('/v1/models', { status: 404, body: '{"error":"no"}' });
+    const r = await t.call({ pluginaction: 'aiAdminTest', draft: Object.assign(chatEp(), { keyAction: 'remove' }) });
+    assert.ok(mock.requests.some(function (q) { return /chat\/completions$/.test(q.path); }), 'the chat request still ran');
+    assert.strictEqual(r.steps.find(function (x) { return x.name === 'connect'; }).ok, true);
+});
+
 test('audit rows: transcript only on request', async function () {
     const t = setup();
     await t.store.saveSettings({ storeTranscripts: true });
@@ -356,7 +386,12 @@ test('audit rows: transcript only on request', async function () {
     assert.strictEqual(r.method, 'aiAdminAuditRows');
     assert.strictEqual(r.total, 2);
     assert.ok(r.rows.every(function (x) { return !('transcript' in x); }));
-    r = await t.call({ pluginaction: 'aiAdminAudit', userid: 'user/d/a', withTranscript: true });
+    // MeshCentral sets command.userid to the caller on every plugin command: it must not filter
+    r = await t.call({ pluginaction: 'aiAdminAudit', userid: 'user/d/admin', skip: 0, limit: 10 });
+    assert.strictEqual(r.total, 2);
+    r = await t.call({ pluginaction: 'aiAdminAudit', userid: 'user/d/admin', filterNodeid: 'node/d/2' });
+    assert.deepStrictEqual(r.rows.map(function (x) { return x.userid; }), ['user/d/b']);
+    r = await t.call({ pluginaction: 'aiAdminAudit', userid: 'user/d/admin', filterUserid: 'user/d/a', withTranscript: true });
     assert.strictEqual(r.total, 1);
     assert.deepStrictEqual(r.rows[0].transcript, { items: ['x'] });
     r = await t.call({ pluginaction: 'aiAdminAudit', since: 1500, until: 3000 });

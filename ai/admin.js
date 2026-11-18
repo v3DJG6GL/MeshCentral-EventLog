@@ -12,11 +12,13 @@
 //       steps resolve, connect, auth, model, tools, context; a step that could not run has ok:null.
 //       Only a test of a saved endpoint ({id} without draft) stores caps and lastTest.
 //   aiAdminModels {id|draft} -> aiAdminModelsResult { ok, models:[{id, ctx?, tools?}], error? }
-//   aiAdminAudit {since, until, userid, nodeid, skip, limit, withTranscript} -> aiAdminAuditRows { rows, total }
+//   aiAdminAudit {since, until, filterUserid, filterNodeid, skip, limit, withTranscript} -> aiAdminAuditRows { rows, total }
+//       (filterUserid, not userid: MeshCentral overwrites command.userid with the caller's id on every plugin command)
 // A draft carries the unsaved form fields plus keyAction/key; keyAction 'keep' with an id uses the stored key.
 // Outbound requests use the netguard-pinned lookup, the proxy agent for public https targets, never follow
 // redirects, stay on the validated host, never send a key over http:// to a public address and share a 30 s
-// budget per test. Details sent back are short (<= 300 chars) and have the key scrubbed.
+// budget per test (the admin page waits 40 s) and stop at the first connect-level failure. Details sent back
+// are short (<= 300 chars) and have the key scrubbed.
 
 const OVERALL_MS = 30000;
 const MAX_INFLIGHT = 4;
@@ -82,9 +84,17 @@ function create(o) {
         return { baseUrl: ep.baseUrl, model: ep.model, apiKey: apiKey || null, maxOutputTokens: 16, numCtx: ep.numCtx || null, ollamaNative: false, quirks: ep.quirks || undefined };
     }
 
-    // deps.request bound to the validated address; all requests share one deadline and can be aborted together
+    // a failure before the server answered at all (refused, unreachable, TLS, connect timeout): the next
+    // requests of the same test would fail the same way, each after its own timeout
+    function isConnectFailure(e) {
+        return !!e && ((e.code === 'timeout' && e.phase === 'connect') || (e.code === 'network' && e.status == null));
+    }
+
+    // deps.request bound to the validated address; all requests share one deadline and can be aborted together.
+    // After the first connect-level failure every further request fails at once with that error.
     function makeDeps(chk, apiKey, deadline) {
         const active = new Set();
+        let connectFail = null;
         const host = String(chk.hostname || '').toLowerCase();
         const stats = { firstResponseMs: null, t0: Date.now() };
         function refuse(code, message) {
@@ -101,6 +111,7 @@ function create(o) {
                 if (h.startsWith('[') && h.endsWith(']')) h = h.slice(1, -1);
                 if (h !== host) return refuse('blocked', 'Request to a host that was not validated');
                 if (u.protocol === 'http:' && chk.network === 'public' && apiKey) return refuse('blocked', 'Refusing to send an API key over unencrypted http:// to a public address');
+                if (connectFail) return refuse(connectFail.code, connectFail.message);
                 const left = deadline - Date.now();
                 if (left <= 0) return refuse('timeout', 'The test took longer than ' + Math.round(OVERALL_MS / 1000) + ' s');
                 const req = Object.assign({}, ro, {
@@ -121,7 +132,7 @@ function create(o) {
                 const hnd = httpMod.request(req);
                 active.add(hnd);
                 const done = function () { active.delete(hnd); };
-                hnd.promise.then(done, done);
+                hnd.promise.then(done, function (e) { done(); if (!connectFail && isConnectFailure(e)) connectFail = e; });
                 return hnd;
             }
         };
@@ -382,7 +393,9 @@ function create(o) {
 
     async function doAudit(command, myparent) {
         try {
-            const q = { since: command.since, until: command.until, userid: command.userid || undefined, nodeid: command.nodeid || undefined, skip: command.skip, limit: Math.min(Math.max(Number(command.limit) || 100, 1), 1000) };
+            const fu = typeof command.filterUserid === 'string' && command.filterUserid ? command.filterUserid : undefined;
+            const fnid = typeof command.filterNodeid === 'string' && command.filterNodeid ? command.filterNodeid : (typeof command.nodeid === 'string' && command.nodeid ? command.nodeid : undefined);   // nodeid is passed through unchanged
+            const q = { since: command.since, until: command.until, userid: fu, nodeid: fnid, skip: command.skip, limit: Math.min(Math.max(Number(command.limit) || 100, 1), 1000) };
             const r = await store.auditQuery(q);
             const rows = ((r && r.rows) || []).map(function (x) {
                 const y = Object.assign({}, x);

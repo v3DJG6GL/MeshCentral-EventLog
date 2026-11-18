@@ -89,6 +89,11 @@ test('connect timeout (a lookup that never answers keeps the socket connecting)'
     await assert.rejects(h.promise, function (e) { return e.code === 'timeout' && e.phase === 'connect'; });
 });
 
+test('total timeout before the connection is up counts as a connect timeout', async function () {
+    const h = request({ url: 'http://never.test:9/', lookup: function () { }, connectTimeoutMs: 5000, totalTimeoutMs: 100 });
+    await assert.rejects(h.promise, function (e) { return e.code === 'timeout' && e.phase === 'connect' && /connect/.test(e.message); });
+});
+
 test('connection refused -> network', async function () {
     const net = require('net');
     const s = net.createServer(); await new Promise(function (r) { s.listen(0, '127.0.0.1', r); });

@@ -14,12 +14,33 @@ test.beforeEach(function () { mock.reset(); });
 function chatReqs() { return mock.requests.filter(function (r) { return r.path === CHAT; }); }
 function methods(t) { return t.ws.sent.map(function (m) { return m.method + (m.code ? ':' + m.code : ''); }).join(','); }
 
+test('accessInfo: effective redaction for the endpoint (forced outside the private networks, else the toggles)', async function () {
+    const t = F.setup({ mock: mock });
+    let a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.strictEqual(a.endpoint.redaction, 'on');
+    const off = {}; Object.keys(t.store.settings.redact).forEach(function (k) { off[k] = false; });
+    t.store.settings.redact = off;
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual([a.endpoint.redaction, a.endpoint.redactionForced], ['off', false]);
+    t.store.settings.redact = Object.assign({}, off, { domains: true });   // domains count as host names
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.strictEqual(a.endpoint.redaction, 'on');
+    t.store.settings.redact = off;
+    t.ng.network = 'private';
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.strictEqual(a.endpoint.redaction, 'off');
+    t.ng.network = 'public';
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual([a.endpoint.redaction, a.endpoint.redactionForced], ['forced', true]);
+    t.close();
+});
+
 test('accessInfo: assistant true with endpoint info; every refusal reason', async function () {
     const t = F.setup({ mock: mock, settings: { quotas: { perUserQuestions: 5 } } });
     let a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
     assert.strictEqual(a.assistant, true);
     assert.strictEqual(a.assistantReason, null);
-    assert.deepStrictEqual(a.endpoint, { name: 'Test endpoint', model: 'test-model', network: 'loopback', redactionForced: false, previewPolicy: 'never', toolMode: 'tools' });
+    assert.deepStrictEqual(a.endpoint, { name: 'Test endpoint', model: 'test-model', network: 'loopback', redactionForced: false, redaction: 'on', previewPolicy: 'never', toolMode: 'tools' });
     assert.strictEqual(a.categories.software, true);
     assert.deepStrictEqual(a.remaining, { questions: 5, tokens: null });
     F.assertNoForbidden(assert, 'accessInfo', JSON.stringify(a));
