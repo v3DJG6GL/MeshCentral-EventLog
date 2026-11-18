@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+
+## [0.5.1] - 2026-11-18
 ### Fixed
 - Assistant: the Diagnose time-window choice is laid out in one row and the model is named only once
 
