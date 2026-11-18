@@ -40,6 +40,9 @@
 //   prompts { base, ask, explain, diagnose: null (factory default) | text <= 20000 chars, edited { part: {at, by,
 //   factoryHash} } } ('' or the factory text itself -> null; edited entries of factory parts are dropped) and
 //   extraInstructions (<= 4000 chars). mergeSettings(base, input) is the same merge without saving.
+//   history { enabled (default true), retentionDays 1..3650 (default 30) }: saved chats, diagnoses and explanations
+//   (ai/history.js). starters { windows, linux }: null (factory list, STARTERS) | up to 12 one-line texts of at most
+//   200 characters (the factory list itself -> null); startersFor(settings, os) picks a device's list.
 //   The stored document also carries sv (SETTINGS_VERSION, server-side only); an older document is migrated once
 //   on load (old defaults -> new defaults) and saved again; a failed save is logged and does not fail the load.
 // Acknowledgements: getAck(userid, epId) -> Promise<bool>, setAck(userid, epId) -> Promise<bool>.
@@ -78,14 +81,26 @@ const DEFAULTS = {
     categories: { deviceSummary: true, network: true, storedEvents: true, meshEvents: true, notes: false, software: false },
     // system prompt templates per part (null = factory default, ai/prompts.js FACTORY); edited[part] = { at, by, factoryHash }
     prompts: { base: null, ask: null, explain: null, diagnose: null, edited: {} },
-    extraInstructions: ''
+    extraInstructions: '',
+    // saved results (chats, the last diagnosis, explanations) per user and device, ai/history.js
+    history: { enabled: true, retentionDays: 30 },
+    // starter questions of an empty Ask panel per device OS (null = the factory list, STARTERS)
+    starters: { windows: null, linux: null }
 };
+// Factory starter questions (the buttons of an empty Ask panel); a device of unknown OS gets the Windows list.
+const STARTERS = {
+    windows: ['Why did this device restart recently?', 'What changed in the last 24 hours?', 'Are there signs of disk or hardware problems?'],
+    linux: ['Why did this device restart recently?', 'Which services failed in the last 24 hours?', 'Are there signs of disk, memory or hardware problems?']
+};
+const STARTER_OS = ['windows', 'linux'];
+const MAX_STARTERS = 12, MAX_STARTER_LEN = 200;
 const PROMPT_PARTS = prompts.PARTS;
 const MAX_TEMPLATE = prompts.MAX_TEMPLATE, MAX_EXTRA = prompts.MAX_EXTRA;
 const RANGES = {
     limits: { maxRounds: [1, 50], maxCalls: [1, 200], maxOutputTokens: [64, 128000], timeoutSec: [10, 900], maxSentKB: [16, 8192] },
     quotas: { perUserQuestions: [0, 100000], perUserTokens: [0, 1000000000] },
-    retentionDays: [1, 3650]
+    retentionDays: [1, 3650],
+    historyDays: [1, 3650]
 };
 // limits where null means "automatic" (the engine derives the value: maxCalls 3 x maxRounds, maxSentKB from the context)
 const NULLABLE = { limits: { maxCalls: true, maxSentKB: true } };
@@ -132,6 +147,30 @@ function normExtra(v) {
     const t = v.replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim();
     return t.length > MAX_EXTRA ? t.slice(0, MAX_EXTRA) : t;
 }
+// a starter list from the admin page: null for the factory list (null, or the factory list itself), undefined for a
+// value that is not an array (ignored), else up to 12 distinct one-line texts of at most 200 characters
+function normStarters(os, v) {
+    if (v === null) return null;
+    if (!Array.isArray(v)) return undefined;
+    const out = [];
+    for (const x of v) {
+        if (typeof x !== 'string') continue;
+        let t = x.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+        if (!t) continue;
+        if (t.length > MAX_STARTER_LEN) t = t.slice(0, MAX_STARTER_LEN).trim();
+        if (out.indexOf(t) < 0) out.push(t);
+        if (out.length >= MAX_STARTERS) break;
+    }
+    const f = STARTERS[os];
+    if (out.length === f.length && out.every(function (t, i) { return t === f[i]; })) return null;
+    return out;
+}
+// the starter questions for a device: the saved list for its OS, else the factory list (unknown OS: Windows)
+function startersFor(settings, os) {
+    const k = os === 'linux' ? 'linux' : 'windows';
+    const v = settings && isObj(settings.starters) ? settings.starters[k] : null;
+    return Array.isArray(v) ? v.slice(0, MAX_STARTERS) : STARTERS[k].slice();
+}
 function normEdited(e) {
     const out = {};
     if (!isObj(e)) return out;
@@ -155,6 +194,12 @@ function mergeSettings(base, input) {
     for (const p of PROMPT_PARTS) if (typeof s.prompts[p] !== 'string') s.prompts[p] = null;
     s.prompts.edited = normEdited(s.prompts.edited);
     if (typeof s.extraInstructions !== 'string') s.extraInstructions = '';
+    s.history = Object.assign({}, DEFAULTS.history, isObj(s.history) ? s.history : {});
+    s.history.enabled = s.history.enabled !== false;
+    s.history.retentionDays = clampInt(s.history.retentionDays, RANGES.historyDays, DEFAULTS.history.retentionDays);
+    const st0 = isObj(s.starters) ? s.starters : {};
+    s.starters = {};
+    for (const os of STARTER_OS) { const v = normStarters(os, st0[os]); s.starters[os] = v === undefined ? null : v; }
     if (!isObj(input)) return s;
     if (typeof input.enabled === 'boolean') s.enabled = input.enabled;
     if (typeof input.storeTranscripts === 'boolean') s.storeTranscripts = input.storeTranscripts;
@@ -179,6 +224,13 @@ function mergeSettings(base, input) {
     for (const p of PROMPT_PARTS) if (s.prompts[p] == null) delete s.prompts.edited[p];
     const ex = normExtra(input.extraInstructions);
     if (ex !== undefined) s.extraInstructions = ex;
+    if (isObj(input.history)) {
+        if (typeof input.history.enabled === 'boolean') s.history.enabled = input.history.enabled;
+        s.history.retentionDays = clampInt(input.history.retentionDays, RANGES.historyDays, s.history.retentionDays);
+    }
+    if (isObj(input.starters)) {
+        for (const os of STARTER_OS) { const v = normStarters(os, input.starters[os]); if (v !== undefined) s.starters[os] = v; }
+    }
     return s;
 }
 
@@ -545,4 +597,4 @@ function create(opts) {
     };
 }
 
-module.exports = { create, validateEndpoint, sanitize, mergeSettings, DEFAULTS, SETTINGS_VERSION, FORMATS, PRESETS, TOOL_MODES, ID_RE };
+module.exports = { create, validateEndpoint, sanitize, mergeSettings, startersFor, DEFAULTS, STARTERS, SETTINGS_VERSION, FORMATS, PRESETS, TOOL_MODES, ID_RE };

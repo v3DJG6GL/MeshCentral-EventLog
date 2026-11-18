@@ -135,6 +135,38 @@ function auditRec(rec) {
     return d;
 }
 
+// Assistant saved results (chats, last diagnosis, explanations), one record per item:
+//   { id, time (last update, ms), userid, nodeid, kind ('chat'|'diagnosis'|'explain'), meta (small, for lists), doc }
+// The callers (ai/history.js) build ids and check ownership; these helpers only validate shapes.
+var CHAT_KINDS = { chat: true, diagnosis: true, explain: true };
+function chatStr(v, max) { return (typeof v == 'string' && v.length > 0 && v.length <= (max || 256)) ? v : null; }
+function chatRec(rec) {
+    rec = rec || {};
+    var id = chatStr(rec.id, 64), userid = chatStr(rec.userid), nodeid = chatStr(rec.nodeid);
+    if (id == null || userid == null || nodeid == null || !CHAT_KINDS[rec.kind]) return null;
+    return { id: id, time: (Number(rec.time) > 0) ? Number(rec.time) : Date.now(), userid: userid, nodeid: nodeid, kind: rec.kind,
+             meta: (rec.meta != null && typeof rec.meta == 'object') ? rec.meta : {}, doc: (rec.doc != null && typeof rec.doc == 'object') ? rec.doc : {} };
+}
+// list query: userid and nodeid are required (a list is always one user's items on one device)
+function chatQueryNorm(q) {
+    q = q || {};
+    var userid = chatStr(q.userid), nodeid = chatStr(q.nodeid);
+    return {
+        none: userid == null || nodeid == null || (q.kind != null && !CHAT_KINDS[q.kind]),
+        userid: userid, nodeid: nodeid, kind: (q.kind != null && CHAT_KINDS[q.kind]) ? q.kind : null,
+        since: (q.since != null && isFinite(Number(q.since))) ? Number(q.since) : null,
+        skip: Math.min(Math.max(intOr(q.skip, 0), 0), 100000),
+        limit: Math.min(Math.max(intOr(q.limit, 50) || 50, 1), 1000)
+    };
+}
+function chatIds(ids) { return (Array.isArray(ids) ? ids : [ids]).filter(function (x) { return chatStr(x, 64) != null; }).slice(0, 1000); }
+function chatOut(r) {
+    if (r == null) return null;
+    var o = { id: String(r.id != null ? r.id : r._id), time: Number(r.time) || 0, userid: r.userid, nodeid: r.nodeid, kind: r.kind, meta: r.meta || {} };
+    if (r.doc !== undefined) o.doc = r.doc || {};
+    return o;
+}
+
 // normalize an incoming collection batch in place; returns { count, maxTc }
 function prepEvents(nodeid, events) {
     var now = new Date(), maxTc = 0;
@@ -265,7 +297,7 @@ module.exports.CreateDB = function(meshserver) {
         obj._closed = true;
         obj._timers.forEach(function(t) { try { clearInterval(t); } catch (e) { } try { clearTimeout(t); } catch (e) { } });
         obj._timers = [];
-        [obj.eventsFile, obj.settingsFile, obj.auditFile].forEach(function(f) {
+        [obj.eventsFile, obj.settingsFile, obj.auditFile, obj.chatFile].forEach(function(f) {
             if (f == null) return;
             try {
                 if (typeof f.stopAutocompaction == 'function') f.stopAutocompaction();
@@ -304,6 +336,7 @@ module.exports.CreateDB = function(meshserver) {
             cleanStrList: cleanStrList,
             auditQueryNorm: auditQueryNorm,
             auditRec: auditRec,
+            chatRec: chatRec, chatQueryNorm: chatQueryNorm, chatIds: chatIds, chatOut: chatOut,
             DEFAULT_RETENTION_DAYS: DEFAULT_RETENTION_DAYS
         });
         return obj;
@@ -483,6 +516,46 @@ module.exports.CreateDB = function(meshserver) {
           };
           obj.aiAuditSweep = function(cutoffMs) {
               return obj.auditFile.deleteMany({ time: { $lt: Number(cutoffMs) } }).then(function (r) { return (r && r.deletedCount) || 0; });
+          };
+          // Assistant saved results (chats, last diagnosis, explanations): their own collection
+          obj.chatFile = db.collection('plugin_eventlog_ai_chats');
+          try { obj.chatFile.createIndex({ userid: 1, nodeid: 1, time: -1 }, { name: 'UserNodeTime1' }).catch(function () { }); obj.chatFile.createIndex({ time: 1 }, { name: 'Time1' }).catch(function () { }); } catch (e) { }
+          obj.aiChatPut = function(rec) {
+              var r = chatRec(rec);
+              if (r == null) return Promise.resolve(false);
+              var d = { _id: r.id, time: r.time, userid: r.userid, nodeid: r.nodeid, kind: r.kind, meta: r.meta, doc: r.doc };
+              return obj.chatFile.replaceOne({ _id: r.id }, d, { upsert: true }).then(function () { return true; });
+          };
+          obj.aiChatGet = function(id) {
+              if (chatIds(id).length != 1) return Promise.resolve(null);
+              return obj.chatFile.find({ _id: id }).limit(1).toArray().then(function (d) { return (d && d[0]) ? chatOut(d[0]) : null; });
+          };
+          obj.aiChatList = function(q) {
+              q = chatQueryNorm(q);
+              if (q.none) return Promise.resolve([]);
+              var m = { userid: q.userid, nodeid: q.nodeid };
+              if (q.kind != null) m.kind = q.kind;
+              if (q.since != null) m.time = { $gte: q.since };
+              return obj.chatFile.find(m).project({ doc: 0 }).sort({ time: -1, _id: -1 }).skip(q.skip).limit(q.limit).toArray()
+              .then(function (rows) { return (rows || []).map(chatOut); });
+          };
+          obj.aiChatDel = function(ids) {
+              ids = chatIds(ids);
+              if (ids.length == 0) return Promise.resolve(0);
+              return obj.chatFile.deleteMany({ _id: { $in: ids } }).then(function (r) { return (r && r.deletedCount) || 0; });
+          };
+          obj.aiChatSweep = function(cutoffMs) {
+              return obj.chatFile.deleteMany({ time: { $lt: Number(cutoffMs) || 0 } }).then(function (r) { return (r && r.deletedCount) || 0; });
+          };
+          obj.aiChatPurge = function() {
+              return obj.chatFile.deleteMany({}).then(function (r) { return (r && r.deletedCount) || 0; });
+          };
+          obj.aiChatCounts = function() {
+              return obj.chatFile.aggregate([{ $group: { _id: '$kind', n: { $sum: 1 } } }]).toArray().then(function (rows) {
+                  var out = { chat: 0, diagnosis: 0, explain: 0 };
+                  (rows || []).forEach(function (r) { if (out[r._id] != null) out[r._id] = Number(r.n) || 0; });
+                  return out;
+              });
           };
           obj.updateDefaultConfig = function(args) {
               args.type = 'configSet';
@@ -817,6 +890,66 @@ module.exports.CreateDB = function(meshserver) {
                     resolve(removed || 0);
                 }, obj.auditFile);
             });
+        };
+        // Assistant saved results (chats, last diagnosis, explanations): their own file
+        if (obj.chatFile == null) {
+            obj.chatFile = new Datastore({ filename: meshserver.getConfigFilePath('plugin-eventlog-ai-chats.db'), autoload: true });
+            setCompaction(obj.chatFile);
+            obj.chatFile.ensureIndex({ fieldName: 'userid' });
+            obj.chatFile.ensureIndex({ fieldName: 'time' });
+        }
+        obj.aiChatPut = function(rec) {
+            var r = chatRec(rec);
+            if (r == null) return Promise.resolve(false);
+            var d = { _id: r.id, time: r.time, userid: r.userid, nodeid: r.nodeid, kind: r.kind, meta: r.meta, doc: r.doc };
+            return new Promise(function (resolve, reject) {
+                obj.chatFile.update({ _id: r.id }, d, { upsert: true }, function (err) { if (err) reject(err); else resolve(true); });
+            });
+        };
+        obj.aiChatGet = function(id) {
+            if (chatIds(id).length != 1) return Promise.resolve(null);
+            return new Promise(function (resolve, reject) {
+                obj.chatFile.find({ _id: id }).limit(1).exec(function (err, d) { if (err) reject(err); else resolve((d && d[0]) ? chatOut(d[0]) : null); });
+            });
+        };
+        obj.aiChatList = function(q) {
+            q = chatQueryNorm(q);
+            if (q.none) return Promise.resolve([]);
+            var m = { userid: q.userid, nodeid: q.nodeid };
+            if (q.kind != null) m.kind = q.kind;
+            if (q.since != null) m.time = { $gte: q.since };
+            return new Promise(function (resolve, reject) {
+                obj.chatFile.find(m, { doc: 0 }).sort({ time: -1, _id: -1 }).skip(q.skip).limit(q.limit).exec(function (err, rows) {
+                    if (err) reject(err); else resolve((rows || []).map(chatOut));
+                });
+            });
+        };
+        obj.aiChatDel = function(ids) {
+            ids = chatIds(ids);
+            if (ids.length == 0) return Promise.resolve(0);
+            return new Promise(function (resolve, reject) {
+                obj.chatFile.remove({ _id: { $in: ids } }, { multi: true }, function (err, n) { if (err) reject(err); else resolve(n || 0); });
+            });
+        };
+        obj.aiChatSweep = function(cutoffMs) {
+            return new Promise(function (resolve) {
+                removeInChunks({ time: { $lt: Number(cutoffMs) || 0 } }, function (err, removed) {
+                    if (err) console.log('EVENTLOG AI: saved results sweep error: ' + (err.message || err));
+                    resolve(removed || 0);
+                }, obj.chatFile);
+            });
+        };
+        obj.aiChatPurge = function() {
+            return new Promise(function (resolve) {
+                removeInChunks({}, function (err, removed) {
+                    if (err) console.log('EVENTLOG AI: saved results purge error: ' + (err.message || err));
+                    resolve(removed || 0);
+                }, obj.chatFile);
+            });
+        };
+        obj.aiChatCounts = function() {
+            var count = function (kind) { return new Promise(function (resolve, reject) { obj.chatFile.count({ kind: kind }, function (err, n) { if (err) reject(err); else resolve(n || 0); }); }); };
+            return Promise.all([count('chat'), count('diagnosis'), count('explain')]).then(function (n) { return { chat: n[0], diagnosis: n[1], explain: n[2] }; });
         };
         obj.updateDefaultConfig = function(args) {
             args.type = 'configSet';

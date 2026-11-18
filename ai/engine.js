@@ -18,6 +18,7 @@
 //     buildDigest(tokens) -> Promise<{ text, refs }>      summary fallback when the endpoint rejects tools
 //     systemPrompt(toolNames) -> string                   rebuilt for the summary fallback
 //     onToolsUnsupported()                                persist caps.tools = false
+//     onDone(doneMsg, { steps })                          optional: after onAiDone was sent (saving the result)
 //     timeouts { idleMs, totalMs, connectMs }, flushMs (75), maxCallsPerRound (4), maxCalls (settings.limits.maxCalls, else 3 x maxRounds)
 //   }
 // While the model reasons, onAiThinking { turn, round, chars } is sent (at most every 500 ms per model call; round
@@ -174,11 +175,11 @@ async function turn(S, userText, deps) {
     }
 
     function newSegment(text) {
-        const answers = S.answers.slice(-6);
-        if (!answers.length) return false;
-        const recap = 'Recap of this chat so far (the earlier messages were dropped to fit the context):\n\n' +
-            answers.map(function (x) { return 'Technician asked: ' + clip(x.q, 400) + '\nYou answered: ' + clip(x.a, 1500); }).join('\n\n') +
-            '\n\nEvent refs returned so far: ' + Array.from(S.refs.returned).slice(-150).join(', ');
+        if (!S.answers.length) return false;
+        const recap = recapText(S.answers, {
+            intro: 'Recap of this chat so far (the earlier messages were dropped to fit the context):', max: 6,
+            refsLine: 'Event refs returned so far: ' + Array.from(S.refs.returned).slice(-150).join(', ')
+        });
         S.segment = (S.segment || 0) + 1;
         S.transcript = { system: S.transcript.system, items: [{ role: 'user', text: prompts.fence(S.nonce, 'recap', recap) + '\n\n' + text }] };
         return true;
@@ -331,6 +332,11 @@ async function turn(S, userText, deps) {
     if (result === 'answered') {
         flush();
         deps.send('onAiDone', doneMsg);
+        // the caller saves the result (ai/history.js); what it does never changes this turn
+        if (typeof deps.onDone === 'function') {
+            try { deps.onDone(doneMsg, { steps: steps.map(function (x) { return { tool: x.tool, args: x.args, ms: x.ms, items: x.items, status: x.status === 'running' ? 'error' : x.status }; }) }); }
+            catch (e) { log('EVENTLOG AI: saving the result failed (' + ((e && e.name) || 'Error') + ')'); }
+        }
     } else {
         outBuf = '';
         S.transcript = saved.transcript;
@@ -407,10 +413,33 @@ async function turn(S, userText, deps) {
     }
 }
 
+// Recap text for a new model session that replaces earlier messages (a long chat cut to fit the context, or a saved
+// chat continued later): the latest question / answer pairs, at most o.max of them (default 6), each clipped (400 /
+// 1500 characters), the oldest dropped first while the pairs exceed o.maxChars (the newest pair is always kept,
+// cut to fit); then o.refsLine. answers: [{ q, a }] already as sent to the model (pseudonymized).
+function recapText(answers, o) {
+    o = o || {};
+    const max = Number(o.max) > 0 ? Math.floor(Number(o.max)) : 6;
+    const maxChars = Number(o.maxChars) > 0 ? Number(o.maxChars) : Infinity;
+    const parts = [];
+    let used = 0;
+    const list = Array.isArray(answers) ? answers : [];
+    for (let i = list.length - 1; i >= 0 && parts.length < max; i--) {
+        const x = list[i] || {};
+        let p = 'Technician asked: ' + clip(x.q, 400) + '\nYou answered: ' + clip(x.a, 1500);
+        if (parts.length && used + p.length > maxChars) break;
+        const cut = Math.max(200, Math.floor(Math.min(maxChars, 1e9)));
+        if (p.length > cut) p = p.slice(0, cut) + '…';
+        parts.unshift(p);
+        used += p.length;
+    }
+    return (o.intro || 'Recap of this chat so far:') + '\n\n' + parts.join('\n\n') + (o.refsLine ? '\n\n' + o.refsLine : '');
+}
+
 // command texts are restored without markers so they can be copied as-is
 function isCommandText(structured, s) {
     if (!structured || !Array.isArray(structured.nextSteps)) return false;
     return structured.nextSteps.some(function (st) { return st && st.command && st.command.text === s; });
 }
 
-module.exports = { runTurn, capTokens, turnLimits };
+module.exports = { runTurn, capTokens, turnLimits, recapText };

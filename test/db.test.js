@@ -95,7 +95,7 @@ var backends = [
                 close: async function () {
                     // let queued NeDB writes land before the directory goes away
                     for (var k = 0; k < 2; k++) {
-                        for (var f of [db.eventsFile, db.settingsFile, db.auditFile]) await cbp(function (cb) { f.find({ _id: '__none__' }, cb); });
+                        for (var f of [db.eventsFile, db.settingsFile, db.auditFile, db.chatFile]) await cbp(function (cb) { f.find({ _id: '__none__' }, cb); });
                         await delay(20);
                     }
                     db.close();
@@ -372,6 +372,63 @@ backends.forEach(function (be) {
             assert.strictEqual(await db.aiAuditSweep(T0 + 4 * 60000), 0);
             assert.strictEqual(await db.aiAuditSweep('garbage'), 0);
             assert.strictEqual((await db.aiAuditQuery({})).total, 10);
+        });
+
+        // ---- new: assistant saved results (chats, last diagnosis, explanations) ----
+        test('saved results: put / replace / get / list (scope, kind, since, order, paging, no doc) / delete / sweep / counts / purge', async function () {
+            var U1 = 'user/d/alice', U2 = 'user/d/bob';
+            var put = function (id, time, userid, nodeid, kind, extra) {
+                return db.aiChatPut({ id: id, time: time, userid: userid, nodeid: nodeid, kind: kind, meta: { title: 't-' + id, eventId: extra || null }, doc: { messages: [{ q: 'q ' + id, a: 'answer with "quotes", ümlauts and a\nnewline', cites: { E1: { _id: '5', Message: 'm' } } }] } });
+            };
+            for (var i = 0; i < 6; i++) assert.strictEqual(await put('ch' + String(i).padStart(24, '0'), T0 + i * 1000, U1, A, 'chat'), true);
+            await put('ch' + 'b'.repeat(24), T0 + 500, U2, A, 'chat');
+            await put('ch' + 'c'.repeat(24), T0 + 600, U1, B, 'chat');
+            await put('dg1', T0 + 700, U1, A, 'diagnosis');
+            await put('ex1', T0 + 800, U1, A, 'explain', 'ev1');
+            // invalid records are refused, not stored
+            assert.strictEqual(await db.aiChatPut({ id: 'x', time: T0, userid: U1, nodeid: A, kind: 'other' }), false);
+            assert.strictEqual(await db.aiChatPut({ id: '', time: T0, userid: U1, nodeid: A, kind: 'chat' }), false);
+            assert.strictEqual(await db.aiChatPut({ id: 'y'.repeat(65), time: T0, userid: U1, nodeid: A, kind: 'chat' }), false);
+            assert.strictEqual(await db.aiChatPut(null), false);
+            // get: the whole record with its document
+            var g = await db.aiChatGet('ch' + '0'.repeat(23) + '3');
+            assert.deepStrictEqual([g.id, g.time, g.userid, g.nodeid, g.kind, g.meta.title], ['ch' + '0'.repeat(23) + '3', T0 + 3000, U1, A, 'chat', 't-ch' + '0'.repeat(23) + '3']);
+            assert.strictEqual(g.doc.messages[0].a, 'answer with "quotes", ümlauts and a\nnewline');
+            assert.strictEqual(g.doc.messages[0].cites.E1._id, '5');
+            assert.strictEqual(await db.aiChatGet('nope'), null);
+            assert.strictEqual(await db.aiChatGet({ $ne: null }), null);
+            // replace (upsert): same id, new content and time
+            await db.aiChatPut({ id: 'dg1', time: T0 + 9000, userid: U1, nodeid: A, kind: 'diagnosis', meta: { window: '7d' }, doc: { text: 'new' } });
+            g = await db.aiChatGet('dg1');
+            assert.deepStrictEqual([g.time, g.meta.window, g.doc.text, g.doc.messages], [T0 + 9000, '7d', 'new', undefined]);
+            // list: one user on one device, newest first, without documents
+            var l = await db.aiChatList({ userid: U1, nodeid: A, kind: 'chat' });
+            assert.deepStrictEqual(l.map(function (r) { return r.time; }), [5, 4, 3, 2, 1, 0].map(function (i) { return T0 + i * 1000; }));
+            assert.ok(l.every(function (r) { return r.doc === undefined && r.meta && r.userid === U1 && r.nodeid === A; }));
+            assert.deepStrictEqual((await db.aiChatList({ userid: U1, nodeid: A, kind: 'chat', skip: 4, limit: 10 })).map(function (r) { return r.time; }), [T0 + 1000, T0]);
+            assert.deepStrictEqual((await db.aiChatList({ userid: U1, nodeid: A, kind: 'chat', since: T0 + 4000 })).length, 2);
+            assert.deepStrictEqual((await db.aiChatList({ userid: U1, nodeid: A })).length, 8, 'all kinds');
+            assert.deepStrictEqual((await db.aiChatList({ userid: U1, nodeid: A, kind: 'explain' })).map(function (r) { return r.meta.eventId; }), ['ev1']);
+            assert.deepStrictEqual((await db.aiChatList({ userid: U2, nodeid: A })).map(function (r) { return r.userid; }), [U2]);
+            assert.deepStrictEqual((await db.aiChatList({ userid: U1, nodeid: B })).map(function (r) { return r.nodeid; }), [B]);
+            // a list without user or device, or with a bad kind, matches nothing (fail closed)
+            for (var bad of [{}, { userid: U1 }, { nodeid: A }, { userid: U1, nodeid: A, kind: 'nope' }, { userid: { $ne: 1 }, nodeid: A }, { userid: U1, nodeid: 'x'.repeat(300) }]) {
+                assert.deepStrictEqual(await db.aiChatList(bad), [], JSON.stringify(bad));
+            }
+            // counts per kind
+            assert.deepStrictEqual(await db.aiChatCounts(), { chat: 8, diagnosis: 1, explain: 1 });
+            // delete by ids (garbage ids ignored)
+            assert.strictEqual(await db.aiChatDel(['ch' + 'b'.repeat(24), 'missing', 5, null]), 1);
+            assert.strictEqual(await db.aiChatDel([]), 0);
+            assert.strictEqual(await db.aiChatGet('ch' + 'b'.repeat(24)), null);
+            // sweep: strictly older than the cutoff
+            assert.strictEqual(await db.aiChatSweep(T0 + 2000), 4);   // chats 0, 1 and the ones at +600, +800
+            assert.deepStrictEqual(await db.aiChatCounts(), { chat: 4, diagnosis: 1, explain: 0 });
+            assert.strictEqual(await db.aiChatSweep(T0 + 2000), 0);
+            // purge: everything
+            assert.strictEqual(await db.aiChatPurge(), 5);
+            assert.deepStrictEqual(await db.aiChatCounts(), { chat: 0, diagnosis: 0, explain: 0 });
+            assert.deepStrictEqual(await db.aiChatList({ userid: U1, nodeid: A }), []);
         });
     });
 });

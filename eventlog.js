@@ -691,6 +691,7 @@ body.night #pluginEventLog {
         var same = (prev != null && prev.nodeid == a.nodeid && prev.live == a.live && prev.history == a.history && prev.assistant == a.assistant &&
             prev.assistantReason == a.assistantReason && prev.configSetName == a.configSetName && prev.canManage == a.canManage);
         if (same && (Q('evlWrap') || Q('evlNotice'))) {   // nothing changed: keep the tab as it is (the endpoint shown may have)
+            if (a.assistant && ph.st != null) ph.aiHistoryInit();
             if (Q('evlAiHd') && ph.st != null) QH('evlAiHd', ph.aiHeadHtml(ph.st.ai.convs[ph.st.ai.chat] || null));
             return;
         }
@@ -705,6 +706,7 @@ body.night #pluginEventLog {
         if (ph.elEnsureShell()) {
             var st = ph.elState();
             if (st.view == 'history' && a.history && !st.hist.loaded && !st.hist.loading) ph.elLoadHistory(true);
+            if (a.assistant) ph.aiHistoryInit();   // saved chats, the last diagnosis and explanations of this user
         }
         setTimeout(function() { try { pluginHandler.eventlog.elEnsureLive(); } catch (e) { } }, 0);
     };
@@ -1990,14 +1992,18 @@ body.night #pluginEventLog {
     // Which plugin actions may come from where. Agent actions are only accepted from an agent connection;
     // device actions only from a user session, after the user's rights on that device are confirmed.
     obj.AGENT_ACTIONS = { sendlog: true, gatherlogs: true };
-    obj.NODE_ACTIONS = { checkAccess: true, getNodeHistory: true, collectNow: true, aiStart: true, aiConfirm: true, aiSend: true, aiFeedback: true };
+    obj.NODE_ACTIONS = { checkAccess: true, getNodeHistory: true, collectNow: true, aiStart: true, aiConfirm: true, aiSend: true, aiFeedback: true,
+                         aiHistoryList: true, aiHistoryGet: true, aiHistoryDelete: true };
     // Device actions that need a plugin permission, and device actions that need MeshCentral device rights on top.
-    obj.ACTION_PERMISSION = { getNodeHistory: 'deviceHistoryTab', collectNow: 'deviceHistoryTab', aiStart: 'deviceAssistant', aiConfirm: 'deviceAssistant', aiSend: 'deviceAssistant', aiFeedback: 'deviceAssistant' };
-    obj.ACTION_RIGHTS = { aiStart: obj.MESHRIGHT_DEVICEDETAILS, aiConfirm: obj.MESHRIGHT_DEVICEDETAILS, aiSend: obj.MESHRIGHT_DEVICEDETAILS, aiFeedback: obj.MESHRIGHT_DEVICEDETAILS };
+    obj.ACTION_PERMISSION = { getNodeHistory: 'deviceHistoryTab', collectNow: 'deviceHistoryTab', aiStart: 'deviceAssistant', aiConfirm: 'deviceAssistant', aiSend: 'deviceAssistant', aiFeedback: 'deviceAssistant',
+                              aiHistoryList: 'deviceAssistant', aiHistoryGet: 'deviceAssistant', aiHistoryDelete: 'deviceAssistant' };
+    obj.ACTION_RIGHTS = { aiStart: obj.MESHRIGHT_DEVICEDETAILS, aiConfirm: obj.MESHRIGHT_DEVICEDETAILS, aiSend: obj.MESHRIGHT_DEVICEDETAILS, aiFeedback: obj.MESHRIGHT_DEVICEDETAILS,
+                          aiHistoryList: obj.MESHRIGHT_DEVICEDETAILS, aiHistoryGet: obj.MESHRIGHT_DEVICEDETAILS, aiHistoryDelete: obj.MESHRIGHT_DEVICEDETAILS };
     // Assistant actions authorized by conversation ownership inside ai/index.js (same user and connection), so Stop
     // and Close keep working after a permission was revoked; and the Assistant admin actions (full administrators).
     obj.AI_SESSION_ACTIONS = { aiStop: true, aiClose: true };
-    obj.AI_ADMIN_ACTIONS = { aiAdminGet: true, aiAdminSaveEndpoint: true, aiAdminDeleteEndpoint: true, aiAdminSaveSettings: true, aiAdminTest: true, aiAdminModels: true, aiAdminAudit: true, aiAdminPreviewPrompt: true };
+    obj.AI_ADMIN_ACTIONS = { aiAdminGet: true, aiAdminSaveEndpoint: true, aiAdminDeleteEndpoint: true, aiAdminSaveSettings: true, aiAdminTest: true, aiAdminModels: true, aiAdminAudit: true, aiAdminPreviewPrompt: true,
+                              aiAdminHistoryStats: true, aiAdminHistoryPurge: true };
     // Every Assistant action is a user action; an agent connection never reaches one.
     obj.isAiAction = function(act) { return typeof act == 'string' && act.substring(0, 2) == 'ai'; };
 
@@ -2179,12 +2185,14 @@ body.night #pluginEventLog {
 
       switch (command.pluginaction) {
         case 'aiStart': case 'aiConfirm': case 'aiSend': case 'aiFeedback':   // device rights + permission checked in serveraction
+        case 'aiHistoryList': case 'aiHistoryGet': case 'aiHistoryDelete':     // the same, and scoped to this user in ai/index.js
         case 'aiStop': case 'aiClose': {                                      // ownership checked in ai/index.js
             obj.aiDeviceAction(command, myparent, grandparent);
             break;
         }
         case 'aiAdminGet': case 'aiAdminSaveEndpoint': case 'aiAdminDeleteEndpoint': case 'aiAdminSaveSettings':
-        case 'aiAdminTest': case 'aiAdminModels': case 'aiAdminAudit': case 'aiAdminPreviewPrompt': {
+        case 'aiAdminTest': case 'aiAdminModels': case 'aiAdminAudit': case 'aiAdminPreviewPrompt':
+        case 'aiAdminHistoryStats': case 'aiAdminHistoryPurge': {
             obj.aiAdminAction(command, myparent);
             break;
         }

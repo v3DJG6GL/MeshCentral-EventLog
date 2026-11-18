@@ -105,7 +105,9 @@ The Assistant helps a technician understand what a device's event log says. It u
 
 - **Explain this event** — a button on History rows (in the expanded row and the Viewer's details pane): what the event means, what it means on this device, whether it is usually harmless and what to check next.
 - **Diagnosis** — a third view next to Live and History. Pick *Last 24 hours*, *Last 7 days* or *Around the last restart*; it never runs on its own. It shows a summary, a timeline, possible causes (likely / possible / ruled out, with the evidence for and against), numbered next steps and the evidence it used.
-- **Ask about this device** — a chat panel beside the table for free questions ("Why did this device restart recently?").
+- **Ask about this device** — a chat panel beside the table for free questions ("Why did this device restart recently?"). An empty panel offers a few starter questions, which administrators can change per device type (Windows / Linux).
+
+**Saved results:** chats, the last diagnosis and the latest explanation of each event are saved on the server per user and device, so they are still there after a page reload or on another browser. Each user sees only their own. *Chats* in the Ask panel lists the earlier chats of the device (newest first, by day); one can be reopened, continued or deleted, and the most recent one comes back into the panel by itself. A question in a reopened chat starts a new conversation with the model that gets a recap of the earlier questions and answers; the events cited before keep their `E` numbers, so their citations still work. The Diagnosis view shows the last report with when it was made (*Diagnose again* replaces it), and a History row shows its saved explanation with *Explain again*. Saved results are kept for 30 days by default (see [Saved results](#saved-results)).
 
 Things to know:
 - **It only reads.** The Assistant can look at the device's data and stored events, nothing else. It never runs commands; suggested commands are text for the technician to check and run.
@@ -131,7 +133,7 @@ Supported API formats:
 1. Admin page (*My Server → Plugins → Event Log*) → **Assistant** tab → **Add endpoint**: choose the server type (Ollama, vLLM, LM Studio, llama.cpp, LocalAI, *Other OpenAI-compatible server*, *OpenAI Responses API* or *Anthropic Messages API*), the address, an API key if the server needs one, and the model (*Fetch models* lists what the server offers).
    Optionally, under **Generation**, set the thinking level (off, low, medium, high) and temperature, top-p, top-k or seed. Left empty, the server's own default applies (shown in the field once the server reported it); only filled-in values are sent. The Anthropic Messages API takes none of them, the OpenAI Responses API no top-k or seed.
 2. **Test connection** (address, connection, API key, model, tool calls, context size, which thinking levels the server accepts, the server's generation defaults next to what the Assistant applies, and whether the server accepts the endpoint's own settings), then **Save endpoint**. When no config set uses an endpoint yet, the page offers to use the new one for the *Default* config set.
-3. Check **Data sent to the model** (what may be read, what is replaced, the preview policy), optionally **Assistant behaviour** (see below), and the daily limits under **Access**, then **Save settings**.
+3. Check **Data sent to the model** (what may be read, what is replaced, the preview policy), optionally **Assistant behaviour** (see below), the daily limits under **Access** and how long **Saved results** are kept, then **Save settings**.
 4. **Config Sets** tab → edit a set → **Assistant endpoint**: pick the endpoint. Devices using that set can now use the Assistant (the default is *None*).
 5. Grant **Event Log: Assistant** (*My Server → Plugins → Event Log → Permissions*) to the users or groups who should use it. They also need MeshCentral's **Details** right on the device.
 
@@ -157,6 +159,14 @@ Each category is offered to the model only when it is on. Every field is picked 
 
 Under **Assistant behaviour** on the Assistant tab, *Additional instructions* are added after the built-in instructions for every question (your environment, language, tone, preferred tools), and an endpoint's *Model-specific instructions* are added for that endpoint only (for example a switch a model needs). The built-in instructions (the system prompt) can be read there part by part: *Base instructions* shared by all questions, and the parts for *Ask*, *Explain* and *Diagnosis*. After switching on *Edit the system prompt*, each part can be changed and reset to its factory default; a part changed by an administrator shows who changed it and when, and a note appears when a plugin update changed the factory text since then. Values such as `{{device}}`, `{{nonce}}` or `{{tools}}` are filled in for each request (the page lists them). *Show the full prompt* shows what the model receives for a question type and a Windows or Linux device, including unsaved changes, with notes when a change removes the untrusted-data rule (`{{nonce}}`) or an output block that the Diagnosis, Explain or follow-up views read. Changes are saved with *Save settings* and logged in the audit log. Extra instructions cannot switch off the read-only tools or the device binding, which are enforced by the server.
 
+**Starter questions:** under *Assistant behaviour*, *Starter questions* holds the example questions of an empty Ask panel, one list for Windows devices and one for Linux devices (devices whose system is not known get the Windows list). Questions can be added (up to 12, at most 200 characters each), removed, moved up or down, and each list can be reset to the factory questions.
+
+### Saved results
+
+The Assistant tab's **Saved results** section turns saving on or off and sets how long items are kept (*Keep chats, diagnoses and explanations for N days*, 1–3650, default 30, counted from the last change; older items are deleted automatically together with the audit log sweep). It shows how many chats, diagnoses and explanations are stored, and *Delete all saved results* deletes them for all users after a confirmation (logged in the audit log). Per user and device at most 50 chats (the oldest go first) and 200 explanations are kept, and one item is at most 512 KB (the oldest messages lose their cited events first).
+
+Saved are the questions and the answers as the user saw them, with the cited events and the steps taken; never the data sent to the model (no tool results, no system prompt). They are saved by the server when an answer is complete, never by the browser. Because they hold what the user saw, **saved results contain device data in clear text** (event messages, computer and user names, addresses) in the plugin's database; with saving turned off nothing new is saved and nothing saved is shown.
+
 ### Security
 
 - **Read-only tools, bound to one device.** The model can only call the plugin's read-only tools, each limited to the device the conversation started on. The user's permission and device rights are checked again before every tool call, so revoking access stops a running answer at its next step.
@@ -165,6 +175,7 @@ Under **Assistant behaviour** on the Assistant tab, *Additional instructions* ar
 - **API keys** are stored encrypted (AES-256-GCM) with a key file `plugin-eventlog-ai.key` in `meshcentral-data` and are never shown or sent to a browser again (the form only shows the last four characters). Back the key file up with the rest of `meshcentral-data`: without it, stored API keys cannot be decrypted and have to be entered again. Instead of a key you can enter `env:VAR_NAME` to read it from an environment variable of the MeshCentral server. A key is never sent over plain `http://` to a public address.
 - **Requests always go from the MeshCentral server**, never from the browser. Public `https://` endpoints use the proxy set by `HTTPS_PROXY` / `HTTP_PROXY` (as MeshCentral itself does). Redirects are not followed, and the address checked when connecting is the one used. Link-local and cloud metadata addresses (169.254.x.x, fe80::) are blocked unless *Allow link-local addresses* is turned on for the endpoint.
 - **Limits:** questions and tokens per user per day (default 100 questions and 3,000,000 tokens; 0 = no limit), steps per answer (default 15, up to 50; a step is one round trip to the model, which may ask for up to 4 data lookups in it), tool calls per answer (automatic: 3 per step, or 1–200), data per answer (automatic: about 3 bytes per token of the model's context and at least 400 KB, or 16–8192 KB), maximum answer length and a timeout per request. A conversation ends after 30 minutes without questions.
+- **Saved results** are read and deleted only by the user who created them, only on the device they belong to: the server checks the user and the device for every request, whatever id the browser sends.
 - **Audit log:** every answer is logged with who asked, about which device, which endpoint and model, how much was sent and how many values were replaced. Full administrators can page through it and export it as CSV on the Assistant tab. Entries are kept for 90 days by default. *Also store full questions and answers* (off by default) keeps transcripts as they were sent to the model, with personal values replaced; anyone who can read the database can read them.
 
 ## Storage
@@ -173,14 +184,14 @@ Collected events are stored in **MeshCentral's own database**, so they are cover
 
 | MeshCentral database | Where the plugin stores events |
 | --- | --- |
-| MongoDB | `plugin_eventlog` / `plugin_eventlog_settings` / `plugin_eventlog_ai_audit` collections |
-| PostgreSQL, MariaDB, MySQL | `plugin_eventlog_events` / `plugin_eventlog_settings` / `plugin_eventlog_ai_audit` tables |
+| MongoDB | `plugin_eventlog` / `plugin_eventlog_settings` / `plugin_eventlog_ai_audit` / `plugin_eventlog_ai_chats` collections |
+| PostgreSQL, MariaDB, MySQL | `plugin_eventlog_events` / `plugin_eventlog_settings` / `plugin_eventlog_ai_audit` / `plugin_eventlog_ai_chats` tables |
 | SQLite | the same tables, in MeshCentral's SQLite file |
-| NeDB (the default for small installs) | `plugin-eventlog-events.db` / `plugin-eventlog-settings.db` / `plugin-eventlog-ai-audit.db` in `meshcentral-data` |
+| NeDB (the default for small installs) | `plugin-eventlog-events.db` / `plugin-eventlog-settings.db` / `plugin-eventlog-ai-audit.db` / `plugin-eventlog-ai-chats.db` in `meshcentral-data` |
 
 The startup log says which one is in use (`EVENTLOG: storage backend = ...`).
 
-Assistant endpoints and settings live in the settings store; the Assistant's audit log has its own collection, table or file (`..._ai_audit`). The key that encrypts stored API keys is the file `plugin-eventlog-ai.key` in `meshcentral-data`. It is not in the database, so **back it up together with the database**: if it is lost, API keys have to be entered again.
+Assistant endpoints and settings live in the settings store; the Assistant's audit log and its saved results (chats, diagnoses, explanations) have their own collection, table or file (`..._ai_audit`, `..._ai_chats`). The key that encrypts stored API keys is the file `plugin-eventlog-ai.key` in `meshcentral-data`. It is not in the database, so **back it up together with the database**: if it is lost, API keys have to be entered again.
 
 When a server that had been using the plugin's own NeDB files moves onto one of the SQL backends, config sets and their assignments are imported automatically the first time the plugin starts; previously collected events are not carried over (they expire on their own and the agents refill the history within a minute). The old `plugin-eventlog-*.db` files can then be deleted. Setting the environment variable `EVENTLOG_STORAGE=nedb` keeps the plugin on its own files.
 

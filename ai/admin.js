@@ -1,7 +1,7 @@
 'use strict';
 // Server side of the Assistant admin page (full administrators only; the caller checks siteadmin 0xFFFFFFFF).
 //
-// create({ store, db, netguard, adapters, llm, http, getProxyAgent, log, testAfterSave? (default true) })
+// create({ store, history?, db, netguard, adapters, llm, http, getProxyAgent, log, testAfterSave? (default true) })
 //   -> { handle(command, myparent) -> bool }
 //   handle returns false for an action it does not know, true otherwise (the reply is sent asynchronously).
 //   Replies go to myparent.ws as { action:'plugin', plugin:'eventlog', method, reqId?, ... }:
@@ -34,6 +34,9 @@
 //       genDefaults? (server-wide, from /props), thinkingDefault?, error? }
 //       network: 'loopback'|'private'|'public' once the address was checked, else null (as in aiAdminTestResult)
 // A draft needs no name (it is never stored); a draft for aiAdminModels needs no model either.
+//   aiAdminHistoryStats   -> aiAdminHistoryStats { counts:{chat, diagnosis, explain, total} } | aiAdminError { scope:'history' }
+//   aiAdminHistoryPurge   -> aiAdminHistoryPurged { removed, counts }   deletes every user's saved results (audited)
+//   aiAdminData also carries startersFactory {windows, linux}, historyAvailable and historyCounts (null if unknown).
 //   aiAdminAudit {since, until, filterUserid, filterNodeid, skip, limit, withTranscript} -> aiAdminAuditRows { rows, total }
 //       (filterUserid, not userid: MeshCentral overwrites command.userid with the caller's id on every plugin command)
 // A draft carries the unsaved form fields plus keyAction/key; keyAction 'keep' with an id uses the stored key.
@@ -45,6 +48,7 @@
 const prompts = require('./prompts.js');
 const budget = require('./budget.js');
 const C = require('./adapters/common.js');
+const { STARTERS } = require('./store.js');
 
 const OVERALL_MS = 30000;
 const LEVEL_WORD = { off: 'off', low: 'low', medium: 'medium', high: 'high' };
@@ -58,6 +62,7 @@ function mkErr(code, message) { const e = new Error(message); e.code = code; ret
 function create(o) {
     o = o || {};
     const store = o.store, db = o.db, netguard = o.netguard, adapters = o.adapters, httpMod = o.http;
+    const history = o.history || null;
     const getProxyAgent = typeof o.getProxyAgent === 'function' ? o.getProxyAgent : function () { return undefined; };
     const log = o.log || function (m) { console.log(m); };
     const testAfterSave = o.testAfterSave !== false;
@@ -523,6 +528,10 @@ function create(o) {
         return used;
     }
 
+    async function historyCounts() {
+        if (!history) return null;
+        try { return await history.counts(); } catch (e) { warn('saved results count failed (' + errText(e) + ')'); return null; }
+    }
     async function adminData() {
         const eps = await store.listEndpoints();
         const settings = await store.getSettings();
@@ -530,7 +539,9 @@ function create(o) {
         return {
             endpoints: eps.map(store.publicEndpoint), settings: settings, usedBy: usedBy, keySource: store.keySource() || null,
             prompts: settings.prompts || null, factory: Object.assign({}, prompts.FACTORY), factoryHash: Object.assign({}, prompts.FACTORY_HASH),
-            placeholders: Object.assign({}, prompts.PLACEHOLDERS)
+            placeholders: Object.assign({}, prompts.PLACEHOLDERS),
+            startersFactory: { windows: STARTERS.windows.slice(), linux: STARTERS.linux.slice() },
+            historyAvailable: !!history, historyCounts: await historyCounts()
         };
     }
 
@@ -663,6 +674,25 @@ function create(o) {
         }
     }
 
+    // saved results of all users (chats, diagnoses, explanations): counts, and deleting them all
+    async function doHistoryStats(command, myparent) {
+        if (!history) return safeSend(myparent, { method: 'aiAdminError', reqId: command.reqId, scope: 'history', error: 'Saved results are not available on this server' });
+        const counts = await historyCounts();
+        if (!counts) return safeSend(myparent, { method: 'aiAdminError', reqId: command.reqId, scope: 'history', error: 'The saved results could not be counted' });
+        safeSend(myparent, { method: 'aiAdminHistoryStats', reqId: command.reqId, counts: counts });
+    }
+    async function doHistoryPurge(command, myparent) {
+        if (!history) return safeSend(myparent, { method: 'aiAdminError', reqId: command.reqId, scope: 'history', error: 'Saved results are not available on this server' });
+        try {
+            const removed = await history.purge();
+            await settingsAudit(myparent, ['history.purge'], { removed: removed });
+            safeSend(myparent, { method: 'aiAdminHistoryPurged', reqId: command.reqId, removed: removed, counts: await historyCounts() });
+        } catch (e) {
+            warn('saved results purge failed (' + errText(e) + ')');
+            safeSend(myparent, { method: 'aiAdminError', reqId: command.reqId, scope: 'history', error: 'The saved results could not be deleted' });
+        }
+    }
+
     function limited(fn, method) {
         return function (command, myparent) {
             if (inflight >= MAX_INFLIGHT) {
@@ -685,7 +715,9 @@ function create(o) {
         aiAdminTest: limited(doTest, 'aiAdminTestResult'),
         aiAdminModels: limited(doModels, 'aiAdminModelsResult'),
         aiAdminAudit: doAudit,
-        aiAdminPreviewPrompt: doPreview
+        aiAdminPreviewPrompt: doPreview,
+        aiAdminHistoryStats: doHistoryStats,
+        aiAdminHistoryPurge: doHistoryPurge
     };
 
     // reqId is echoed back: only short strings and finite numbers

@@ -60,7 +60,7 @@ function setup(opts) {
     const secrets = secretsMod.create({ keyFile: path.join(tmp, 'k' + (++n) + '.key'), fallbackSecret: 'x', log: log, env: { LLM_KEY: 'env-key-value-0000' } });
     const store = storeMod.create({ db: db, secrets: secrets, netguard: netguard, log: log });
     let proxyCalls = 0;
-    const admin = adminMod.create({ store: store, db: db, netguard: netguard, adapters: adapters, llm: llm, http: opts.http || http, getProxyAgent: function () { proxyCalls++; return opts.agent; }, log: log, testAfterSave: opts.testAfterSave === true });
+    const admin = adminMod.create({ store: store, history: opts.history, db: db, netguard: netguard, adapters: adapters, llm: llm, http: opts.http || http, getProxyAgent: function () { proxyCalls++; return opts.agent; }, log: log, testAfterSave: opts.testAfterSave === true });
     const sent = [];
     const myparent = { user: { _id: 'user/d/admin', siteadmin: 0xFFFFFFFF }, ws: { readyState: 1, send: function (s) { sent.push(JSON.parse(s)); } } };
     let rid = 0;
@@ -740,4 +740,31 @@ test('test: Ollama thinking capability and model file defaults; Fetch models car
     mock.always('/props', { json: { default_generation_settings: { params: { temperature: 0.7, top_k: 40, seed: 5 } } } });
     const m2 = await t.call({ pluginaction: 'aiAdminModels', draft: chatEp({ model: '' }) });
     assert.deepStrictEqual(m2.genDefaults, { temperature: 0.7, topP: null, topK: 40, seed: 5, maxTokens: null });
+});
+
+test('saved results: counts in aiAdminData, stats, purge of all users (audited), starters factory lists; unavailable without a store', async function () {
+    const rows = [{ kind: 'chat' }, { kind: 'chat' }, { kind: 'explain' }];
+    const history = {
+        counts: async function () { const c = { chat: 0, diagnosis: 0, explain: 0 }; rows.forEach(function (r) { c[r.kind]++; }); c.total = rows.length; return c; },
+        purge: async function () { const n = rows.length; rows.length = 0; return n; }
+    };
+    const t = setup({ history: history });
+    let r = await t.call({ pluginaction: 'aiAdminGet' });
+    assert.deepStrictEqual([r.historyAvailable, r.historyCounts], [true, { chat: 2, diagnosis: 0, explain: 1, total: 3 }]);
+    assert.deepStrictEqual(r.startersFactory, storeMod.STARTERS);
+    assert.deepStrictEqual([r.settings.history, r.settings.starters], [{ enabled: true, retentionDays: 30 }, { windows: null, linux: null }]);
+    r = await t.call({ pluginaction: 'aiAdminHistoryStats' });
+    assert.strictEqual(r.counts.total, 3);
+    r = await t.call({ pluginaction: 'aiAdminHistoryPurge' });
+    assert.deepStrictEqual([r.method, r.removed, r.counts.total], ['aiAdminHistoryPurged', 3, 0]);
+    const a = t.db.audit.filter(function (x) { return x.kind === 'settings'; }).pop();
+    assert.deepStrictEqual([a.changed, a.removed, a.userid, a.counted], [['history.purge'], 3, 'user/d/admin', false]);
+    // settings round trip: history and starters
+    r = await t.call({ pluginaction: 'aiAdminSaveSettings', settings: { history: { enabled: false, retentionDays: 12 }, starters: { windows: ['Is BitLocker on?'], linux: storeMod.STARTERS.linux } } });
+    assert.deepStrictEqual([r.settings.history, r.settings.starters], [{ enabled: false, retentionDays: 12 }, { windows: ['Is BitLocker on?'], linux: null }]);
+    const u = setup();
+    r = await u.call({ pluginaction: 'aiAdminGet' });
+    assert.deepStrictEqual([r.historyAvailable, r.historyCounts], [false, null]);
+    r = await u.call({ pluginaction: 'aiAdminHistoryPurge' });
+    assert.deepStrictEqual([r.method, r.scope], ['aiAdminError', 'history']);
 });

@@ -146,8 +146,8 @@ function setupAi(opts) {
     var gp = F.makeWebserver(F.makeNodes(), opts.rights || { 'mesh/d/A': 0xFFFFFFFF });
     return { ph: ph, plugin: plugin, ai: ai, gp: gp };
 }
-var AI_DEVICE = ['aiStart', 'aiConfirm', 'aiSend', 'aiFeedback'];
-var AI_ADMIN = ['aiAdminGet', 'aiAdminSaveEndpoint', 'aiAdminDeleteEndpoint', 'aiAdminSaveSettings', 'aiAdminTest', 'aiAdminModels', 'aiAdminAudit', 'aiAdminPreviewPrompt'];
+var AI_DEVICE = ['aiStart', 'aiConfirm', 'aiSend', 'aiFeedback', 'aiHistoryList', 'aiHistoryGet', 'aiHistoryDelete'];
+var AI_ADMIN = ['aiAdminGet', 'aiAdminSaveEndpoint', 'aiAdminDeleteEndpoint', 'aiAdminSaveSettings', 'aiAdminTest', 'aiAdminModels', 'aiAdminAudit', 'aiAdminPreviewPrompt', 'aiAdminHistoryStats', 'aiAdminHistoryPurge'];
 
 test('Assistant device actions need the Assistant permission', async function () {
     var s = setupAi({ grants: { 'user/d/alice|deviceHistoryTab': true, 'user/d/alice|deviceLiveTab': true } });
@@ -167,7 +167,7 @@ test('Assistant device actions need the Details right on top of the permission',
     AI_DEVICE.forEach(function (a) { s.plugin.serveraction({ pluginaction: a, nodeid: 'node/d/nA' }, me, s.gp); });
     await F.settle();
     assert.strictEqual(s.ai.calls.length, 0);
-    assert.strictEqual(me.sent.filter(function (m) { return m.method == 'onAccessDenied' && /0x100000/.test(m.reason); }).length, 4);
+    assert.strictEqual(me.sent.filter(function (m) { return m.method == 'onAccessDenied' && /0x100000/.test(m.reason); }).length, AI_DEVICE.length);
 
     var s2 = setupAi({ grants: grants, rights: { 'mesh/d/A': 0x00100000 } });
     var me2 = F.makeSession(ALICE);

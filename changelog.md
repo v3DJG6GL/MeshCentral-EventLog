@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 - Assistant: the system prompt can be viewed and, after switching on edit mode, changed per part (base instructions, Ask, Explain, Diagnosis) with reset to factory defaults and a full-prompt preview; additional instructions globally and per endpoint
 - Assistant endpoints: optional generation settings (thinking level, temperature, top-p, top-k, seed) with the server's defaults shown; Test connection detects supported thinking levels and lists the server's generation defaults next to the values the Assistant applies
+- Assistant: chats, the last diagnosis and explanations are saved per user and device (retention configurable, delete per chat or all), the Ask panel lists earlier chats and continues them with a recap; starter questions are editable per OS
 
 ### Changed
 - Assistant: clearer instructions for Linux devices (systemd journal fields, process ids, journalctl/systemctl)

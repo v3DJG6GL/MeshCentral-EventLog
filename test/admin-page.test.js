@@ -172,3 +172,94 @@ test('first endpoint offer: Not now, and a refused save keeps the offer with the
     assert.strictEqual($(w, 'elAiOffer').hidden, true);
     assert.strictEqual(w.elAi.offer, null);
 });
+
+var FACT = { windows: ['Why did this device restart recently?', 'What changed in the last 24 hours?', 'Are there signs of disk or hardware problems?'], linux: ['Why did this device restart recently?', 'Which services failed in the last 24 hours?', 'Are there signs of disk, memory or hardware problems?'] };
+function dataWith(w, settings, extra) {
+    var get = w.last('aiAdminGet');
+    w.h.aiAdminData(null, Object.assign({ reqId: get && get.reqId, endpoints: [], usedBy: {}, startersFactory: FACT, historyAvailable: true, historyCounts: { chat: 4, diagnosis: 1, explain: 7, total: 12 },
+        settings: Object.assign({ limits: {}, quotas: {}, history: { enabled: true, retentionDays: 30 }, starters: { windows: null, linux: null } }, settings || {}) }, extra || {}));
+}
+function texts(w, os) { return Array.prototype.map.call(w.document.querySelectorAll('#elAiStart_' + os + ' input'), function (i) { return i.value; }); }
+
+test('starter questions: factory lists shown, add / remove / reorder (focus follows) / reset, saved as null when back at the factory list', { skip: SKIP }, function () {
+    var w = page();
+    $(w, 'elAssistant').style.display = 'block';   // the tab is shown (focus only lands on visible elements)
+    dataWith(w, { starters: { windows: null, linux: ['Is journald healthy?'] } });
+    assert.deepStrictEqual(texts(w, 'windows'), FACT.windows);
+    assert.deepStrictEqual(texts(w, 'linux'), ['Is journald healthy?']);
+    assert.strictEqual($(w, 'elAiStartTag_windows').textContent, 'Factory default');
+    assert.strictEqual($(w, 'elAiStartTag_linux').textContent, 'Edited');
+    assert.strictEqual($(w, 'elAiStartReset_windows').disabled, true);
+    assert.strictEqual($(w, 'elAiStartCount_windows').textContent, '3 of 12');
+    // move the second Windows question up: order changes, focus stays on the moved row's button
+    var row = w.document.querySelectorAll('#elAiStart_windows li')[1];
+    assert.strictEqual(row.querySelector('.up').getAttribute('aria-label'), 'Move “What changed in the last 24 hours?” up');
+    assert.strictEqual(w.document.querySelector('#elAiStart_windows li .up').disabled, true, 'the first cannot move up');
+    row.querySelector('.up').click();
+    assert.deepStrictEqual(texts(w, 'windows'), [FACT.windows[1], FACT.windows[0], FACT.windows[2]]);
+    assert.strictEqual(w.document.activeElement, w.document.querySelectorAll('#elAiStart_windows li')[0].querySelector('.down'), 'at the top: focus moves to the down button');
+    assert.strictEqual($(w, 'elAiStartTag_windows').textContent, 'Edited');
+    w.document.querySelectorAll('#elAiStart_windows li')[0].querySelector('.down').click();
+    assert.deepStrictEqual(texts(w, 'windows'), FACT.windows);
+    // add: a new empty row gets the focus; typing updates the list
+    $(w, 'elAiStartAdd_windows').click();
+    var inp = w.document.activeElement;
+    assert.strictEqual(inp.tagName, 'INPUT');
+    inp.value = 'Is BitLocker on?'; inp.dispatchEvent(new w.Event('input', { bubbles: true }));
+    assert.strictEqual($(w, 'elAiStartCount_windows').textContent, '4 of 12');
+    // remove the first
+    w.document.querySelectorAll('#elAiStart_windows li')[0].querySelector('.rm').click();
+    assert.deepStrictEqual(texts(w, 'windows'), [FACT.windows[1], FACT.windows[2], 'Is BitLocker on?']);
+    assert.strictEqual(w.elAi.settingsDirty, true);
+    // at most 12
+    for (var i = 0; i < 12; i++) $(w, 'elAiStartAdd_windows').click();
+    assert.strictEqual(texts(w, 'windows').length, 12);
+    assert.strictEqual($(w, 'elAiStartAdd_windows').disabled, true);
+    // saving: blank rows dropped; Linux edited, Windows reset -> null
+    w.document.querySelectorAll('#elAiStart_linux li')[0].querySelector('.rm').click();
+    assert.match($(w, 'elAiStart_linux').textContent, /No starter questions/);
+    $(w, 'elAiStartReset_windows').click();
+    assert.deepStrictEqual(texts(w, 'windows'), FACT.windows);
+    w.elAiSaveSettings();
+    var s = w.last('aiAdminSaveSettings').settings;
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(s.starters)), { windows: null, linux: [] });
+    $(w, 'elAiStartAdd_linux').click();
+    w.document.activeElement.value = '  Which units failed?  '; w.document.activeElement.dispatchEvent(new w.Event('input', { bubbles: true }));
+    $(w, 'elAiStartAdd_linux').click();   // left empty
+    w.elAiSaveSettings();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(w.last('aiAdminSaveSettings').settings.starters.linux)), ['Which units failed?']);
+});
+
+test('saved results: retention and switch saved with the settings, counts shown, delete all asks first', { skip: SKIP }, function () {
+    var w = page();
+    dataWith(w, { history: { enabled: true, retentionDays: 45 } });
+    assert.strictEqual($(w, 'elAiHistDays').value, '45');
+    assert.strictEqual($(w, 'elAiHistOn').checked, true);
+    assert.strictEqual($(w, 'elAiHistCounts').textContent, '4 chats, 1 diagnosis, 7 explanations.');
+    $(w, 'elAiHistDays').value = '0';
+    var n = w.sent.length;
+    w.elAiSaveSettings();
+    assert.strictEqual(w.sent.length, n, 'out of range: not sent');
+    assert.ok($(w, 'elAiHistDaysErr'));
+    $(w, 'elAiHistDays').value = '14'; $(w, 'elAiHistOn').checked = false;
+    w.elAiSaveSettings();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(w.last('aiAdminSaveSettings').settings.history)), { enabled: false, retentionDays: 14 });
+    // delete all: confirmed first
+    var asked = null;
+    w.confirm = function (m) { asked = m; return false; };
+    $(w, 'elAiHistPurge').click();
+    assert.match(asked, /Delete 12 saved chats, diagnoses and explanations of all users\?/);
+    assert.strictEqual(w.last('aiAdminHistoryPurge'), undefined);
+    w.confirm = function () { return true; };
+    $(w, 'elAiHistPurge').click();
+    var p = w.last('aiAdminHistoryPurge');
+    assert.ok(p);
+    w.h.aiAdminHistoryPurged(null, { reqId: p.reqId, removed: 12, counts: { chat: 0, diagnosis: 0, explain: 0, total: 0 } });
+    assert.match($(w, 'elAiHistStatus').textContent, /Deleted 12 saved results/);
+    assert.strictEqual($(w, 'elAiHistCounts').textContent, 'Nothing is saved.');
+    assert.strictEqual($(w, 'elAiHistPurge').disabled, true);
+    var w2 = page();
+    dataWith(w2, {}, { historyAvailable: false, historyCounts: null });
+    assert.strictEqual($(w2, 'elAiHistCounts').textContent, 'Not available on this server.');
+    assert.strictEqual($(w2, 'elAiHistPurge').disabled, true);
+});

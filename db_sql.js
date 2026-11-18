@@ -14,6 +14,7 @@
 const T_EV = 'plugin_eventlog_events';
 const T_SET = 'plugin_eventlog_settings';
 const T_AUD = 'plugin_eventlog_ai_audit';   // Assistant audit log (v0.2.0)
+const T_CHAT = 'plugin_eventlog_ai_chats';  // Assistant saved results: chats, last diagnosis, explanations (v0.4.0)
 const EVCOLS = ['nodeid', 'tc', 'time', 'level', 'logname', 'provider', 'eventid', 'eventid_num', 'message', 'extra'];
 const SWEEP_CHUNK = 5000;
 const ASSIGN_CHUNK = 500;
@@ -177,6 +178,11 @@ module.exports.install = function (obj, meshserver, kind, shared) {
                 'id BIGINT NOT NULL AUTO_INCREMENT, time BIGINT NOT NULL, userid VARCHAR(256), nodeid VARCHAR(256), doc JSON, ' +
                 'PRIMARY KEY (id), INDEX ' + T_AUD + '_time (time), INDEX ' + T_AUD + '_user_time (userid, time)' +
                 ') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
+            // JSON columns: a saved chat document is at most 512 KB (ai/history.js), well within max_allowed_packet
+            stmts.push('CREATE TABLE IF NOT EXISTS ' + T_CHAT + ' (' +
+                'id VARCHAR(64) NOT NULL, time BIGINT NOT NULL, userid VARCHAR(256) NOT NULL, nodeid VARCHAR(256) NOT NULL, kind VARCHAR(16) NOT NULL, meta JSON, doc JSON, ' +
+                'PRIMARY KEY (id), INDEX ' + T_CHAT + '_user_node_time (userid, nodeid, time), INDEX ' + T_CHAT + '_time (time)' +
+                ') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
         } else {
             var serial = (kind == 'pg') ? 'BIGSERIAL PRIMARY KEY' : 'INTEGER PRIMARY KEY';
             var vc = function (n) { return (kind == 'pg') ? ('VARCHAR(' + n + ')') : 'TEXT'; };
@@ -195,6 +201,11 @@ module.exports.install = function (obj, meshserver, kind, shared) {
                 'id ' + serial + ', time ' + big + ' NOT NULL, userid ' + vc(256) + ', nodeid ' + vc(256) + ', doc ' + D.jsonType + ')');
             stmts.push('CREATE INDEX IF NOT EXISTS ' + T_AUD + '_time ON ' + T_AUD + ' (time)');
             stmts.push('CREATE INDEX IF NOT EXISTS ' + T_AUD + '_user_time ON ' + T_AUD + ' (userid, time)');
+            stmts.push('CREATE TABLE IF NOT EXISTS ' + T_CHAT + ' (' +
+                'id ' + vc(64) + ' PRIMARY KEY NOT NULL, time ' + big + ' NOT NULL, userid ' + vc(256) + ' NOT NULL, nodeid ' + vc(256) + ' NOT NULL, kind ' + vc(16) + ' NOT NULL, ' +
+                'meta ' + D.jsonType + ', doc ' + D.jsonType + ')');
+            stmts.push('CREATE INDEX IF NOT EXISTS ' + T_CHAT + '_user_node_time ON ' + T_CHAT + ' (userid, nodeid, time)');
+            stmts.push('CREATE INDEX IF NOT EXISTS ' + T_CHAT + '_time ON ' + T_CHAT + ' (time)');
         }
         return stmts.reduce(function (p, s) { return p.then(function () { return D.query(s, []); }); }, Promise.resolve());
     }
@@ -569,6 +580,72 @@ module.exports.install = function (obj, meshserver, kind, shared) {
             });
         };
         return ready().then(step);
+    };
+
+    // ---- Assistant saved results (chats, last diagnosis, explanations) ----------
+    function chatRow(row, withDoc) {
+        var o = { id: String(row.id), time: toNum(row.time) || 0, userid: row.userid, nodeid: row.nodeid, kind: row.kind, meta: parseDoc(row.meta) };
+        if (withDoc) o.doc = parseDoc(row.doc);
+        return o;
+    }
+    obj.aiChatPut = function (rec) {
+        var r = shared.chatRec(rec);
+        if (r == null) return Promise.resolve(false);
+        return ready().then(function () {
+            var p = [r.id, r.time, r.userid, r.nodeid, r.kind, JSON.stringify(r.meta), JSON.stringify(r.doc)];
+            var ph = [1, 2, 3, 4, 5, 6, 7].map(function (i) { return D.ph(i); }).join(',');
+            var sql;
+            if (isMy) sql = 'INSERT INTO ' + T_CHAT + ' (id,time,userid,nodeid,kind,meta,doc) VALUES (' + ph + ') ON DUPLICATE KEY UPDATE time=VALUES(time), userid=VALUES(userid), nodeid=VALUES(nodeid), kind=VALUES(kind), meta=VALUES(meta), doc=VALUES(doc)';
+            else sql = 'INSERT INTO ' + T_CHAT + ' (id,time,userid,nodeid,kind,meta,doc) VALUES (' + ph + ') ON CONFLICT (id) DO UPDATE SET time=excluded.time, userid=excluded.userid, nodeid=excluded.nodeid, kind=excluded.kind, meta=excluded.meta, doc=excluded.doc';
+            return D.query(sql, p);
+        }).then(function () { return true; });
+    };
+    obj.aiChatGet = function (id) {
+        if (shared.chatIds(id).length != 1) return Promise.resolve(null);
+        return ready().then(function () { return D.query('SELECT * FROM ' + T_CHAT + ' WHERE id = ' + D.ph(1), [id]); })
+        .then(function (r) { return r.rows[0] ? chatRow(r.rows[0], true) : null; });
+    };
+    obj.aiChatList = function (q) {
+        q = shared.chatQueryNorm(q);
+        if (q.none) return Promise.resolve([]);
+        var w = ['userid = ' + D.ph(1), 'nodeid = ' + D.ph(2)], p = [q.userid, q.nodeid], n = 3;
+        if (q.kind != null) { w.push('kind = ' + D.ph(n++)); p.push(q.kind); }
+        if (q.since != null) { w.push('time >= ' + D.ph(n++)); p.push(q.since); }
+        return ready().then(function () {
+            return D.query('SELECT id, time, userid, nodeid, kind, meta FROM ' + T_CHAT + ' WHERE ' + w.join(' AND ') + ' ORDER BY time DESC, id DESC LIMIT ' + q.limit + ' OFFSET ' + q.skip, p);
+        }).then(function (r) { return r.rows.map(function (row) { return chatRow(row, false); }); });
+    };
+    obj.aiChatDel = function (ids) {
+        ids = shared.chatIds(ids);
+        if (ids.length == 0) return Promise.resolve(0);
+        return ready().then(function () {
+            return D.query('DELETE FROM ' + T_CHAT + ' WHERE id IN (' + ids.map(function (x, i) { return D.ph(i + 1); }).join(',') + ')', ids);
+        }).then(function (r) { return r.affected || 0; });
+    };
+    var chatSweepWhere = function (where, params) {
+        var removed = 0;
+        var step = function () {
+            if (obj._closed) return removed;
+            var sql;
+            if (isMy) sql = 'DELETE FROM ' + T_CHAT + ' WHERE ' + where + ' ORDER BY time LIMIT ' + SWEEP_CHUNK;
+            else sql = 'DELETE FROM ' + T_CHAT + ' WHERE id IN (SELECT id FROM ' + T_CHAT + ' WHERE ' + where + ' ORDER BY time LIMIT ' + SWEEP_CHUNK + ')';
+            return D.query(sql, params).then(function (r) {
+                removed += r.affected;
+                if (r.affected < SWEEP_CHUNK) return removed;
+                return new Promise(function (res) { setTimeout(res, 250); }).then(step);
+            });
+        };
+        return ready().then(step);
+    };
+    obj.aiChatSweep = function (cutoffMs) { return chatSweepWhere('time < ' + D.ph(1), [Number(cutoffMs) || 0]); };
+    obj.aiChatPurge = function () { return chatSweepWhere('time >= ' + D.ph(1), [-1]); };
+    obj.aiChatCounts = function () {
+        return ready().then(function () { return D.query('SELECT kind, COUNT(*) AS n FROM ' + T_CHAT + ' GROUP BY kind', []); })
+        .then(function (r) {
+            var out = { chat: 0, diagnosis: 0, explain: 0 };
+            r.rows.forEach(function (row) { if (out[row.kind] != null) out[row.kind] = toNum(row.n) || 0; });
+            return out;
+        });
     };
 
     // ---- retention -------------------------------------------------------

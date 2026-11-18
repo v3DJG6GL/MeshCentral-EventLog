@@ -18,7 +18,7 @@
 //   previewPending, closed, ... } - the caller adds what else it needs.
 //
 // createRefs() -> registry of the stored events shown to the model, with conversation-local refs E1..En:
-//   add(dbEvent) -> 'E<n>' (stable per stored id), get(ref) -> dbEvent|null, idOf(ref) -> stored id|null,
+//   add(dbEvent) -> 'E<n>' (stable per stored id), addAs(dbEvent, ref) -> ref|null (a given ref), get(ref) -> dbEvent|null, idOf(ref) -> stored id|null,
 //   mark(ref) marks it as returned to the model, markIn(jsonText) marks every assigned ref that appears as a quoted
 //   JSON string ("E12") in what was actually sent (items cut by budget.fitJson stay unmarked),
 //   returned (Set of refs the model has actually seen), size()
@@ -58,6 +58,19 @@ function createRefs() {
             byId.set(id, ref);
             byRef.set(ref, copy(ev));
             return ref;
+        },
+        // registers an event under a given ref (a saved chat continued in a new session keeps its refs); null when
+        // the ref or the event is already registered otherwise; later add() calls continue after the highest ref
+        addAs: function (ev, ref) {
+            const m = /^E(\d{1,6})$/.exec(String(ref || ''));
+            if (!m || ev == null || typeof ev !== 'object' || ev._id == null) return null;
+            const r = 'E' + Number(m[1]), id = String(ev._id);
+            if (byRef.has(r)) return byRef.get(r)._id != null && String(byRef.get(r)._id) === id ? r : null;
+            if (byId.has(id) || byRef.size >= MAX_REFS) return null;
+            byId.set(id, r);
+            byRef.set(r, copy(ev));
+            if (Number(m[1]) > n) n = Number(m[1]);
+            return r;
         },
         get: function (ref) { return byRef.get(String(ref || '').toUpperCase().replace(/^E0+(?=\d)/, 'E')) || null; },
         idOf: function (ref) { const e = this.get(ref); return e ? String(e._id) : null; },

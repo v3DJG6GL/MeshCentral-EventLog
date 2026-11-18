@@ -676,3 +676,149 @@ test('running state: "Thinking…" with a growing counter between steps and befo
     await sleep(200);
     assert.ok(live().indexOf('Thinking') < 0, live());
 });
+
+// ---- saved results --------------------------------------------------------------------------------------------
+var CH1 = 'ch' + 'a1'.repeat(12), CH2 = 'ch' + 'b2'.repeat(12);
+function grantSaved(w, extra) { grant(w, Object.assign({ saved: { enabled: true, retentionDays: 30 } }, extra || {})); }
+function chatItem() {
+    var t = Date.now() - 600000;
+    return { id: CH1, title: 'Why did it restart?', created: t, updated: t + 60000, endpointName: 'gpu-01.lan', model: 'qwen3:14b', messages: [
+        { time: t, q: 'Why did it restart?', a: 'The drive stalled on \uE002host\uE003PC01\uE004 [E1].', cites: { E1: REC }, steps: [{ tool: 'get_events', args: '{"limit":5}', status: 'done', items: 5, ms: 3 }], followups: [], usage: { 'in': 100, out: 20 }, model: 'qwen3:14b', endpointName: 'gpu-01.lan', redactionCounts: { hosts: 1 } },
+        { time: t + 60000, q: 'And the power?', a: 'A Kernel-Power 41 followed [E2].', cites: { E2: REC2 }, steps: [], followups: ['Is the PSU failing?'], usage: { 'in': 100, out: 20 }, model: 'qwen3:14b', endpointName: 'gpu-01.lan' }
+    ] };
+}
+
+test('saved chats: the latest comes back after a reload, is listed, continues with its chat id, and can be deleted', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantSaved(w); loadHistory(w);
+    assert.strictEqual(sentOf(w, 'aiHistoryList').length, 1, 'asked once after access was granted');
+    grantSaved(w);
+    assert.strictEqual(sentOf(w, 'aiHistoryList').length, 1, 'not again on a repeated access check');
+    ph.onAiHistory(null, { nodeid: 'node/d/other', enabled: true, chats: [{ id: CH2, title: 'x', updated: 1, count: 1 }] });   // another device: ignored
+    assert.strictEqual(ph.st.ai.saved.loaded, false);
+    ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'Why did it restart?', updated: Date.now() - 540000, count: 2 }, { id: CH2, title: 'Older <b>chat</b>', updated: Date.now() - 3 * 86400000, count: 1 }, { id: 'bad id', title: 'x' }], diagnosis: null, explains: [] });
+    var get = sentOf(w, 'aiHistoryGet');
+    assert.deepStrictEqual(plain(get.map(function (m) { return m.kind + ':' + m.id; })), ['chat:' + CH1], 'the most recent chat is restored');
+    ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: chatItem() });
+    ph.aiToggle();
+    var log = doc.getElementById('evlAiLog');
+    assert.match(log.textContent, /Saved chat from \d/);
+    assert.deepStrictEqual(Array.prototype.map.call(log.querySelectorAll('.evlAiQ'), function (e) { return e.textContent; }), ['Why did it restart?', 'And the power?']);
+    assert.ok(log.querySelector('.evlCite[data-r=E1]') && log.querySelector('.evlCite[data-r=E2]'), 'citation chips of the saved answers');
+    assert.ok(log.querySelector('mark.evlPs'), 'restored values stay marked');
+    assert.ok(!/Helpful/.test(log.textContent), 'no feedback buttons for a saved answer');
+    assert.ok(Array.prototype.some.call(log.querySelectorAll('.evlAiFollow button'), function (b) { return b.textContent == 'Is the PSU failing?'; }), 'follow-ups of the last answer');
+    var hb = doc.getElementById('evlAiHistBtn');
+    assert.ok(hb && /Chats\s*2/.test(hb.textContent));
+    // the gutter shows the saved citations, a chip finds the row
+    ph.aiGotoCite(ph.st.ai.chat, 'E1');
+    assert.strictEqual(ph.st.ai.sel, 'E1');
+    // continue: a new conversation for the same chat
+    ph.aiAsk('Did it happen again?');
+    var st = sentOf(w, 'aiStart').pop();
+    assert.deepStrictEqual([st.mode, st.chatId, st.input.text], ['ask', CH1, 'Did it happen again?']);
+    var c = ph.st.ai.convs[ph.st.ai.chat];
+    assert.strictEqual(c.turns.length, 3);
+    ph.onAiStarted(null, { nodeid: NODE, reqId: st.reqId, convId: 'cvC', chatId: CH1, continued: true, model: 'qwen3:14b', endpointName: 'gpu-01.lan', network: 'private' });
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvC', turn: 1, text: 'Yes, again [E1].', citations: { E1: REC }, invalidCitations: [], usage: {}, followups: [], chatId: CH1 });
+    assert.deepStrictEqual(plain(c.turns.map(function (t) { return t.status; })), ['done', 'done', 'done']);
+    assert.strictEqual(c.turns[0].text, 'The drive stalled on \uE002host\uE003PC01\uE004 [E1].', 'earlier turns untouched');
+    assert.match(log.textContent, /Continued .* with a recap of the answers above/);
+    assert.strictEqual(ph.st.ai.saved.chats[0].id, CH1);
+    assert.strictEqual(ph.st.ai.saved.chats[0].count, 3);
+    // the list: grouped by day, the open chat marked, titles escaped
+    ph.aiHistoryToggle();
+    assert.strictEqual(doc.querySelector('#evlAiHd h2').textContent, 'Saved chats');
+    var rows = log.querySelectorAll('.evlAiHistRow');
+    assert.strictEqual(rows.length, 2);
+    assert.ok(rows[0].classList.contains('cur'));
+    assert.strictEqual(log.querySelectorAll('.evlAiHistDay')[0].textContent, 'Today');
+    assert.ok(log.innerHTML.indexOf('<b>chat</b>') < 0 && log.textContent.indexOf('Older <b>chat</b>') >= 0);
+    assert.ok(log.textContent.indexOf('Chats are saved for 30 days and visible only to you.') >= 0);
+    // open the other one: asked from the server, shown when it arrives
+    ph.aiHistoryOpen(CH2);
+    assert.strictEqual(sentOf(w, 'aiHistoryGet').pop().id, CH2);
+    assert.match(log.textContent, /Opening the saved chat/);
+    ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH2, item: null });   // gone meanwhile
+    assert.strictEqual(ph.st.ai.saved.chats.length, 1);
+    // delete with an inline confirmation
+    ph.aiHistoryToggle();
+    ph.aiHistoryDel(CH1);
+    assert.ok(log.querySelector('.evlAiHistAsk'));
+    assert.strictEqual(sentOf(w, 'aiHistoryDelete').length, 0, 'nothing before the confirmation');
+    ph.aiHistoryDelNo();
+    assert.strictEqual(log.querySelector('.evlAiHistAsk'), null);
+    ph.aiHistoryDel(CH1); ph.aiHistoryDelYes(CH1);
+    assert.deepStrictEqual(plain(sentOf(w, 'aiHistoryDelete').pop()).id, CH1);
+    ph.onAiHistoryDeleted(null, { nodeid: NODE, kind: 'chat', id: CH1, ok: true });
+    assert.strictEqual(ph.st.ai.chat, null, 'the open chat is gone too');
+    assert.strictEqual(ph.st.ai.saved.chats.length, 0);
+    assert.match(log.textContent, /No saved chats for this device yet/);
+});
+
+test('saved chats: a new chat started before the restore arrives is kept; saving off shows no list', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph;
+    grantSaved(w); loadHistory(w);
+    ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 7, chats: [{ id: CH1, title: 'x', updated: Date.now(), count: 2 }] });
+    ph.aiAsk('Fresh question');
+    ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: chatItem() });
+    assert.strictEqual(ph.st.ai.convs[ph.st.ai.chat].turns[0].q, 'Fresh question');
+    var w2 = makeDom();
+    grant(w2, { saved: { enabled: false } }); loadHistory(w2);
+    assert.strictEqual(sentOf(w2, 'aiHistoryList').length, 0);
+    w2.ph.aiToggle();
+    assert.strictEqual(w2.document.getElementById('evlAiHistBtn'), null);
+    assert.ok(w2.document.getElementById('evlAiLog').textContent.indexOf('saved for') < 0);
+});
+
+test('saved diagnosis and explanation come back with their time; Diagnose again / Explain again run anew', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document, T = Date.now() - 2 * 86400000;
+    grantSaved(w); loadHistory(w);
+    ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [], diagnosis: { generatedAt: T, window: '7d' }, explains: [{ eventId: 'abc123', time: T }] });
+    assert.deepStrictEqual(plain(sentOf(w, 'aiHistoryGet').map(function (m) { return m.kind; })), ['diagnosis']);
+    ph.elSetView('diag');
+    assert.match(doc.getElementById('evlDiag').textContent, /Loading the last diagnosis/);
+    ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'diagnosis', id: null, item: { window: '7d', generatedAt: T, time: T, text: '', model: 'qwen3:14b', endpointName: 'gpu-01.lan', cites: { E1: REC },
+        structured: { v: 1, summary: 'Saved summary [E1].', hypotheses: [{ id: 'h1', title: 'The drive stalls', status: 'likely', why: 'Resets [E1].', evidence: ['E1'], against: [] }], nextSteps: [] } } });
+    var dg = doc.getElementById('evlDiag');
+    assert.ok(dg.textContent.indexOf('Saved summary') >= 0 && dg.textContent.indexOf('What happened in the last 7 days') >= 0);
+    assert.ok(dg.querySelector('.evlCite[data-r=E1]'));
+    var tb = doc.getElementById('evlDiagTb').textContent;
+    assert.match(tb, /Diagnose again/);
+    assert.match(tb, /Generated .*\d/);
+    assert.ok(!/This is wrong/.test(dg.textContent) && /Ask about this/.test(dg.textContent), 'no feedback on a saved diagnosis, asking about it works');
+    // explanation: loaded when its row is opened, instead of the Explain button
+    ph.elSetView('history');
+    var key = ph.elNormalize(REC).key;
+    ph.elRowClick(key);
+    assert.deepStrictEqual(plain(sentOf(w, 'aiHistoryGet').map(function (m) { return m.kind + ':' + (m.id || ''); })), ['diagnosis:', 'explain:abc123']);
+    assert.match(doc.getElementById('evlBody').textContent, /Loading the saved explanation/);
+    assert.ok(!Array.prototype.some.call(doc.querySelectorAll('#evlBody button'), function (b) { return b.textContent == 'Explain this event'; }));
+    ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'explain', id: 'abc123', item: { eventId: 'abc123', time: T, text: '', model: 'qwen3:14b', endpointName: 'gpu-01.lan', cites: {}, structured: { meaning: 'The driver reset the drive.', checkNext: ['Check cables'] } } });
+    var ex = doc.querySelector('#evlBody .evlAiEx');
+    assert.ok(ex.textContent.indexOf('The driver reset the drive.') >= 0);
+    assert.match(ex.textContent, /Explained .*\d/);
+    var again = Array.prototype.filter.call(ex.querySelectorAll('button'), function (b) { return b.textContent == 'Explain again'; })[0];
+    assert.ok(again);
+    ph.aiRetry(ph.st.ai.explainBy.abc123);   // what the button runs (inline handlers do not run in this jsdom)
+    var st = sentOf(w, 'aiStart').pop();
+    assert.deepStrictEqual([st.mode, st.input.eventId], ['explain', 'abc123']);
+    ph.elSetView('diag');
+    assert.ok(Array.prototype.filter.call(doc.querySelectorAll('#evlDiagTb button'), function (b) { return b.textContent == 'Diagnose again'; })[0]);
+    ph.aiDiagnose();
+    assert.strictEqual(sentOf(w, 'aiStart').pop().mode, 'diagnose');
+});
+
+test('starter questions: the list the server chose for the device; none when the list is empty', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph;
+    grant(w, { starters: ['Is journald healthy?', 'Which units failed?'] });
+    ph.aiToggle();
+    var b = w.document.querySelectorAll('#evlAiLog .evlAiFollow button');
+    assert.deepStrictEqual(Array.prototype.map.call(b, function (x) { return x.textContent; }), ['Is journald healthy?', 'Which units failed?']);
+    ph.aiStarter(1);
+    assert.strictEqual(sentOf(w, 'aiStart').pop().input.text, 'Which units failed?');
+    var w2 = makeDom(); grant(w2, { starters: [] }); w2.ph.aiToggle();
+    assert.strictEqual(w2.document.querySelectorAll('#evlAiLog .evlAiFollow button').length, 0);
+    var w3 = makeDom(); grant(w3); w3.ph.aiToggle();
+    assert.strictEqual(w3.document.querySelectorAll('#evlAiLog .evlAiFollow button')[0].textContent, 'Why did this device restart recently?', 'an older server: the built-in list');
+});
