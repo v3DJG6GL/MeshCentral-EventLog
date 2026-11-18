@@ -39,6 +39,11 @@ function buildRequest(ep, transcript, tools, opts) {
     if (transcript && transcript.system) body.instructions = String(transcript.system);
     const mt = C.num(opts.maxOutputTokens) || C.num(ep.maxOutputTokens);
     if (mt) body.max_output_tokens = mt;
+    // no top_k / seed in this API
+    const g = C.genOf(ep);
+    if (g.temperature != null) body.temperature = g.temperature;
+    if (g.topP != null) body.top_p = g.topP;
+    if (g.thinking) body.reasoning = { effort: C.effortOf(g.thinking) };
     if (tools.length) {
         // strict defaults to true in the Responses API, which would reject schemas with optional properties
         body.tools = tools.map(function (t) { return { type: 'function', name: t.name, description: t.description || '', parameters: t.parameters || { type: 'object', properties: {} }, strict: false }; });
@@ -99,6 +104,14 @@ function createParser(emit) {
             case 'response.output_text.delta':
                 if (typeof j.delta === 'string' && j.delta) { emit({ t: 'text', d: j.delta }); st.text = true; }
                 break;
+            // reasoning: only counted ("thinking"), never kept as text; an encrypted reasoning item has no deltas
+            case 'response.reasoning_summary_text.delta':
+            case 'response.reasoning_text.delta':
+                if (typeof j.delta === 'string' && j.delta) emit({ t: 'thinking', n: j.delta.length });
+                break;
+            case 'response.output_item.added':
+                if (C.isObj(j.item) && j.item.type === 'reasoning') emit({ t: 'thinking', n: 0 });
+                break;
             case 'response.refusal.delta':
                 if (typeof j.delta === 'string' && j.delta) { emit({ t: 'text', d: j.delta }); st.text = true; st.refusal = true; }
                 break;
@@ -144,6 +157,48 @@ function classifyError(status, headers, bodyText) { return C.classifyHttpError(s
 
 function listModels(ep, deps) { return chat.listModels(ep, deps); }
 
+function sentSettings(body) {
+    const out = [];
+    if (!C.isObj(body)) return out;
+    if ('temperature' in body) out.push({ field: 'temperature', label: C.GEN_LABELS.temperature, param: 'temperature' });
+    if ('top_p' in body) out.push({ field: 'topP', label: C.GEN_LABELS.topP, param: 'top_p' });
+    if ('reasoning' in body) out.push({ field: 'thinking', label: C.GEN_LABELS.thinking, param: 'reasoning' });
+    return out;
+}
+function rejectedSetting(status, bodyText, sentBody) { return C.rejectedSetting(status, bodyText, sentSettings(sentBody)); }
+
+function reasoned(json) {
+    if (!C.isObj(json)) return false;
+    const d = C.isObj(json.usage) && C.isObj(json.usage.output_tokens_details) ? json.usage.output_tokens_details : null;
+    if (d && typeof d.reasoning_tokens === 'number') return d.reasoning_tokens > 0;
+    return (Array.isArray(json.output) ? json.output : []).some(function (it) { return C.isObj(it) && it.type === 'reasoning'; });
+}
+
+// Thinking levels: two tiny requests with reasoning.effort 'none' and 'high' (see openai_chat.probeThinking).
+async function probeThinking(ep, deps) {
+    const out = { supported: null, levels: null, serverDefault: null, verified: false, detail: '' };
+    const one = async function (level) {
+        const req = buildRequest(Object.assign({}, ep, { maxOutputTokens: 32, thinking: level, temperature: null, topP: null }), { system: '', items: [{ role: 'user', text: 'Reply with OK.' }] }, [], { stream: false });
+        let res;
+        try { res = await C.call(deps, { url: req.url, method: 'POST', headers: req.headers, body: req.body, totalTimeoutMs: 60000, idleTimeoutMs: 60000 }); }
+        catch (e) { return { error: e.message || 'request failed' }; }
+        if (res.status < 400) return { ok: true, reasoned: reasoned(C.safeJson(res.bodyText)) };
+        if (res.status === 400 || res.status === 422) return { rejected: true };
+        return { error: C.errorMessage(res.bodyText).message || ('HTTP ' + res.status) };
+    };
+    const r = await Promise.all([one('off'), one('high')]);
+    const off = r[0], high = r[1];
+    if (off.error || high.error) { out.detail = 'Could not check: ' + String(off.error || high.error).slice(0, 160); return out; }
+    if (off.rejected && high.rejected) { out.supported = false; out.levels = []; out.detail = 'the server rejected reasoning.effort'; return out; }
+    if (off.rejected) { out.supported = true; out.levels = ['low', 'medium', 'high']; out.verified = !!high.reasoned; out.detail = 'thinking cannot be switched off (the server rejected reasoning.effort "none")'; return out; }
+    if (high.rejected) { out.supported = false; out.levels = ['off']; out.detail = 'the server accepts reasoning.effort "none" only'; return out; }
+    out.levels = C.THINK_LEVELS.slice();
+    if (high.reasoned && !off.reasoned) { out.supported = true; out.verified = true; out.detail = 'checked with two short requests'; }
+    else if (high.reasoned) { out.supported = true; out.detail = 'the model reasoned with both settings; "off" may have no effect'; }
+    else out.detail = 'accepted; effect not verifiable';
+    return out;
+}
+
 async function probe(ep, deps) {
     const out = { ok: false, tools: null, ctx: null, server: null, detail: '' };
     const notes = [];
@@ -164,6 +219,7 @@ async function probe(ep, deps) {
             else { out.code = c.code; notes.unshift(c.message); }
         }
         out.detail = notes.join('; ');
+        if (out.ok) out.thinking = await probeThinking(ep, deps);
         return out;
     } catch (e) {
         out.code = e.code || 'network';
@@ -172,4 +228,4 @@ async function probe(ep, deps) {
     }
 }
 
-module.exports = { format: FORMAT, buildRequest, createParser, parseNonStream, classifyError, listModels, probe, _buildInput: buildInput };
+module.exports = { format: FORMAT, buildRequest, createParser, parseNonStream, classifyError, rejectedSetting, sentSettings, listModels, probe, probeThinking, _buildInput: buildInput };

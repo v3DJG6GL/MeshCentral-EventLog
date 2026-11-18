@@ -286,14 +286,23 @@ function create(o) {
         // non-Ollama servers: tool support is assumed (a refusal switches to summary mode once); a context size an
         // earlier connection test detected is kept
         const prev = caps || {};
-        caps = { tools: null, ctx: Number(prev.ctx) > 0 && prev.server !== 'ollama' ? Number(prev.ctx) : null, numCtx: null, server: prev.server && prev.server !== 'ollama' ? prev.server : null, at: now() };
+        const wasOllama = /^ollama\b/i.test(String(prev.server || ''));
+        caps = { tools: null, ctx: Number(prev.ctx) > 0 && !wasOllama ? Number(prev.ctx) : null, numCtx: null, server: prev.server && !wasOllama ? prev.server : null, at: now() };
+        // what a connection test found about thinking and the server's defaults is kept (Ollama: read again below)
+        if (isObj(prev.thinking)) caps.thinking = prev.thinking;
+        if (isObj(prev.genDefaults)) caps.genDefaults = prev.genDefaults;
         try {
             if (ep.format === 'openai-chat' && adapters.ollama) {
                 const deps = probeDeps(S);
                 const ver = await adapters.ollama.isOllama(epK, deps);
                 if (ver) {
                     caps.server = 'ollama';
-                    try { const s = await adapters.ollama.show(epK, deps); caps.tools = s.tools; caps.ctx = s.ctx || null; caps.numCtx = s.numCtx || null; } catch (e) { }
+                    try {
+                        const s = await adapters.ollama.show(epK, deps);
+                        caps.tools = s.tools; caps.ctx = s.ctx || null; caps.numCtx = s.numCtx || null;
+                        if (s.thinking) caps.thinking = s.thinking;
+                        if (s.genDefaults) caps.genDefaults = s.genDefaults;
+                    } catch (e) { }
                 }
             }
         } catch (e) { }
@@ -301,20 +310,10 @@ function create(o) {
         ep.caps = caps;
         return caps;
     }
+    // the same numbers the admin page shows under "Applied by the Assistant" (budget.applied)
     function contextFor(S, caps, settings) {
-        const ep = S.ep, notes = [];
-        const isOllama = caps && caps.server === 'ollama';
-        let ctx;
-        if (Number(ep.contextTokens) > 0) ctx = Number(ep.contextTokens);
-        else if (isOllama && Number(ep.numCtx) > 0) ctx = Number(ep.numCtx);
-        else if (isOllama) {
-            ctx = Number(caps.numCtx) > 0 ? Number(caps.numCtx) : Math.min(Number(caps.ctx) || 4096, 4096);
-            notes.push('Ollama runs this model with its default context (about ' + ctx + ' tokens). Set a context size for the endpoint to give the model more room.');
-        } else ctx = (caps && Number(caps.ctx) > 0) ? Number(caps.ctx) : 8192;
-        let maxOutput = Number(ep.maxOutputTokens) > 0 ? Number(ep.maxOutputTokens) : (Number(settings.limits.maxOutputTokens) > 0 ? Number(settings.limits.maxOutputTokens) : 2048);
-        maxOutput = Math.max(256, Math.min(maxOutput, Math.floor(ctx / 2)));
-        const ollamaNative = !!(isOllama && Number(ep.numCtx) > 0 && ep.format === 'openai-chat');
-        return { ctx: ctx, maxOutput: maxOutput, input: budget.inputBudget(ctx, maxOutput), notes: notes, ollamaNative: ollamaNative };
+        const a = budget.applied(S.ep, caps, settings.limits);
+        return { ctx: a.ctx, maxOutput: a.maxOutput, input: budget.inputBudget(a.ctx, a.maxOutput), notes: a.notes, ollamaNative: a.ollamaNative };
     }
 
     // ---- composing ----------------------------------------------------------------------------------------------------
@@ -430,6 +429,8 @@ function create(o) {
             const adapter = adapters.get(S.ep.format);
             if (!adapter) { sendS(S, 'onAiError', { reqId: S.reqId, code: 'model', message: 'Unknown API format', retryable: false }); return; }
             const epBase = { id: S.ep.id, baseUrl: S.ep.baseUrl, model: S.ep.model, maxOutputTokens: S.budget.maxOutput, numCtx: Number(S.ep.numCtx) > 0 ? Number(S.ep.numCtx) : null, ollamaNative: S.budget.ollamaNative, quirks: S.ep.quirks || null, format: S.ep.format };
+            // generation settings (null = the server's default; the adapters send only what is set, Anthropic none)
+            for (const k of ['thinking', 'temperature', 'topP', 'topK', 'seed']) epBase[k] = S.ep[k] == null ? null : S.ep[k];
             const lim = S.settings.limits;
             const tmo = Object.assign({ idleMs: 60000, connectMs: 10000, totalMs: (Number(S.ep.timeoutSec) > 0 ? Number(S.ep.timeoutSec) : (Number(lim.timeoutSec) > 0 ? Number(lim.timeoutSec) : 120)) * 1000 }, o.timeouts || {});
             await engine.runTurn(S, text, {

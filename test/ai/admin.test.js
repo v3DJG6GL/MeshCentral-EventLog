@@ -273,8 +273,15 @@ test('test: openai-chat with tools, stored key, caps and lastTest saved', async 
     const r = await t.call({ pluginaction: 'aiAdminTest', id: saved.endpoint.id });
     assert.strictEqual(r.method, 'aiAdminTestResult');
     assert.strictEqual(r.ok, true, JSON.stringify(r.steps));
-    assert.deepStrictEqual(r.steps.map(function (s) { return s.name; }), ['resolve', 'connect', 'auth', 'model', 'tools', 'context']);
-    assert.ok(r.steps.every(function (s) { return s.ok === true && typeof s.ms === 'number' && typeof s.detail === 'string' && s.detail.length <= 300; }), JSON.stringify(r.steps));
+    assert.deepStrictEqual(r.steps.map(function (s) { return s.name; }), ['resolve', 'connect', 'auth', 'model', 'tools', 'context', 'thinking', 'generation']);
+    assert.ok(r.steps.every(function (s) { return typeof s.ms === 'number' && typeof s.detail === 'string' && s.detail.length <= 300; }), JSON.stringify(r.steps));
+    assert.ok(r.steps.slice(0, 6).every(function (s) { return s.ok === true; }), JSON.stringify(r.steps));
+    // the mock answers both thinking requests the same way: accepted, effect not verifiable; nothing set -> no check
+    assert.strictEqual(step(r, 'thinking').ok, null);
+    assert.match(step(r, 'thinking').detail, /^Accepted; effect not verifiable/);
+    assert.strictEqual(step(r, 'generation').ok, null);
+    assert.deepStrictEqual(step(r, 'generation').lines, ['Server defaults: not reported by the server',
+        'Applied by the Assistant: max output 2,048 \u00b7 context 32,768 \u00b7 timeout 120 s \u00b7 thinking server default \u00b7 temperature server default \u00b7 top-p server default \u00b7 top-k server default \u00b7 seed server default']);
     assert.strictEqual(r.network, 'loopback');
     assert.strictEqual(step(r, 'auth').detail, 'API key accepted');
     assert.ok(!('noKey' in step(r, 'auth')));
@@ -456,7 +463,8 @@ test('models: OpenAI-compatible list and Ollama tags with show details', async f
     ollamaRoutes(true);
     r = await t.call({ pluginaction: 'aiAdminModels', draft: ollamaEp() });
     assert.strictEqual(r.ok, true);
-    assert.deepStrictEqual(r.models, [{ id: 'llama3.1:8b', tools: true, ctx: 131072 }, { id: 'qwen3:4b', tools: true, ctx: 40960 }, { id: 'nomic-embed', tools: true, ctx: 131072 }]);
+    const od = { temperature: 0.8, topP: 0.9, topK: 40, seed: -1, maxTokens: -1 };
+    assert.deepStrictEqual(r.models, [{ id: 'llama3.1:8b', tools: true, ctx: 131072, thinking: false, genDefaults: od }, { id: 'qwen3:4b', tools: true, ctx: 40960, thinking: false, genDefaults: od }, { id: 'nomic-embed', tools: true, ctx: 131072, thinking: false, genDefaults: od }]);
 
     mock.reset();
     mock.always('/v1/models', { status: 401, json: { error: { message: 'bad key ' + KEY } } });
@@ -623,4 +631,113 @@ test('a test or model list of a saved endpoint stores the network the server fou
         r = await t.call({ pluginaction: 'aiAdminGet' });
         assert.strictEqual(r.endpoints[0].network, 'loopback');
     } finally { delete DNS['later.lan']; }
+});
+
+// ---- thinking and generation settings ----
+const OK_JSON = { choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1 } };
+function chatRoute(fn) { mock.always('/v1/chat/completions', function (rec) { return fn(rec.body || {}) || { json: OK_JSON }; }); }
+
+test('test: thinking probe, server rejects reasoning_effort -> not supported, other steps pass', async function () {
+    const t = setup();
+    mock.always('/v1/models', { json: { data: [{ id: 'm1', max_model_len: 32768 }] } });
+    chatRoute(function (b) { if ('reasoning_effort' in b) return { status: 400, json: { error: { message: 'Unrecognized request argument supplied: reasoning_effort', type: 'invalid_request_error' } } }; });
+    const r = await t.call({ pluginaction: 'aiAdminTest', draft: chatEp() });
+    assert.strictEqual(r.ok, true, JSON.stringify(r.steps));
+    assert.strictEqual(step(r, 'thinking').ok, null);
+    assert.strictEqual(step(r, 'thinking').detail, 'Not supported (the server rejected reasoning_effort)');
+    assert.deepStrictEqual(r.caps.thinking, { supported: false, levels: [], serverDefault: null, verified: false, detail: 'the server rejected reasoning_effort' });
+    const probes = mock.requests.filter(function (x) { return x.path === '/v1/chat/completions' && 'reasoning_effort' in (x.body || {}); });
+    assert.deepStrictEqual(probes.map(function (x) { return x.body.reasoning_effort; }).sort(), ['high', 'none']);
+    assert.ok(probes.every(function (x) { return !x.body.tools && x.body.max_tokens <= 32 && x.body.stream === false; }), 'tiny requests without tools');
+});
+
+test('test: thinking probe, reasoning only with high; /props server defaults; Applied line', async function () {
+    const t = setup();
+    mock.always('/v1/models', { json: { data: [{ id: 'm1' }] } });
+    mock.always('/props', { json: { build_info: 'b6500-abc1234', default_generation_settings: { n_ctx: 262144, params: { temperature: 1, top_p: 0.95, top_k: 20, seed: 4294967295, n_predict: -1, reasoning_effort: 'high' } }, chat_template_caps: { supports_preserve_reasoning: true } } });
+    chatRoute(function (b) {
+        if (b.reasoning_effort === 'high') return { json: { choices: [{ index: 0, message: { role: 'assistant', content: '', reasoning_content: 'Let me think' }, finish_reason: 'length' }] } };
+    });
+    const saved = await t.call({ pluginaction: 'aiAdminSaveEndpoint', endpoint: chatEp({ preset: 'llamacpp', temperature: 0.6, thinking: 'medium' }) });
+    const r = await t.call({ pluginaction: 'aiAdminTest', id: saved.endpoint.id });
+    assert.strictEqual(r.ok, true, JSON.stringify(r.steps));
+    assert.strictEqual(step(r, 'thinking').ok, true);
+    assert.strictEqual(step(r, 'thinking').detail, 'Supported: off, low, medium, high · server default: high (checked with two short requests)');
+    assert.deepStrictEqual(r.caps.thinking.levels, ['off', 'low', 'medium', 'high']);
+    assert.strictEqual(r.caps.thinking.verified, true);
+    assert.deepStrictEqual(r.caps.genDefaults, { temperature: 1, topP: 0.95, topK: 20, seed: -1, maxTokens: -1 });
+    const g = step(r, 'generation');
+    assert.strictEqual(g.ok, true);
+    assert.strictEqual(g.lines[0], 'Server defaults: Temperature 1.00 · Top-p 0.95 · Top-k 20 · Seed random · Max tokens until done');
+    assert.strictEqual(g.lines[1], 'Applied by the Assistant: max output 2,048 · context 262,144 · timeout 120 s · thinking medium · temperature 0.60 · top-p server default · top-k server default · seed server default');
+    assert.strictEqual(g.lines[2], 'The server accepted the endpoint’s settings.');
+    const check = mock.requests.filter(function (x) { return x.path === '/v1/chat/completions' && x.body && x.body.temperature === 0.6; });
+    assert.strictEqual(check.length, 1);
+    assert.strictEqual(check[0].body.reasoning_effort, 'medium');
+    const ep = await t.store.getEndpoint(saved.endpoint.id);
+    assert.strictEqual(ep.caps.thinking.serverDefault, 'high');
+    assert.strictEqual(ep.caps.genDefaults.topK, 20);
+    assert.strictEqual(ep.lastTest.ok, true);
+});
+
+test('test: thinking cannot be switched off when only "none" is rejected', async function () {
+    const t = setup();
+    mock.always('/v1/models', { json: { data: [{ id: 'm1' }] } });
+    chatRoute(function (b) {
+        if (b.reasoning_effort === 'none') return { status: 400, json: { error: { message: "Unsupported value: 'reasoning_effort' does not support 'none' with this model." } } };
+        if (b.reasoning_effort) return { json: { choices: [{ index: 0, message: { content: 'OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 20, completion_tokens_details: { reasoning_tokens: 19 } } } };
+    });
+    const r = await t.call({ pluginaction: 'aiAdminTest', draft: chatEp({ thinking: 'off' }) });
+    assert.deepStrictEqual(r.caps.thinking.levels, ['low', 'medium', 'high']);
+    assert.match(step(r, 'thinking').detail, /^Supported: low, medium, high \(thinking cannot be switched off.*this endpoint’s setting “off” is not among them$/);
+    // the endpoint's own setting is then rejected by the settings check: the test fails on that step
+    assert.strictEqual(r.ok, false);
+    assert.strictEqual(step(r, 'generation').ok, false);
+    assert.match(step(r, 'generation').lines[2], /^Rejected by the server: Thinking \(Unsupported value/);
+});
+
+test('test: a rejected sampling setting is reported per field', async function () {
+    const t = setup();
+    mock.always('/v1/models', { json: { data: [{ id: 'm1' }] } });
+    chatRoute(function (b) { if ('temperature' in b) return { status: 400, json: { error: { message: "Unsupported parameter: 'temperature' is not supported with this model.", param: 'temperature' } } }; });
+    const r = await t.call({ pluginaction: 'aiAdminTest', draft: chatEp({ temperature: 0.2, topK: 20, seed: 1 }) });
+    assert.strictEqual(r.ok, false);
+    const g = step(r, 'generation');
+    assert.strictEqual(g.ok, false);
+    assert.match(g.lines[2], /^Rejected by the server: Temperature \(Unsupported parameter: 'temperature'/);
+    assert.doesNotMatch(g.lines[2], /Top-k|Seed/);
+    assert.strictEqual(g.detail, g.lines[2]);
+    // one request with all three, then each alone
+    const sets = mock.requests.filter(function (x) { return x.path === '/v1/chat/completions' && x.body && ('top_k' in x.body || 'temperature' in x.body || 'seed' in x.body); });
+    assert.deepStrictEqual(sets.map(function (x) { return ['temperature', 'top_k', 'seed'].filter(function (k) { return k in x.body; }).join('+'); }), ['temperature+top_k+seed', 'temperature', 'top_k', 'seed']);
+    // Anthropic sends none of them and the generation step says so
+    mock.always('/v1/models/claude-test', { json: { id: 'claude-test', max_input_tokens: 200000, capabilities: { thinking: { supported: true } } } });
+    const a = await t.call({ pluginaction: 'aiAdminTest', draft: { name: 'A', format: 'anthropic', baseUrl: mock.base, model: 'claude-test', temperature: 0.5 } });
+    assert.strictEqual(a.ok, true, JSON.stringify(a.steps));
+    assert.strictEqual(step(a, 'thinking').detail, 'Set by the model; this API version takes no thinking setting (the model can think)');
+    assert.match(step(a, 'generation').lines[1], /thinking and sampling set by the model$/);
+    assert.strictEqual(step(a, 'generation').ok, null);
+});
+
+test('test: Ollama thinking capability and model file defaults; Fetch models carries them per model', async function () {
+    const t = setup();
+    mock.always('/api/version', { json: { version: '0.12.6' } });
+    mock.always('/api/show', { json: { capabilities: ['completion', 'tools', 'thinking'], model_info: { 'general.architecture': 'qwen3', 'qwen3.context_length': 40960 }, parameters: 'temperature 0.6\ntop_k 20\ntop_p 0.95' } });
+    mock.always('/v1/models', { json: { data: [{ id: 'qwen3:8b' }] } });
+    mock.always('/api/tags', { json: { models: [{ name: 'qwen3:8b' }] } });
+    const r = await t.call({ pluginaction: 'aiAdminTest', draft: { name: 'O', format: 'openai-chat', preset: 'ollama', baseUrl: mock.base, model: 'qwen3:8b' } });
+    assert.strictEqual(r.ok, true, JSON.stringify(r.steps));
+    assert.strictEqual(r.caps.thinking.supported, true);
+    assert.strictEqual(step(r, 'thinking').detail, 'Supported: off, low, medium, high (reported by Ollama)');
+    assert.deepStrictEqual(r.caps.genDefaults, { temperature: 0.6, topP: 0.95, topK: 20, seed: -1, maxTokens: -1 });
+    assert.match(step(r, 'generation').lines[1], /context 4,096/, 'Ollama default context applies');
+    assert.ok(!mock.requests.some(function (x) { return x.path === '/v1/chat/completions'; }), 'no chat request needed for Ollama');
+    const m = await t.call({ pluginaction: 'aiAdminModels', draft: { format: 'openai-chat', preset: 'ollama', baseUrl: mock.base } });
+    assert.deepStrictEqual(m.models, [{ id: 'qwen3:8b', tools: true, ctx: 40960, thinking: true, genDefaults: { temperature: 0.6, topP: 0.95, topK: 20, seed: -1, maxTokens: -1 } }]);
+    // llama.cpp-style servers: /props defaults with the model list
+    mock.reset();
+    mock.always('/v1/models', { json: { data: [{ id: 'm1' }] } });
+    mock.always('/props', { json: { default_generation_settings: { params: { temperature: 0.7, top_k: 40, seed: 5 } } } });
+    const m2 = await t.call({ pluginaction: 'aiAdminModels', draft: chatEp({ model: '' }) });
+    assert.deepStrictEqual(m2.genDefaults, { temperature: 0.7, topP: null, topK: 40, seed: 5, maxTokens: null });
 });

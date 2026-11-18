@@ -621,3 +621,58 @@ test('running state: dot on the Ask button while the panel is closed; Explain an
     assert.strictEqual(doc.querySelector('#evlDiag .evlAiStrip.on'), null);
     assert.ok(!ph._aiTick && !ph._aiDog, 'no timer left after the watchdog ended it');
 });
+
+test('aiThinkCount: a short character count', function () {
+    var p = loadPlugin();
+    assert.strictEqual(p.aiThinkCount(0), '');
+    assert.strictEqual(p.aiThinkCount(340), '340 characters');
+    assert.strictEqual(p.aiThinkCount(1234), '1.2k characters');
+    assert.strictEqual(p.aiThinkCount(1299), '1.2k characters');
+    assert.strictEqual(p.aiThinkCount(15600), '15k characters');
+});
+
+test('running state: "Thinking…" with a growing counter between steps and before writing; announced once per phase', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w); loadHistory(w);
+    ph.aiAsk('Why did it crash?');
+    var s = sentOf(w, 'aiStart')[0];
+    ph.onAiStarted(null, { nodeid: NODE, reqId: s.reqId, convId: 'cv1', mode: 'ask', model: 'qwen3:14b', endpointName: 'gpu-01.lan', network: 'private' });
+    var live = function () { var l = doc.querySelector('#evlAiLog .evlAiLive'); return l ? l.textContent : ''; };
+    var say = function () { return doc.getElementById('evlAiSay').textContent; };
+    ph._aiSaidAt = 0;
+    ph.onAiThinking(null, { nodeid: NODE, convId: 'cv1', turn: 1, round: 1, chars: 0 });
+    await sleep(200);
+    assert.ok(/^Thinking…0:0\d$/.test(live()), live());
+    assert.strictEqual(say(), 'Thinking.');
+    ph.onAiThinking(null, { nodeid: NODE, convId: 'cv1', turn: 1, round: 1, chars: 1234 });
+    await sleep(200);
+    assert.ok(live().indexOf('Thinking… (1.2k characters)') == 0, live());
+    ph._aiSaidAt = 0;   // past the 2.5 s throttle: the counter alone is never announced again
+    doc.getElementById('evlAiSay').textContent = '';
+    ph.onAiThinking(null, { nodeid: NODE, convId: 'cv1', turn: 1, round: 1, chars: 2500 });
+    await sleep(200);
+    assert.ok(live().indexOf('Thinking… (2.5k characters)') == 0, live());
+    assert.strictEqual(say(), '', 'one announcement per thinking phase');
+    // a step, then the next model call thinks again
+    ph.onAiStep(null, { nodeid: NODE, convId: 'cv1', turn: 1, i: 0, tool: 'event_facets', args: { window: '24h' }, status: 'running' });
+    await sleep(200);
+    assert.ok(live().indexOf('Step 1: counting events (24h)') == 0, live());
+    ph.onAiThinking(null, { nodeid: NODE, convId: 'cv1', turn: 1, round: 2, chars: 80 });
+    await sleep(200);
+    assert.ok(live().indexOf('Thinking… (80 characters)') == 0, live());
+    ph.onAiThinking(null, { nodeid: NODE, convId: 'cv1', turn: 1, round: 1, chars: 9000 });   // late, from the earlier call
+    await sleep(200);
+    assert.ok(live().indexOf('Thinking… (80 characters)') == 0, 'an older call is ignored');
+    ph._aiSaidAt = 0;
+    ph.onAiDelta(null, { nodeid: NODE, convId: 'cv1', turn: 1, seq: 1, text: 'The disk' });
+    await sleep(200);
+    assert.ok(live().indexOf('Writing the answer…') == 0, live());
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cv1', turn: 1, text: 'The disk.', citations: {}, usage: {} });
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiLive'), null);
+    // bad messages are ignored
+    ph.aiAsk('Again?');
+    ph.onAiThinking(null, { nodeid: NODE, convId: 'cv1', turn: 2, round: -1, chars: 5 });
+    ph.onAiThinking(null, { nodeid: NODE, convId: 'other', turn: 2, round: 1, chars: 5 });
+    await sleep(200);
+    assert.ok(live().indexOf('Thinking') < 0, live());
+});

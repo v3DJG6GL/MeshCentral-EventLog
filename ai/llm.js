@@ -8,7 +8,12 @@
 //                      raw: { format, items } | null, usage: {in,out} | null, stopReason, retried }
 //   or rejects with Error { code, retryable, status?, retryAfterMs?, partial? } where code is one of
 //   auth|model|rateLimit|overloaded|timeout|network|blocked|contextFull|badRequest|badResponse|aborted|toolsUnsupported|server
-// - onEvent receives the adapter events as they stream ({t:'text',d}, {t:'call',...,args}, {t:'usage'}, {t:'stop'}, ...).
+// - onEvent receives the adapter events as they stream ({t:'text',d}, {t:'call',...,args}, {t:'usage'}, {t:'stop'},
+//   {t:'thinking',n} = n more reasoning characters went by (0: a reasoning block started); the reasoning text itself
+//   never leaves the adapter).
+// - A 400 naming a generation setting the endpoint set (temperature, top_p, top_k, seed, reasoning effort / think;
+//   adapter.rejectedSetting) is not retried without it: it fails with code badRequest, err.setting = the field and a
+//   message that names the setting, so the admin can change it.
 // - Retries once for rateLimit / overloaded / 502-504 / network errors, only while no text or call has been
 //   emitted; waits retry-after / retry-after-ms (or 1-2 s), never longer than 10 s (a longer retry-after is
 //   not retried but returned with err.retryAfterMs).
@@ -128,6 +133,7 @@ function stream(p) {
                     break;
                 }
                 case 'raw': acc.raw.push(ev.x); forward(ev); break;
+                case 'thinking': forward({ t: 'thinking', n: Math.max(0, Math.floor(Number(ev.n) || 0)) }); break;
                 case 'usage': acc.usage = { in: Number(ev.in) || 0, out: Number(ev.out) || 0 }; acc.events++; forward(ev); break;
                 case 'stop': acc.stop = ev.reason || 'end'; acc.events++; forward(ev); break;
                 case 'error': if (!acc.error) acc.error = ev; acc.events++; forward(ev); break;
@@ -173,6 +179,13 @@ function stream(p) {
                 if (quirk && !learned[quirk] && !(ep.quirks && ep.quirks[quirk]) && !visible && !aborted) {
                     learned[quirk] = true;
                     try { attempt(); } catch (e) { settle(mkErr('badResponse', 'Internal error')); }
+                    return;
+                }
+                let rej = null;
+                if (typeof adapter.rejectedSetting === 'function') { try { rej = adapter.rejectedSetting(res.status, res.bodyText || '', built.body, epq); } catch (e) { rej = null; } }
+                if (rej) {
+                    fail(mkErr('badRequest', 'The model server rejected the endpoint setting \u201c' + rej.label + '\u201d (' + rej.param + '): ' + String(rej.message || '').slice(0, 200) +
+                        '. An administrator can clear it in the endpoint settings.', { status: res.status, setting: rej.field }), acc);
                     return;
                 }
                 let c;

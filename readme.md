@@ -129,7 +129,8 @@ Supported API formats:
 ### Setup
 
 1. Admin page (*My Server → Plugins → Event Log*) → **Assistant** tab → **Add endpoint**: choose the server type (Ollama, vLLM, LM Studio, llama.cpp, LocalAI, *Other OpenAI-compatible server*, *OpenAI Responses API* or *Anthropic Messages API*), the address, an API key if the server needs one, and the model (*Fetch models* lists what the server offers).
-2. **Test connection** (address, connection, API key, model, tool calls, context size), then **Save endpoint**.
+   Optionally, under **Generation**, set the thinking level (off, low, medium, high) and temperature, top-p, top-k or seed. Left empty, the server's own default applies (shown in the field once the server reported it); only filled-in values are sent. The Anthropic Messages API takes none of them, the OpenAI Responses API no top-k or seed.
+2. **Test connection** (address, connection, API key, model, tool calls, context size, which thinking levels the server accepts, the server's generation defaults next to what the Assistant applies, and whether the server accepts the endpoint's own settings), then **Save endpoint**. When no config set uses an endpoint yet, the page offers to use the new one for the *Default* config set.
 3. Check **Data sent to the model** (what may be read, what is replaced, the preview policy), optionally **Assistant behaviour** (see below), and the daily limits under **Access**, then **Save settings**.
 4. **Config Sets** tab → edit a set → **Assistant endpoint**: pick the endpoint. Devices using that set can now use the Assistant (the default is *None*).
 5. Grant **Event Log: Assistant** (*My Server → Plugins → Event Log → Permissions*) to the users or groups who should use it. They also need MeshCentral's **Details** right on the device.

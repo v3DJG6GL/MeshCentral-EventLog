@@ -61,7 +61,11 @@ test('ollama helpers: isOllama, show (capabilities + context length), tags', asy
     mock.always('/api/tags', { json: { models: [{ name: 'llama3.1:8b', size: 4900000000, details: { family: 'llama', parameter_size: '8.0B' } }] } });
     assert.strictEqual(await ollama.isOllama(ep(), deps), '0.12.3');
     const s = await ollama.show(ep(), deps);
-    assert.deepStrictEqual(s, { capabilities: ['completion', 'tools'], tools: true, ctx: 131072, numCtx: 8192, family: 'llama' });
+    assert.deepStrictEqual(s, {
+        capabilities: ['completion', 'tools'], tools: true, ctx: 131072, numCtx: 8192, family: 'llama',
+        thinking: { supported: false, levels: [], serverDefault: null, verified: false, detail: 'reported by Ollama' },
+        genDefaults: { temperature: 0.8, topP: 0.9, topK: 40, seed: -1, maxTokens: -1 }
+    });
     assert.deepStrictEqual(mock.requests.find(function (r) { return r.path === '/api/show'; }).body, { model: 'llama3.1:8b' });
     assert.deepStrictEqual(await ollama.tags(ep(), deps), [{ id: 'llama3.1:8b', size: 4900000000, family: 'llama', parameterSize: '8.0B' }]);
 });

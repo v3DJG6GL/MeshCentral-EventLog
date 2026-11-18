@@ -130,7 +130,110 @@ async function getJson(deps, o, classify) {
 
 function num(x) { const n = Number(x); return Number.isFinite(n) && n > 0 ? Math.floor(n) : null; }
 
+// ---- generation settings (ep.thinking / temperature / topP / topK / seed; null = the server's default) ----------
+const THINK_LEVELS = ['off', 'low', 'medium', 'high'];
+function genOf(ep) {
+    ep = ep || {};
+    const f = function (v) { return typeof v === 'number' && Number.isFinite(v) ? v : null; };
+    return {
+        thinking: THINK_LEVELS.indexOf(ep.thinking) >= 0 ? ep.thinking : null,
+        temperature: f(ep.temperature), topP: f(ep.topP), topK: f(ep.topK), seed: f(ep.seed)
+    };
+}
+// OpenAI-style effort for a level: off -> 'none'
+function effortOf(level) { return level === 'off' ? 'none' : level; }
+
+// A 400 that names a generation setting the request carried -> { field, label, param, message } or null.
+// sent: [{ field, label, param, names? }] for the settings actually in the request (param: the name in the request
+// body; names: other words an error may use for it).
+const RE_GEN_REJECT = /unsupported|unknown|unrecognized|unexpected|not (?:supported|allowed|permitted)|invalid|does not support|cannot be|must be|out of range|only (?:the )?default|extra (?:inputs?|fields?)/i;
+function rejectedSetting(status, bodyText, sent) {
+    if ((status !== 400 && status !== 422) || !Array.isArray(sent) || !sent.length) return null;
+    const em = errorMessage(bodyText);
+    const text = (em.message || '') + '\n' + String(bodyText || '').slice(0, 65536);
+    if (!RE_GEN_REJECT.test(text)) return null;
+    for (const s of sent) {
+        for (const name of [s.param].concat(s.names || [])) {
+            const re = new RegExp('(?:^|[^a-z_])' + name.replace(/[.]/g, '\\.') + '(?![a-z_])', 'i');
+            if (re.test(text)) return { field: s.field, label: s.label, param: s.param, message: em.message || ('HTTP ' + status) };
+        }
+    }
+    return null;
+}
+const GEN_LABELS = { thinking: 'Thinking', temperature: 'Temperature', topP: 'Top-p', topK: 'Top-k', seed: 'Seed' };
+
+// Server defaults from a llama.cpp-style /props document (llama-server, Strata): default_generation_settings.params
+// (older builds: the fields directly) -> { temperature, topP, topK, seed (-1 = random), maxTokens (-1 = until done) }
+function propsDefaults(json) {
+    const g = isObj(json) && isObj(json.default_generation_settings) ? json.default_generation_settings : null;
+    if (!g) return null;
+    const p = isObj(g.params) ? g.params : g;
+    const fin = function (v) { const n = Number(v); return v != null && v !== '' && typeof v !== 'boolean' && Number.isFinite(n) ? n : null; };
+    let seed = fin(p.seed);
+    if (seed != null && (seed < 0 || seed >= 4294967295)) seed = -1;           // LLAMA_DEFAULT_SEED: a random seed per request
+    let maxTokens = fin(p.n_predict != null ? p.n_predict : p.max_tokens);
+    if (maxTokens != null && maxTokens < 0) maxTokens = -1;
+    const out = { temperature: fin(p.temperature), topP: fin(p.top_p), topK: fin(p.top_k), seed: seed, maxTokens: maxTokens };
+    return Object.keys(out).some(function (k) { return out[k] != null; }) ? out : null;
+}
+// The reasoning effort a /props document names as the default, or null (most servers do not expose it).
+function propsEffort(json) {
+    if (!isObj(json)) return null;
+    const g = isObj(json.default_generation_settings) ? json.default_generation_settings : {};
+    const p = isObj(g.params) ? g.params : {};
+    const kw = isObj(p.chat_template_kwargs) ? p.chat_template_kwargs : isObj(json.chat_template_kwargs) ? json.chat_template_kwargs : {};
+    for (const v of [p.reasoning_effort, g.reasoning_effort, json.reasoning_effort, kw.reasoning_effort]) {
+        const s = typeof v === 'string' ? v.toLowerCase() : '';
+        if (s === 'none' || s === 'minimal') return 'off';
+        if (THINK_LEVELS.indexOf(s) >= 0) return s;
+    }
+    return null;
+}
+
+// Splits <think>…</think> at the start of a model's text off the answer: onText gets the answer, onThink(chars)
+// how many reasoning characters went by (0 when the block opens). Only a block at the very start (after optional
+// whitespace) counts, so an answer that talks about the tag later is left alone. Tags split across chunks work.
+function thinkSplitter(onText, onThink) {
+    const OPEN = '<think>', CLOSE = '</think>';
+    let state = 'start', buf = '';
+    function push(d) {
+        if (typeof d !== 'string' || !d) return;
+        if (state === 'text') { onText(d); return; }
+        buf += d;
+        for (;;) {
+            if (state === 'start') {
+                const t = buf.replace(/^\s+/, '');
+                if (t === '' || (t.length < OPEN.length && OPEN.indexOf(t) === 0)) return;
+                if (t.indexOf(OPEN) === 0) { state = 'think'; buf = t.slice(OPEN.length); onThink(0); continue; }
+                state = 'text'; const out = buf; buf = ''; onText(out); return;
+            }
+            if (state === 'think') {
+                const i = buf.indexOf(CLOSE);
+                if (i >= 0) { if (i) onThink(i); buf = buf.slice(i + CLOSE.length); state = 'after'; continue; }
+                let keep = 0;
+                for (let k = Math.min(CLOSE.length - 1, buf.length); k > 0; k--) if (CLOSE.indexOf(buf.slice(-k)) === 0) { keep = k; break; }
+                const n = buf.length - keep;
+                if (n) onThink(n);
+                buf = buf.slice(n);
+                return;
+            }
+            // after </think>: the answer starts at its first non-blank character
+            const t = buf.replace(/^\s+/, '');
+            buf = '';
+            if (t) { state = 'text'; onText(t); }
+            return;
+        }
+    }
+    function end() {
+        if (state === 'start' && buf) onText(buf);
+        else if (state === 'think' && buf) onThink(buf.length);
+        buf = '';
+    }
+    return { push: push, end: end };
+}
+
 module.exports = {
     synthId, trimSlash, joinUrl, ollamaRoot, pathOf, safeJson, isObj, parseArgs, argsToText, argsToObject, resultText, rawFor,
-    retryAfterMs, errorMessage, classifyHttpError, streamErrorCode, mkErr, call, getJson, num, RE_TOOLS, RE_CTX
+    retryAfterMs, errorMessage, classifyHttpError, streamErrorCode, mkErr, call, getJson, num, RE_TOOLS, RE_CTX,
+    THINK_LEVELS, GEN_LABELS, genOf, effortOf, rejectedSetting, propsDefaults, propsEffort, thinkSplitter
 };

@@ -55,10 +55,16 @@ function buildRequest(ep, transcript, tools, opts) {
         const body = { model: ep.model, messages: buildMessages(transcript, true), stream: stream };
         // Ollama has no tool_choice: 'none' is expressed by not offering the tools.
         if (tools.length && opts.toolChoice !== 'none') body.tools = chatTools(tools);
-        const options = {};
+        const options = {}, g = C.genOf(ep);
         if (C.num(ep.numCtx)) options.num_ctx = C.num(ep.numCtx);
         if (mt) options.num_predict = mt;
+        if (g.temperature != null) options.temperature = g.temperature;
+        if (g.topP != null) options.top_p = g.topP;
+        if (g.topK != null) options.top_k = g.topK;
+        if (g.seed != null) options.seed = g.seed;
         if (Object.keys(options).length) body.options = options;
+        // think: false for off, true for any level (Ollama's levels only work with a few models)
+        if (g.thinking) body.think = g.thinking !== 'off';
         return { url: url, path: C.pathOf(url), headers: Object.assign({ 'content-type': 'application/json', accept: 'application/x-ndjson' }, authHeaders(ep)), body: body };
     }
     const url = C.joinUrl(ep.baseUrl, '/chat/completions');
@@ -66,6 +72,12 @@ function buildRequest(ep, transcript, tools, opts) {
     const quirks = C.isObj(ep.quirks) ? ep.quirks : {};
     if (stream && !quirks.noStreamOptions) body.stream_options = { include_usage: true };
     if (mt) body[quirks.useMaxCompletionTokens ? 'max_completion_tokens' : 'max_tokens'] = mt;
+    const g = C.genOf(ep);
+    if (g.temperature != null) body.temperature = g.temperature;
+    if (g.topP != null) body.top_p = g.topP;
+    if (g.topK != null) body.top_k = g.topK;                // not in the OpenAI API; vLLM, llama.cpp, LM Studio, Ollama accept it
+    if (g.seed != null) body.seed = g.seed;
+    if (g.thinking) body.reasoning_effort = C.effortOf(g.thinking);
     if (tools.length) {
         body.tools = chatTools(tools);
         if (opts.toolChoice === 'none') body.tool_choice = 'none';
@@ -90,11 +102,13 @@ function errEvent(j) {
 function sseParser(emit) {
     const calls = new Map();            // key -> { id, name, args }
     let lastKey = null, finish = null, usage = null, refusal = false, finalized = false, seen = false;
+    const split = C.thinkSplitter(function (t) { emit({ t: 'text', d: t }); }, function (n) { emit({ t: 'thinking', n: n }); });
 
     function finalize() {
         if (finalized) return;
         finalized = true;
         if (!seen) return;                 // nothing parseable arrived: no stop event (llm.js reports badResponse)
+        split.end();
         let n = 0;
         for (const c of calls.values()) {
             if (!c.name) { emit({ t: 'malformed', message: 'tool call without a name' }); continue; }
@@ -132,9 +146,12 @@ function sseParser(emit) {
         const ch = Array.isArray(j.choices) ? j.choices[0] : null;
         if (!C.isObj(ch)) return;
         const d = C.isObj(ch.delta) ? ch.delta : C.isObj(ch.message) ? ch.message : {};
-        if (typeof d.content === 'string' && d.content) emit({ t: 'text', d: d.content });
+        // reasoning (reasoning_content: llama.cpp, vLLM, DeepSeek; reasoning: OpenRouter, Ollama /v1) only counts
+        // as "thinking": its text is never kept or shown
+        const rs = typeof d.reasoning_content === 'string' ? d.reasoning_content : typeof d.reasoning === 'string' ? d.reasoning : '';
+        if (rs) emit({ t: 'thinking', n: rs.length });
+        if (typeof d.content === 'string' && d.content) split.push(d.content);
         if (typeof d.refusal === 'string' && d.refusal) { refusal = true; emit({ t: 'text', d: d.refusal }); }
-        // reasoning_content / reasoning are dropped on purpose
         if (Array.isArray(d.tool_calls)) d.tool_calls.forEach(addCall);
         else if (C.isObj(d.function_call)) addCall({ index: 0, function: d.function_call });
         if (ch.finish_reason) finish = ch.finish_reason;
@@ -145,10 +162,12 @@ function sseParser(emit) {
 function ndjsonParser(emit) {
     const calls = [];
     let finalized = false, doneReason = null, usage = null, seen = false;
+    const split = C.thinkSplitter(function (t) { emit({ t: 'text', d: t }); }, function (n) { emit({ t: 'thinking', n: n }); });
     function finalize() {
         if (finalized) return;
         finalized = true;
         if (!seen) return;
+        split.end();
         for (const c of calls) emit(c);
         if (usage) emit({ t: 'usage', in: usage.in, out: usage.out });
         emit({ t: 'stop', reason: doneReason === 'length' ? 'length' : calls.length ? 'tools' : 'end' });
@@ -159,7 +178,8 @@ function ndjsonParser(emit) {
         seen = true;
         if (o.error) { emit(errEvent(o)); return; }
         const m = C.isObj(o.message) ? o.message : {};
-        if (typeof m.content === 'string' && m.content) emit({ t: 'text', d: m.content });
+        if (typeof m.thinking === 'string' && m.thinking) emit({ t: 'thinking', n: m.thinking.length });
+        if (typeof m.content === 'string' && m.content) split.push(m.content);
         if (Array.isArray(m.tool_calls)) for (const tc of m.tool_calls) {
             const fn = C.isObj(tc) && C.isObj(tc.function) ? tc.function : null;
             if (!fn || typeof fn.name !== 'string' || !fn.name) { emit({ t: 'malformed', message: 'tool call without a name' }); continue; }
@@ -186,7 +206,10 @@ function parseNonStream(json, emit, ep) {
     }
     const ch = Array.isArray(json.choices) ? json.choices[0] : null;
     const m = C.isObj(ch) && C.isObj(ch.message) ? ch.message : {};
-    if (typeof m.content === 'string' && m.content) emit({ t: 'text', d: m.content });
+    if (typeof m.content === 'string' && m.content) {
+        const split = C.thinkSplitter(function (t) { emit({ t: 'text', d: t }); }, function () { });
+        split.push(m.content); split.end();
+    }
     if (typeof m.refusal === 'string' && m.refusal) emit({ t: 'text', d: m.refusal });
     let n = 0;
     for (const tc of (Array.isArray(m.tool_calls) ? m.tool_calls : [])) {
@@ -225,6 +248,7 @@ async function probe(ep, deps) {
                 const s = await ollama.show(ep, deps);
                 out.tools = s.tools; out.ctx = s.ctx;
                 out.ollama = { version: ver, capabilities: s.capabilities, modelCtx: s.ctx, numCtx: s.numCtx };
+                out.thinking = s.thinking; out.genDefaults = s.genDefaults;
             } catch (e) {
                 out.code = e.code === 'badRequest' || e.code === 'model' ? 'model' : e.code;
                 out.detail = out.code === 'model' ? 'Model "' + ep.model + '" was not found on this Ollama server' : 'Model details unavailable: ' + e.message;
@@ -248,15 +272,12 @@ async function probe(ep, deps) {
             if (m && m.owner === 'vllm') out.server = 'vllm';
             if (!m && models.length) notes.push('model "' + ep.model + '" is not in the server\'s model list');
         }
-        try {
-            const p = await C.getJson(deps, { url: C.ollamaRoot(ep.baseUrl) + '/props', method: 'GET', headers: authHeaders(ep), totalTimeoutMs: 8000 });
-            const g = C.isObj(p.json) && C.isObj(p.json.default_generation_settings) ? p.json.default_generation_settings : null;
-            const nctx = C.num(g && g.n_ctx) || C.num(p.json && p.json.n_ctx);
-            if (nctx) out.ctx = out.ctx || nctx;
-            // Other servers answer /props in the same shape; only llama-server's build_info ("b<build>-<commit>") names it.
-            const bi = C.isObj(p.json) && typeof p.json.build_info === 'string' ? p.json.build_info : '';
-            if (/^b\d+-[0-9a-f]+/i.test(bi)) out.server = out.server || 'llama.cpp';
-        } catch (e) { }
+        const pr = await props(ep, deps);
+        if (pr) {
+            if (pr.ctx) out.ctx = out.ctx || pr.ctx;
+            if (pr.server) out.server = out.server || pr.server;
+            if (pr.genDefaults) out.genDefaults = pr.genDefaults;
+        }
 
         const req = buildRequest(Object.assign({}, ep, { ollamaNative: false, maxOutputTokens: 16 }), { system: '', items: [{ role: 'user', text: 'Reply with OK.' }] }, [PROBE_TOOL], { stream: false, toolChoice: 'auto' });
         const res = await C.call(deps, { url: req.url, method: 'POST', headers: req.headers, body: req.body, totalTimeoutMs: 90000, idleTimeoutMs: 90000 });
@@ -268,6 +289,7 @@ async function probe(ep, deps) {
         }
         if (out.ctx) notes.push('context ' + out.ctx + ' tokens');
         out.detail = notes.join('; ');
+        if (out.ok) out.thinking = await probeThinking(ep, deps, pr);
         return out;
     } catch (e) {
         out.code = e.code || 'network';
@@ -275,6 +297,92 @@ async function probe(ep, deps) {
         return out;
     }
 }
+
+// llama.cpp-style /props (llama-server, Strata, some other servers) -> { ctx, server, genDefaults, effort, templateThinks, json }
+// or null when the server has no such document. Never rejects.
+async function props(ep, deps) {
+    try {
+        const p = await C.getJson(deps, { url: C.ollamaRoot(ep.baseUrl) + '/props', method: 'GET', headers: authHeaders(ep), totalTimeoutMs: 8000 });
+        const j = C.isObj(p.json) ? p.json : null;
+        if (!j) return null;
+        const g = C.isObj(j.default_generation_settings) ? j.default_generation_settings : null;
+        // Other servers answer /props in the same shape; only llama-server's build_info ("b<build>-<commit>") names it.
+        const bi = typeof j.build_info === 'string' ? j.build_info : '';
+        const tc = C.isObj(j.chat_template_caps) ? j.chat_template_caps : null;
+        const tt = tc ? (tc.supports_preserve_reasoning === true || tc.supports_reasoning === true ? true : (tc.supports_preserve_reasoning === false ? false : null)) : null;
+        return {
+            ctx: C.num(g && g.n_ctx) || C.num(j.n_ctx), server: /^b\d+-[0-9a-f]+/i.test(bi) ? 'llama.cpp' : null,
+            genDefaults: C.propsDefaults(j), effort: C.propsEffort(j), templateThinks: tt
+        };
+    } catch (e) { return null; }
+}
+
+// Did a non-streamed answer reason? reasoning_content / reasoning, a leading <think> block, or reasoning tokens.
+function reasoned(json) {
+    const ch = C.isObj(json) && Array.isArray(json.choices) ? json.choices[0] : null;
+    const m = C.isObj(ch) && C.isObj(ch.message) ? ch.message : {};
+    if ((typeof m.reasoning_content === 'string' && m.reasoning_content.trim()) || (typeof m.reasoning === 'string' && m.reasoning.trim())) return true;
+    if (typeof m.content === 'string' && /^\s*<think>/.test(m.content)) return true;
+    const u = C.isObj(json.usage) && C.isObj(json.usage.completion_tokens_details) ? json.usage.completion_tokens_details : null;
+    return !!(u && Number(u.reasoning_tokens) > 0);
+}
+
+// Thinking levels, checked with two tiny requests (no tools): reasoning_effort 'none' and 'high'.
+//   -> { supported: true|false|null, levels: [..]|[]|null, serverDefault, verified, detail }
+//   both rejected (400/422)          -> supported false, levels [] (the server takes no reasoning_effort)
+//   'none' rejected, 'high' accepted -> levels low/medium/high (thinking cannot be switched off)
+//   reasoning only with 'high'       -> supported, all levels, verified
+//   accepted, no difference          -> supported null, all levels accepted, not verified
+async function probeThinking(ep, deps, pr) {
+    const out = { supported: null, levels: null, serverDefault: (pr && pr.effort) || null, verified: false, detail: '' };
+    const one = async function (effort) {
+        let q = Object.assign({}, ep.quirks || {});
+        for (let i = 0; i < 2; i++) {
+            const req = buildRequest(Object.assign({}, ep, { ollamaNative: false, maxOutputTokens: 32, quirks: q, thinking: effort === 'none' ? 'off' : effort, temperature: null, topP: null, topK: null, seed: null }),
+                { system: '', items: [{ role: 'user', text: 'Reply with OK.' }] }, [], { stream: false });
+            let res;
+            try { res = await C.call(deps, { url: req.url, method: 'POST', headers: req.headers, body: req.body, totalTimeoutMs: 60000, idleTimeoutMs: 60000 }); }
+            catch (e) { return { error: e.message || 'request failed' }; }
+            if (res.status < 400) { const j = C.safeJson(res.bodyText); return { ok: true, reasoned: reasoned(j) }; }
+            const quirk = detectQuirk(res.status, res.bodyText, req.body, ep);
+            if (quirk && !q[quirk]) { q[quirk] = true; continue; }
+            if (res.status === 400 || res.status === 422) return { rejected: true, message: C.errorMessage(res.bodyText).message || ('HTTP ' + res.status) };
+            return { error: C.errorMessage(res.bodyText).message || ('HTTP ' + res.status) };
+        }
+        return { error: 'request failed' };
+    };
+    const r = await Promise.all([one('none'), one('high')]);
+    const off = r[0], high = r[1];
+    if (off.error || high.error) { out.detail = 'Could not check: ' + String(off.error || high.error).slice(0, 160); return out; }
+    if (off.rejected && high.rejected) { out.supported = false; out.levels = []; out.detail = 'the server rejected reasoning_effort'; return out; }
+    if (off.rejected) {
+        out.supported = true; out.levels = ['low', 'medium', 'high']; out.verified = !!high.reasoned;
+        out.detail = 'thinking cannot be switched off (the server rejected reasoning_effort "none")';
+        return out;
+    }
+    if (high.rejected) { out.supported = false; out.levels = ['off']; out.detail = 'the server accepts reasoning_effort "none" only'; return out; }
+    out.levels = C.THINK_LEVELS.slice();
+    if (high.reasoned && !off.reasoned) { out.supported = true; out.verified = true; out.detail = 'checked with two short requests'; }
+    else if (high.reasoned && off.reasoned) { out.supported = true; out.detail = 'the model reasoned with both settings; "off" may have no effect'; }
+    else { out.detail = 'accepted; effect not verifiable'; if (pr && pr.templateThinks === false) out.supported = false; }
+    return out;
+}
+
+// The generation settings a built request carries: [{ field, label, param }] (param: name in the request body).
+function sentSettings(body, ep) {
+    const out = [];
+    if (!C.isObj(body)) return out;
+    const o = ep && ep.ollamaNative ? (C.isObj(body.options) ? body.options : {}) : body;
+    const add = function (field, param, has) { if (has) out.push({ field: field, label: C.GEN_LABELS[field], param: param }); };
+    add('temperature', 'temperature', 'temperature' in o);
+    add('topP', 'top_p', 'top_p' in o);
+    add('topK', 'top_k', 'top_k' in o);
+    add('seed', 'seed', 'seed' in o);
+    if (ep && ep.ollamaNative) { add('thinking', 'think', 'think' in body); if (out.length && out[out.length - 1].param === 'think') out[out.length - 1].names = ['thinking']; }
+    else add('thinking', 'reasoning_effort', 'reasoning_effort' in body);
+    return out;
+}
+function rejectedSetting(status, bodyText, sentBody, ep) { return C.rejectedSetting(status, bodyText, sentSettings(sentBody, ep)); }
 
 // A 400 that rejects a request field some servers/models do not accept -> the quirk that fixes it, or null.
 //   useMaxCompletionTokens: OpenAI reasoning models want max_completion_tokens instead of max_tokens
@@ -291,4 +399,4 @@ function detectQuirk(status, bodyText, sentBody, ep) {
     return null;
 }
 
-module.exports = { format: FORMAT, buildRequest, createParser, parseNonStream, classifyError, detectQuirk, listModels, probe, _buildMessages: buildMessages };
+module.exports = { format: FORMAT, buildRequest, createParser, parseNonStream, classifyError, detectQuirk, rejectedSetting, sentSettings, listModels, probe, props, probeThinking, _buildMessages: buildMessages };

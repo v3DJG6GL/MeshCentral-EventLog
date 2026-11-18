@@ -12,6 +12,11 @@
  *     every string over 300 chars, 3) drop trailing items of the largest array (repeated). When anything was cut, a
  *     top-level "truncated": true and a "note" are added (arrays are wrapped as { items, truncated, note }).
  * inputBudget(ctx, maxOutput)               -> floor((ctx - maxOutput) * 0.9), at least 1024
+ * applied(ep, caps, limits)                 -> { ctx, maxOutput, timeoutSec, ollama, ollamaNative, ctxSource, notes }
+ *     what a conversation with this endpoint uses: the endpoint's own context size, else Ollama's (num_ctx set here,
+ *     in the model file, or Ollama's 4096 default), else the detected size, else 8192; max output from the endpoint,
+ *     else limits.maxOutputTokens (2048), at least 256 and at most half the context; the endpoint's timeout, else
+ *     limits.timeoutSec (120). ctxSource: 'endpoint'|'ollama'|'modelfile'|'ollamaDefault'|'detected'|'assumed'.
  */
 
 const BYTES_PER_TOKEN = 3;
@@ -144,4 +149,25 @@ function fitJson(value, maxTokens, opts) {
     return { text: text, truncated: true, dropped: dropped };
 }
 
-module.exports = { estimateTokens, calibrate, fitJson, inputBudget, BYTES_PER_TOKEN, NOTE };
+function applied(ep, caps, limits) {
+    ep = ep || {}; limits = limits || {};
+    const pos = function (v) { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : null; };
+    const ollama = !!(caps && /^ollama\b/i.test(String(caps.server || '')));
+    const notes = [];
+    let ctx, src;
+    if (pos(ep.contextTokens)) { ctx = pos(ep.contextTokens); src = 'endpoint'; }
+    else if (ollama && pos(ep.numCtx)) { ctx = pos(ep.numCtx); src = 'ollama'; }
+    else if (ollama && pos(caps.numCtx)) { ctx = pos(caps.numCtx); src = 'modelfile'; }
+    else if (ollama) {
+        ctx = Math.min(pos(caps.ctx) || 4096, 4096); src = 'ollamaDefault';
+        notes.push('Ollama runs this model with its default context (about ' + ctx + ' tokens). Set a context size for the endpoint to give the model more room.');
+    } else if (caps && pos(caps.ctx)) { ctx = pos(caps.ctx); src = 'detected'; }
+    else { ctx = 8192; src = 'assumed'; }
+    let maxOutput = pos(ep.maxOutputTokens) || pos(limits.maxOutputTokens) || 2048;
+    maxOutput = Math.max(256, Math.min(maxOutput, Math.floor(ctx / 2)));
+    const timeoutSec = pos(ep.timeoutSec) || pos(limits.timeoutSec) || 120;
+    const ollamaNative = !!(ollama && pos(ep.numCtx) && (ep.format == null || ep.format === 'openai-chat'));
+    return { ctx: ctx, maxOutput: maxOutput, timeoutSec: timeoutSec, ollama: ollama, ollamaNative: ollamaNative, ctxSource: src, notes: notes };
+}
+
+module.exports = { estimateTokens, calibrate, fitJson, inputBudget, applied, BYTES_PER_TOKEN, NOTE };

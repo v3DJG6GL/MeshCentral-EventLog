@@ -1,6 +1,7 @@
 'use strict';
 // Anthropic Messages API (anthropic-version 2026-10-21).
-// - temperature / top_p / top_k are never sent (400 on this API version).
+// - temperature / top_p / top_k are never sent (400 on this API version), and thinking cannot be set: the
+//   endpoint's generation settings are ignored for this format. Thinking blocks stream as {t:'thinking'} counts.
 // - tool_choice: only {type:'none'} is sent (when tools are offered and opts.toolChoice is 'none');
 //   'auto' is the default and is left out. Forced 'any'/'tool' are rejected by current models and never used.
 // - assistant turns are replayed from raw content blocks unchanged (thinking blocks with signatures,
@@ -132,6 +133,7 @@ function createParser(emit) {
                 const cb = C.isObj(j.content_block) ? Object.assign({}, j.content_block) : null;
                 if (!cb || !Number.isInteger(j.index)) { emit({ t: 'malformed' }); break; }
                 if (cb.type === 'tool_use') cb._partial = '';
+                if (cb.type === 'thinking' || cb.type === 'redacted_thinking') emit({ t: 'thinking', n: typeof cb.thinking === 'string' ? cb.thinking.length : 0 });
                 if (cb.type === 'text' && typeof cb.text === 'string' && cb.text) emit({ t: 'text', d: cb.text });
                 blocks[j.index] = cb;
                 break;
@@ -141,7 +143,7 @@ function createParser(emit) {
                 if (!C.isObj(b) || !C.isObj(d)) { emit({ t: 'malformed' }); break; }
                 if (d.type === 'text_delta' && typeof d.text === 'string') { b.text = (b.text || '') + d.text; if (d.text) emit({ t: 'text', d: d.text }); }
                 else if (d.type === 'input_json_delta' && typeof d.partial_json === 'string') b._partial = (b._partial || '') + d.partial_json;
-                else if (d.type === 'thinking_delta' && typeof d.thinking === 'string') b.thinking = (b.thinking || '') + d.thinking;
+                else if (d.type === 'thinking_delta' && typeof d.thinking === 'string') { b.thinking = (b.thinking || '') + d.thinking; if (d.thinking) emit({ t: 'thinking', n: d.thinking.length }); }
                 else if (d.type === 'signature_delta' && typeof d.signature === 'string') b.signature = (b.signature || '') + d.signature;
                 else if (d.type === 'citations_delta' && d.citation) { if (!Array.isArray(b.citations)) b.citations = []; b.citations.push(d.citation); }
                 break;
@@ -222,6 +224,15 @@ async function listModels(ep, deps) {
     return out;
 }
 
+// what /v1/models/{id} says about thinking (capabilities, when the server lists them); it cannot be set here
+function thinkingOf(m) {
+    const c = C.isObj(m) && C.isObj(m.capabilities) ? m.capabilities : null;
+    let v = c ? (c.thinking != null ? c.thinking : c.extended_thinking) : null;
+    if (C.isObj(v)) v = v.supported;
+    const sup = v === true ? true : v === false ? false : null;
+    return { supported: sup, levels: null, serverDefault: null, verified: false, fixed: true, detail: 'set by the model; this API version takes no thinking setting' };
+}
+
 async function probe(ep, deps) {
     const out = { ok: false, tools: null, ctx: null, server: null, detail: '' };
     const notes = [];
@@ -230,6 +241,7 @@ async function probe(ep, deps) {
             const r = await C.getJson(deps, { url: base(ep) + '/models/' + encodeURIComponent(ep.model), method: 'GET', headers: headersFor(ep, false) }, classifyError);
             if (C.isObj(r.json)) {
                 if (C.num(r.json.max_input_tokens)) out.ctx = C.num(r.json.max_input_tokens);
+                out.thinking = thinkingOf(r.json);
                 out.ok = true; out.tools = true; out.server = 'anthropic';
                 notes.push('model found' + (out.ctx ? ', context ' + out.ctx + ' tokens' : ''));
                 out.detail = notes.join('; ');
@@ -241,7 +253,7 @@ async function probe(ep, deps) {
         }
         const req = buildRequest(Object.assign({}, ep, { maxOutputTokens: 16 }), { system: '', items: [{ role: 'user', text: 'Reply with OK.' }] }, [PROBE_TOOL], { stream: false, toolChoice: 'auto' });
         const res = await C.call(deps, { url: req.url, method: 'POST', headers: req.headers, body: req.body, totalTimeoutMs: 90000, idleTimeoutMs: 90000 });
-        if (res.status < 400) { out.ok = true; out.tools = true; notes.push('request with a tool definition accepted'); }
+        if (res.status < 400) { out.ok = true; out.tools = true; out.thinking = thinkingOf(null); notes.push('request with a tool definition accepted'); }
         else {
             const c = classifyError(res.status, res.headers, res.bodyText);
             if (c.toolsUnsupported) { out.ok = true; out.tools = false; notes.push('the model does not support tool calling'); }

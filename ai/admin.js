@@ -17,13 +17,21 @@
 //   aiAdminPreviewPrompt {mode, os:'windows'|'linux', draft:{prompts?, extraInstructions?, endpointExtra?}}
 //                         -> aiAdminPromptPreview { text, warnings, tokens } (sample device, window, nonce, all tools;
 //                            missing draft fields use the saved settings)
-//   aiAdminTest {id|draft}-> aiAdminTestResult { ok, steps:[{name,ok,ms,detail}], network, caps }
-//       steps resolve, connect, auth, model, tools, context; a step that could not run has ok:null.
+//   aiAdminTest {id|draft}-> aiAdminTestResult { ok, steps:[{name,ok,ms,detail,lines?}], network, caps }
+//       steps resolve, connect, auth, model, tools, context, thinking, generation; a step that could not run has
+//       ok:null and detail 'Skipped'; thinking and generation are informational (ok:null) unless verified.
+//       thinking: the levels the server accepts (OpenAI-compatible formats: two tiny requests with reasoning effort
+//       'none' and 'high'; Ollama: the model's capabilities; Anthropic: cannot be set). generation: lines[0] the
+//       server's defaults (/props, Ollama's model file), lines[1] what the Assistant applies (budget.applied plus
+//       the endpoint's own settings); when the endpoint sets any of them, one tiny request carries them all and, if
+//       the server rejects it, each one alone: a rejected setting fails the step and the test (lines[2]).
+//       caps gains thinking { supported, levels, serverDefault, verified, detail, fixed? } and genDefaults.
 //       Only a test of a saved endpoint ({id} without draft) stores caps, lastTest and network. The auth step
 //       has noKey:true when no API key is configured.
 //   A save that leaves the endpoint without caps (new, or address/model/format changed) tests it in the background
 //   the same way (within the MAX_INFLIGHT limit) and then pushes aiAdminData without reqId.
-//   aiAdminModels {id|draft} -> aiAdminModelsResult { ok, models:[{id, ctx?, tools?}], network, error? }
+//   aiAdminModels {id|draft} -> aiAdminModelsResult { ok, models:[{id, ctx?, tools?, thinking?, genDefaults?}], network,
+//       genDefaults? (server-wide, from /props), thinkingDefault?, error? }
 //       network: 'loopback'|'private'|'public' once the address was checked, else null (as in aiAdminTestResult)
 // A draft needs no name (it is never stored); a draft for aiAdminModels needs no model either.
 //   aiAdminAudit {since, until, filterUserid, filterNodeid, skip, limit, withTranscript} -> aiAdminAuditRows { rows, total }
@@ -36,8 +44,11 @@
 
 const prompts = require('./prompts.js');
 const budget = require('./budget.js');
+const C = require('./adapters/common.js');
 
 const OVERALL_MS = 30000;
+const LEVEL_WORD = { off: 'off', low: 'low', medium: 'medium', high: 'high' };
+const GEN_KEYS = ['thinking', 'temperature', 'topP', 'topK', 'seed'];
 const MAX_INFLIGHT = 4;
 const MAX_SHOW = 20;
 
@@ -194,13 +205,13 @@ function create(o) {
         const chk = await netguard.check(ep.baseUrl, { allowLinkLocal: ep.allowLinkLocal === true });
         if (!chk || !chk.ok) {
             add('resolve', false, Date.now() - t0, short(chk && chk.error || 'Address is not allowed', key));
-            skip(['connect', 'auth', 'model', 'tools', 'context']);
+            skip(['connect', 'auth', 'model', 'tools', 'context', 'thinking', 'generation']);
             return { ok: false, steps: steps, network: null, caps: null, tgt: tgt, ms: Date.now() - t0 };
         }
         add('resolve', true, Date.now() - t0, netDetail(chk));
         if (/^http:/i.test(ep.baseUrl) && chk.network === 'public' && key) {
             add('connect', false, 0, 'Refusing to send an API key over unencrypted http:// to a public address; use https://');
-            skip(['auth', 'model', 'tools', 'context']);
+            skip(['auth', 'model', 'tools', 'context', 'thinking', 'generation']);
             return { ok: false, steps: steps, network: chk.network, caps: null, tgt: tgt, ms: Date.now() - t0 };
         }
 
@@ -235,19 +246,19 @@ function create(o) {
 
         if (code === 'network' || code === 'timeout' || code === 'blocked' || code === 'redirect' || code === 'aborted') {
             add('connect', false, probeMs, detail || 'Connection failed');
-            skip(['auth', 'model', 'tools', 'context']);
+            skip(['auth', 'model', 'tools', 'context', 'thinking', 'generation']);
             return { ok: false, steps: steps, network: chk.network, caps: null, tgt: tgt, ms: Date.now() - t0 };
         }
         add('connect', true, probeMs, short('Server answered' + (pr.server ? ' (' + pr.server + ')' : '')));
         if (code === 'auth') {
             authStep(false, detail || 'Authentication failed');
-            skip(['model', 'tools', 'context']);
+            skip(['model', 'tools', 'context', 'thinking', 'generation']);
             return { ok: false, steps: steps, network: chk.network, caps: null, tgt: tgt, ms: Date.now() - t0 };
         }
         authStep(true, key ? 'API key accepted' : 'No API key needed: the server accepted the request');
         if (code) {
             add('model', false, 0, detail || 'The model request failed');
-            skip(['tools', 'context']);
+            skip(['tools', 'context', 'thinking', 'generation']);
             return { ok: false, steps: steps, network: chk.network, caps: null, tgt: tgt, ms: Date.now() - t0 };
         }
         add('model', true, 0, short('Model ' + ep.model + (detail ? ': ' + detail : ' answered'), key));
@@ -263,7 +274,127 @@ function create(o) {
         }
         add('context', ctx ? true : null, 0, short(cdetail));
         const caps = { tools: pr.tools === true ? true : pr.tools === false ? false : null, ctx: ctx, numCtx: ol && Number(ol.numCtx) > 0 ? Math.floor(Number(ol.numCtx)) : null, server: pr.server ? String(pr.server).slice(0, 80) : null, at: Date.now() };
-        return { ok: true, steps: steps, network: chk.network, caps: caps, tgt: tgt, ms: Date.now() - t0 };
+        caps.thinking = cleanThinking(pr.thinking, ep.format);
+        caps.genDefaults = cleanDefaults(pr.genDefaults);
+        add('thinking', caps.thinking && caps.thinking.supported === true ? true : null, 0, short(thinkingText(caps.thinking, ep)));
+
+        // the endpoint's own generation settings: does the server take them?
+        const tGen = Date.now();
+        let check = null;
+        if (ep.format !== 'anthropic' && GEN_KEYS.some(function (k) { return ep[k] != null; })) {
+            try { check = await withBudget(chk, key, t0 + OVERALL_MS, function (deps) { return checkSettings(adapter, aep, ep, deps); }); }
+            catch (e) { check = { error: e.message || 'request failed' }; }
+        }
+        const settings = await store.getSettings().catch(function () { return {}; });
+        const lines = [defaultsText(caps.genDefaults, ep.format), appliedText(ep, caps, (settings && settings.limits) || {})];
+        let gok = null;
+        if (check && check.rejected && check.rejected.length) {
+            gok = false;
+            lines.push('Rejected by the server: ' + check.rejected.map(function (x) { return x.label + ' (' + x.message + ')'; }).join('; ') + '. Clear or change it, or every question fails.');
+        } else if (check && check.error) lines.push('The endpoint\u2019s settings could not be checked: ' + check.error);
+        else if (check) { gok = true; lines.push('The server accepted the endpoint\u2019s settings.'); }
+        const glines = lines.map(function (l) { return short(l, key); });
+        steps.push({ name: 'generation', ok: gok, ms: check ? Date.now() - tGen : 0, detail: short(gok === false ? glines[2] : glines.join('; '), key), lines: glines });
+        return { ok: gok !== false, steps: steps, network: chk.network, caps: caps, tgt: tgt, ms: Date.now() - t0 };
+    }
+
+    // ---- generation settings ----
+    function cleanThinking(t, format) {
+        if (format === 'anthropic') {
+            const a = isObj(t) ? t : {};
+            return { supported: a.supported === true ? true : a.supported === false ? false : null, levels: null, serverDefault: null, verified: false, fixed: true, detail: 'set by the model; this API version takes no thinking setting' };
+        }
+        if (!isObj(t)) return { supported: null, levels: null, serverDefault: null, verified: false, detail: 'not checked' };
+        const lv = Array.isArray(t.levels) ? C.THINK_LEVELS.filter(function (l) { return t.levels.indexOf(l) >= 0; }) : null;
+        return {
+            supported: t.supported === true ? true : t.supported === false ? false : null, levels: lv,
+            serverDefault: C.THINK_LEVELS.indexOf(t.serverDefault) >= 0 ? t.serverDefault : null,
+            verified: t.verified === true, detail: String(t.detail || '').slice(0, 200)
+        };
+    }
+    function cleanDefaults(g) {
+        if (!isObj(g)) return null;
+        const f = function (v) { return typeof v === 'number' && Number.isFinite(v) ? v : null; };
+        const o = { temperature: f(g.temperature), topP: f(g.topP), topK: f(g.topK), seed: f(g.seed), maxTokens: f(g.maxTokens) };
+        return Object.keys(o).some(function (k) { return o[k] != null; }) ? o : null;
+    }
+    function thinkingText(t, ep) {
+        if (!t) return 'Not checked';
+        if (t.fixed) return 'Set by the model; this API version takes no thinking setting' + (t.supported === true ? ' (the model can think)' : '');
+        const def = t.serverDefault ? ' \u00b7 server default: ' + LEVEL_WORD[t.serverDefault] : '';
+        const why = t.detail ? ' (' + t.detail + ')' : '';
+        let s;
+        if (t.supported === false && t.levels && t.levels.length === 1 && t.levels[0] === 'off') s = 'Only off is accepted' + why;
+        else if (t.supported === false) s = 'Not supported' + why;
+        else if (t.supported === true) s = 'Supported: ' + (t.levels || C.THINK_LEVELS).join(', ') + def + why;
+        else if (t.levels && t.levels.length) s = 'Accepted; effect not verifiable' + def + (t.detail && !/^accepted/i.test(t.detail) ? why : '');
+        else s = t.detail ? t.detail.charAt(0).toUpperCase() + t.detail.slice(1) : 'Unknown';
+        if (ep && ep.thinking && Array.isArray(t.levels) && t.levels.indexOf(ep.thinking) < 0) s += '; this endpoint\u2019s setting \u201c' + ep.thinking + '\u201d is not among them';
+        return s;
+    }
+    function fmtInt(n) { return Number(n).toLocaleString('en-US'); }
+    function fmtDec(n) { return Number(n).toFixed(2); }
+    function defaultsText(g, format) {
+        if (format === 'anthropic') return 'Server defaults: chosen by the model (this API version takes no sampling settings)';
+        if (!g) return 'Server defaults: not reported by the server';
+        const p = [];
+        if (g.temperature != null) p.push('Temperature ' + fmtDec(g.temperature));
+        if (g.topP != null) p.push('Top-p ' + fmtDec(g.topP));
+        if (g.topK != null) p.push('Top-k ' + fmtInt(g.topK));
+        if (g.seed != null) p.push('Seed ' + (g.seed < 0 ? 'random' : fmtInt(g.seed)));
+        if (g.maxTokens != null) p.push('Max tokens ' + (g.maxTokens < 0 ? 'until done' : fmtInt(g.maxTokens)));
+        return 'Server defaults: ' + p.join(' \u00b7 ');
+    }
+    function appliedText(ep, caps, limits) {
+        const a = budget.applied(ep, caps, limits);
+        const p = ['max output ' + fmtInt(a.maxOutput), 'context ' + fmtInt(a.ctx), 'timeout ' + a.timeoutSec + ' s'];
+        if (ep.format === 'anthropic') p.push('thinking and sampling set by the model');
+        else {
+            const sd = caps && caps.thinking && caps.thinking.serverDefault;
+            p.push('thinking ' + (ep.thinking ? LEVEL_WORD[ep.thinking] : 'server default' + (sd ? ' (' + LEVEL_WORD[sd] + ')' : '')));
+            p.push('temperature ' + (ep.temperature != null ? fmtDec(ep.temperature) : 'server default'));
+            p.push('top-p ' + (ep.topP != null ? fmtDec(ep.topP) : 'server default'));
+            if (ep.format !== 'openai-responses') {
+                p.push('top-k ' + (ep.topK != null ? fmtInt(ep.topK) : 'server default'));
+                p.push('seed ' + (ep.seed != null ? fmtInt(ep.seed) : 'server default'));
+            }
+        }
+        return 'Applied by the Assistant: ' + p.join(' \u00b7 ');
+    }
+    // one tiny request (no tools) with every setting the endpoint has; when it is rejected, each setting alone
+    // -> { rejected: [{ field, label, message }] } | { ok: true } | { error }
+    async function checkSettings(adapter, aep, ep, deps) {
+        const set = GEN_KEYS.filter(function (k) { return ep[k] != null; });
+        const send = async function (keys) {
+            const e = Object.assign({}, aep, { ollamaNative: false, maxOutputTokens: 16, quirks: Object.assign({}, aep.quirks || {}) });
+            for (const k of keys) e[k] = ep[k];
+            let req, res;
+            for (let i = 0; i < 2; i++) {
+                req = adapter.buildRequest(e, { system: '', items: [{ role: 'user', text: 'Reply with OK.' }] }, [], { stream: false });
+                res = await C.call(deps, { url: req.url, method: 'POST', headers: req.headers, body: req.body, totalTimeoutMs: 60000, idleTimeoutMs: 60000 });
+                // max_tokens / stream_options quirks are fixed the way a conversation fixes them
+                const q = res.status >= 400 && typeof adapter.detectQuirk === 'function' ? adapter.detectQuirk(res.status, res.bodyText, req.body, e) : null;
+                if (!q || e.quirks[q]) break;
+                e.quirks[q] = true;
+            }
+            if (res.status < 400) return { ok: true };
+            const rej = typeof adapter.rejectedSetting === 'function' ? adapter.rejectedSetting(res.status, res.bodyText, req.body, e) : null;
+            if (rej || res.status === 400 || res.status === 422) return { rejected: true, rej: rej, message: (rej && rej.message) || C.errorMessage(res.bodyText).message || ('HTTP ' + res.status) };
+            return { error: C.errorMessage(res.bodyText).message || ('HTTP ' + res.status) };
+        };
+        let all;
+        try { all = await send(set); } catch (e) { return { error: e.message || 'request failed' }; }
+        if (all.ok || all.error) return all;
+        if (set.length === 1) return { rejected: [{ field: set[0], label: C.GEN_LABELS[set[0]], message: String(all.message).slice(0, 160) }] };
+        const out = [];
+        for (const k of set) {
+            let r;
+            try { r = await send([k]); } catch (e) { return { error: e.message || 'request failed' }; }
+            if (r.rejected) out.push({ field: k, label: C.GEN_LABELS[k], message: String(r.message).slice(0, 160) });
+            else if (r.error) return { error: r.error };
+        }
+        if (!out.length) out.push({ field: null, label: 'the combination', message: String(all.message).slice(0, 160) });
+        return { rejected: out };
     }
 
     // caps, network and lastTest of a test of a saved endpoint
@@ -271,7 +402,7 @@ function create(o) {
         try {
             if (r.caps) await store.setCaps(r.tgt.id, r.caps);
             if (r.network) await store.setNetwork(r.tgt.id, r.network);
-            const failed = r.steps.find(function (s) { return s.ok === false && s.name !== 'tools'; });
+            const failed = r.steps.find(function (s) { return s.ok === false && s.name !== 'tools' && s.name !== 'thinking'; });
             await store.setLastTest(r.tgt.id, { ok: r.ok, at: Date.now(), ms: r.ms, detail: failed ? failed.detail : (r.steps.find(function (s) { return s.name === 'model'; }) || {}).detail });
         } catch (e) { warn('could not store the test result (' + errText(e) + ')'); }
     }
@@ -315,6 +446,9 @@ function create(o) {
             const x = { id: m.id };
             if (Number(m.ctx) > 0) x.ctx = Math.floor(Number(m.ctx));
             if (m.tools === true || m.tools === false) x.tools = m.tools;
+            if (m.thinking === true || m.thinking === false) x.thinking = m.thinking;
+            const gd = cleanDefaults(m.genDefaults);
+            if (gd) x.genDefaults = gd;
             out.push(x);
             if (out.length >= 1000) break;
         }
@@ -346,14 +480,19 @@ function create(o) {
                             const s = await ollama.show(Object.assign({}, aep, { model: m.id }), deps);
                             if (s.tools != null) m.tools = s.tools;
                             if (s.ctx) m.ctx = s.ctx;
+                            if (s.thinking && s.thinking.supported != null) m.thinking = s.thinking.supported;
+                            if (s.genDefaults) m.genDefaults = s.genDefaults;
                         } catch (e) { if (e && e.code === 'timeout') return; }
                     }
                 };
                 await Promise.all([worker(), worker(), worker(), worker()]);
-                return cleanModels(models);
+                return { models: cleanModels(models) };
             }
-            return cleanModels(await adapter.listModels(aep, deps));
-        }).then(function (models) { return { models: models, key: key, network: chk.network, tgt: tgt }; }, function (e) { throw withNet(e && typeof e === 'object' ? e : mkErr('internal', String(e))); });
+            const list = cleanModels(await adapter.listModels(aep, deps));
+            // llama.cpp-style servers: the defaults of the loaded model (/props)
+            const pr = ep.format === 'openai-chat' && typeof adapter.props === 'function' ? await adapter.props(aep, deps) : null;
+            return { models: list, genDefaults: pr ? cleanDefaults(pr.genDefaults) : null, thinkingDefault: (pr && pr.effort) || null };
+        }).then(function (r) { return { models: r.models, genDefaults: r.genDefaults || null, thinkingDefault: r.thinkingDefault || null, key: key, network: chk.network, tgt: tgt }; }, function (e) { throw withNet(e && typeof e === 'object' ? e : mkErr('internal', String(e))); });
     }
 
     async function doModels(command, myparent) {
@@ -361,7 +500,10 @@ function create(o) {
         try {
             const r = await listModels(command);
             if (r.tgt.saved && r.network) { try { await store.setNetwork(r.tgt.id, r.network); } catch (e) { warn('could not store the address check (' + errText(e) + ')'); } }
-            safeSend(myparent, { method: 'aiAdminModelsResult', reqId: reqId, ok: true, models: r.models, network: r.network });
+            const msg = { method: 'aiAdminModelsResult', reqId: reqId, ok: true, models: r.models, network: r.network };
+            if (r.genDefaults) msg.genDefaults = r.genDefaults;
+            if (r.thinkingDefault) msg.thinkingDefault = r.thinkingDefault;
+            safeSend(myparent, msg);
         } catch (e) {
             const known = e && e.code && e.code !== 'internal';
             if (!known) warn('model list failed (' + errText(e) + ')');

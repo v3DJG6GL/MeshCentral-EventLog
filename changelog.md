@@ -9,11 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 ### Added
 - Assistant: the system prompt can be viewed and, after switching on edit mode, changed per part (base instructions, Ask, Explain, Diagnosis) with reset to factory defaults and a full-prompt preview; additional instructions globally and per endpoint
+- Assistant endpoints: optional generation settings (thinking level, temperature, top-p, top-k, seed) with the server's defaults shown; Test connection detects supported thinking levels and lists the server's generation defaults next to the values the Assistant applies
 
 ### Changed
 - Assistant: clearer instructions for Linux devices (systemd journal fields, process ids, journalctl/systemctl)
 - Event Log tab: when the Assistant is not available on a device, users with the Assistant permission see why (for example no endpoint assigned to the device's config set, or the Assistant turned off)
 - Assistant: while an answer is being prepared, a progress strip, the current step in plain words, an elapsed-time counter and a streaming cursor show what is happening; the Ask button shows a dot when an answer is running in the closed panel
+- Assistant: a “Thinking…” phase shows while the model reasons; saving the first endpoint offers to use it for the Default config set
 
 ## [0.3.2] - 2026-11-18
 ### Changed

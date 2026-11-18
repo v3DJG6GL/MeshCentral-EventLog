@@ -270,6 +270,29 @@ module.exports.attach = function (obj) {
         if (c.status == 'starting') c.status = 'running';
         ph.aiSchedule(c, t);
     };
+    // The model is reasoning: a count of reasoning characters for model call `round` of the turn, never the text.
+    obj.onAiThinking = function (server, m) {
+        var ph = pluginHandler.eventlog;
+        if (!ph.aiOk(m)) return;
+        var c = ph.aiFind(m); if (!c || !ph.aiBusy(c)) return;
+        var t = ph.aiTurn(c, m.turn), round = Number(m.round), chars = Number(m.chars);
+        if (!t || t.status != 'running' || !(round >= 0 && round < 1000) || Math.floor(round) !== round) return;
+        chars = (chars >= 0 && chars < 1e9) ? Math.floor(chars) : 0;
+        if (t.think && t.think.round > round) return;   // an older model call
+        t.think = { round: round, chars: chars };
+        t.ph = 'think';
+        c.last = Date.now();
+        if (c.status == 'starting') c.status = 'running';
+        ph.aiSchedule(c, t);
+    };
+    // "1.2k characters" (a number only; the reasoning itself is never shown)
+    obj.aiThinkCount = function (n) {
+        n = Math.floor(Number(n) || 0);
+        if (n <= 0) return '';
+        if (n < 1000) return n + ' characters';
+        var k = n / 1000;
+        return (k < 10 ? (Math.floor(k * 10) / 10).toFixed(1) : String(Math.floor(k))) + 'k characters';
+    };
     obj.onAiDelta = function (server, m) {
         var ph = pluginHandler.eventlog;
         if (!ph.aiOk(m)) return;
@@ -697,6 +720,7 @@ module.exports.attach = function (obj) {
         if (c.status == 'preview') return { key: 'review', text: 'Waiting for your review', step: '', clock: false };
         if (c.status == 'stopping') return { key: 'stop', text: 'Stopping…', step: '', clock: true };
         if (t.ph == 'write') return { key: 'write', text: ({ explain: 'Writing the explanation…', diagnose: 'Writing the diagnosis…' })[c.mode] || 'Writing the answer…', step: '', clock: true };
+        if (t.ph == 'think') return { key: 'think' + ((t.think && t.think.round) || 0), text: 'Thinking…', count: ph.aiThinkCount(t.think && t.think.chars), step: '', clock: true };
         var n = 0, s = null;
         for (var i = t.steps.length - 1; i >= 0; i--) { if (t.steps[i]) { n = i + 1; s = t.steps[i]; break; } }
         if (s) return { key: 'step' + n, text: ph.aiToolWords(s.tool, s.args), step: 'Step ' + n, clock: true };
@@ -712,7 +736,8 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, esc = ph.aiEsc, key = c.id + '-' + t.n, p = ph.aiPhase(c, t);
         if (!p) return '<div data-t=' + key + ' data-p=l hidden></div>';
         var t0 = Number(t.t0) || Date.now();
-        return '<div class=evlAiLive data-t=' + key + ' data-p=l aria-hidden=true><span class=evlAiLiveT>' + (p.step ? '<b>' + p.step + ':</b> ' : '') + esc(p.text) + '</span>' +
+        return '<div class=evlAiLive data-t=' + key + ' data-p=l aria-hidden=true><span class=evlAiLiveT>' + (p.step ? '<b>' + p.step + ':</b> ' : '') + esc(p.text) +
+               (p.count ? ' <span class=evlAiThinkN>(' + esc(p.count) + ')</span>' : '') + '</span>' +
                (p.clock ? '<span class=evlAiClock data-t0=' + t0 + '>' + ph.aiElapsed(Date.now() - t0) + '</span>' : '') + '</div>';
     };
     // The thin progress strip. The sweep starts at the phase it would have reached since t0, so re-rendering
@@ -738,7 +763,8 @@ module.exports.attach = function (obj) {
         el.appendChild(c);
         return root;
     };
-    // Screen readers hear phase changes (a new step, writing started), at most one every 2.5 s, never the clock.
+    // Screen readers hear phase changes (a new step, thinking, writing started), at most one every 2.5 s, never the
+    // clock or the thinking counter.
     obj.aiAnnounce = function (c, t) {
         var ph = pluginHandler.eventlog, p = ph.aiPhase(c, t), now = Date.now();
         if (!p || p.key == 'prep' || p.key == 'review' || t._said == p.key) return;
@@ -1844,6 +1870,7 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlAiEx .evlAiLive { margin-top:9px; }
 #pluginEventLog .evlAiLiveT { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; }
 #pluginEventLog .evlAiLiveT b { color:var(--evl-ink); font-weight:bold; }
+#pluginEventLog .evlAiThinkN { font-variant-numeric:tabular-nums; white-space:nowrap; }
 #pluginEventLog .evlAiClock { flex:none; font-family:Consolas,"DejaVu Sans Mono",monospace; font-size:11px; font-variant-numeric:tabular-nums; }
 #pluginEventLog .evlAiCaret { display:inline-block; width:.48em; height:1.05em; margin-left:2px; vertical-align:-.17em; background:var(--evl-acc); border-radius:1px; animation:evlBlink 1.06s steps(1) infinite; }
 @keyframes evlBlink { 50% { opacity:0; } }
@@ -2029,11 +2056,11 @@ body.night #evlAiDlg {
         'aiEsc', 'aiStripMarks', 'aiPlain', 'aiTint', 'aiNetWord', 'aiCounts', 'aiTimeShort', 'aiBusy', 'aiReqId', 'aiSendMsg', 'aiSay', 'aiCopyText',
         'aiNewState', 'aiStashSave', 'aiAbortAll', 'aiNewTurn', 'aiNewConv', 'aiPrune', 'aiStartConv', 'aiCloseConv', 'aiOk', 'aiFind', 'aiTurn', 'aiCitesOf', 'aiCite',
         'aiDogStart', 'aiDog',
-        'onAiStarted', 'onAiPreview', 'onAiStep', 'onAiDelta', 'onAiDone', 'onAiError',
+        'onAiStarted', 'onAiPreview', 'onAiStep', 'onAiThinking', 'onAiDelta', 'onAiDone', 'onAiError',
         'aiRefresh', 'aiSchedule', 'aiFlush', 'aiVisible',
         'aiMdInit', 'aiMd', 'aiChipHtml', 'aiMdFallback', 'aiMdPost', 'aiCopyCode',
         'aiUnavailText', 'aiErrText', 'aiErrHtml', 'aiArgsShort', 'aiStepResult', 'aiUsageText', 'aiStepsHtml', 'aiStepsClick', 'aiWaitHtml', 'aiInfoLine', 'aiNotesHtml', 'aiVoteHtml',
-        'aiToolWords', 'aiPhase', 'aiElapsed', 'aiLiveHtml', 'aiStripHtml', 'aiCaret', 'aiAnnounce', 'aiTickStart', 'aiTick', 'aiTimersStop', 'aiBtnSync',
+        'aiToolWords', 'aiThinkCount', 'aiPhase', 'aiElapsed', 'aiLiveHtml', 'aiStripHtml', 'aiCaret', 'aiAnnounce', 'aiTickStart', 'aiTick', 'aiTimersStop', 'aiBtnSync',
         'aiTurnText', 'aiCopyTurn', 'aiVote', 'aiRetry', 'aiStop',
         'aiCiteMap', 'aiRowRefs', 'aiGutterTd', 'aiApplySel', 'aiGutter', 'aiGotoCite', 'aiReveal', 'aiAfterLoad', 'aiFlashRow', 'aiNoticeHtml', 'aiNoteClose', 'aiShowAnyway',
         'aiOpenCited', 'aiPeekHtml', 'aiRenderPeek', 'aiPeekClose',

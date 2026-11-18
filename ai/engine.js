@@ -20,6 +20,9 @@
 //     onToolsUnsupported()                                persist caps.tools = false
 //     timeouts { idleMs, totalMs, connectMs }, flushMs (75), maxCallsPerRound (4), maxCalls (settings.limits.maxCalls, else 3 x maxRounds)
 //   }
+// While the model reasons, onAiThinking { turn, round, chars } is sent (at most every 500 ms per model call; round
+// counts the model calls of the turn, chars the reasoning characters of that call so far): a count only, never the
+// reasoning text, and nothing once the call's answer text has started.
 // Transcript items are append-only within a turn (provider-native raw blocks replay verbatim); a failed or
 // cancelled turn is rolled back as a whole so the next question starts from the last good state.
 
@@ -28,6 +31,7 @@ const citations = require('./citations.js');
 const budgetMod = require('./budget.js');
 
 const MAX_DELTA_CHARS = 5000;           // <= 16 KB per onAiDelta message
+const THINK_MS = 500;                   // onAiThinking at most twice a second
 const MAX_TRANSCRIPT_BYTES = 256 * 1024;
 const CODE_MAP = {
     auth: 'auth', model: 'model', rateLimit: 'rateLimit', overloaded: 'overloaded', timeout: 'timeout', network: 'network',
@@ -144,8 +148,26 @@ async function turn(S, userText, deps) {
         outBuf += text;
         if (!timer) { timer = setTimeout(flush, flushMs); if (typeof timer.unref === 'function') timer.unref(); }
     }
+    // ---- "thinking" (reasoning) phases: counts only, throttled -------------------------------------------------------
+    let callNo = 0, thinkChars = 0, thinkSentAt = 0, thinkTimer = null, thinkOn = false;
+    function sendThinking() {
+        if (thinkTimer) { clearTimeout(thinkTimer); thinkTimer = null; }
+        thinkSentAt = Date.now();
+        deps.send('onAiThinking', { turn: turnNo, round: callNo, chars: thinkChars });
+    }
+    function onThinking(n) {
+        if (abortReason || roundHasText) return;
+        S.lastActive = now();
+        thinkChars += Math.max(0, Number(n) || 0);
+        const wait = THINK_MS - (Date.now() - thinkSentAt);
+        if (!thinkOn || wait <= 0) { thinkOn = true; sendThinking(); }
+        else if (!thinkTimer) { thinkTimer = setTimeout(sendThinking, wait); if (typeof thinkTimer.unref === 'function') thinkTimer.unref(); }
+    }
+    function stopThinking() { if (thinkTimer) { clearTimeout(thinkTimer); thinkTimer = null; } }
+
     function onText(d) {
         if (abortReason) return;
+        stopThinking();
         S.lastActive = now();
         if (!roundHasText) { roundHasText = true; if (texts.some(Boolean)) emit(rs.push('\n\n')); }
         emit(rs.push(d));
@@ -171,10 +193,12 @@ async function turn(S, userText, deps) {
         let ep;
         try { ep = deps.epCall(); } catch (e) { throw mkErr('auth', 'The API key could not be read'); }
         bytesSent += bytes(S.transcript) + bytes(toolsSent);
+        stopThinking();
+        callNo++; thinkChars = 0; thinkOn = false;
         cur = deps.llm.stream({
             ep: ep, adapter: deps.adapter, transcript: S.transcript, tools: toolsSent,
             opts: { toolChoice: toolChoice, maxOutputTokens: B.maxOutput }, net: deps.net,
-            onEvent: function (ev) { if (ev && ev.t === 'text') onText(ev.d); },
+            onEvent: function (ev) { if (ev && ev.t === 'text') onText(ev.d); else if (ev && ev.t === 'thinking') onThinking(ev.n); },
             idleTimeoutMs: tmo.idleMs, totalTimeoutMs: tmo.totalMs, connectTimeoutMs: tmo.connectMs, log: log
         });
         if (abortReason) { try { cur.abort(abortReason); } catch (e) { } }
@@ -199,7 +223,7 @@ async function turn(S, userText, deps) {
             let res;
             try { res = await streamOnce(toolChoice, toolsSent); }
             catch (e) { if (e && e.quirks) learnQuirks(e.quirks); throw e; }
-            finally { cur = null; }
+            finally { cur = null; stopThinking(); }
             if (abortReason) throw mkErr('aborted', 'Aborted');
             if (res.quirks) learnQuirks(res.quirks);
             bytesRecv += bytes(res.text || '') + (res.calls || []).reduce(function (n, c) { return n + bytes(c.argsText || ''); }, 0);
@@ -295,6 +319,7 @@ async function turn(S, userText, deps) {
         if (errCode === 'internal') log('EVENTLOG AI: internal error in a turn (' + ((e && e.name) || 'Error') + ')');
     } finally {
         if (timer) { clearTimeout(timer); timer = null; }
+        stopThinking();
     }
 
     const durationMs = now() - t0;

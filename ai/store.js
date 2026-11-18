@@ -8,7 +8,14 @@
 //
 // Endpoints (settings store, id 'aiEndpoint:<12 hex>', type 'aiEndpoint'):
 //   { id, name, format, preset, baseUrl, model, key, contextTokens, numCtx, maxOutputTokens, timeoutSec, toolMode,
-//     allowLinkLocal, extraInstructions (<= 4000 chars, '' = none), network, caps, quirks, lastTest, updated }
+//     allowLinkLocal, extraInstructions (<= 4000 chars, '' = none), thinking, temperature, topP, topK, seed,
+//     network, caps, quirks, lastTest, updated }
+//   Generation settings, null = the server's default (only set values are sent): thinking 'off'|'low'|'medium'|'high',
+//   temperature 0..2, topP 0..1 (both rounded to 2 decimals and clamped), topK 1..1000 and seed 0..2^31-1 (whole
+//   numbers; topK clamped, a seed outside the range is refused). The Anthropic format takes none of them (all null);
+//   the Responses API has no top-k or seed (null). caps (from Test connection) may carry
+//   thinking { supported, levels, serverDefault, verified, detail } and genDefaults { temperature, topP, topK, seed
+//   (-1 random), maxTokens (-1 until done) }.
 //   key: null | { v, iv, ct, tag, last4 } (AES-GCM, AAD = endpoint id) | { env: 'VAR' }
 //   listEndpoints() -> Promise<[ep]> (sorted by name)      getEndpoint(id) -> Promise<ep|null>
 //   saveEndpoint(input, { keyAction:'keep'|'set'|'remove', key }) -> Promise<ep>
@@ -56,6 +63,9 @@ const INT_FIELDS = {
     timeoutSec: { min: 10, max: 900, label: 'Timeout' }
 };
 const MAX_TRANSCRIPT = 256 * 1024;
+const THINKING = ['off', 'low', 'medium', 'high'];
+const GEN_FIELDS = ['thinking', 'temperature', 'topP', 'topK', 'seed'];
+const SEED_MAX = 2147483647;
 
 const DEFAULTS = {
     enabled: true,
@@ -215,6 +225,37 @@ function validateEndpoint(input, opts) {
     if (ex === undefined) throw invalid('Model-specific instructions must be text');
     if (typeof input.extraInstructions === 'string' && input.extraInstructions.trim().length > MAX_EXTRA) throw invalid('Model-specific instructions must be at most ' + MAX_EXTRA + ' characters');
     out.extraInstructions = ex;
+    Object.assign(out, validateGen(input, format));
+    return out;
+}
+
+// the generation settings of an endpoint form (see the header); throws Error{code:'invalid'} for values that are not numbers
+function validateGen(input, format) {
+    const out = { thinking: null, temperature: null, topP: null, topK: null, seed: null };
+    const numIn = function (k, label) {
+        const v = input[k];
+        if (v == null || v === '') return null;
+        const n = typeof v === 'boolean' ? NaN : Number(v);
+        if (!Number.isFinite(n)) throw invalid(label + ' must be a number');
+        return n;
+    };
+    const t = input.thinking;
+    if (t != null && t !== '' && THINKING.indexOf(t) < 0) throw invalid('Thinking must be off, low, medium or high');
+    out.thinking = t == null || t === '' ? null : t;
+    const r2 = function (n) { return Math.round(n * 100) / 100; };
+    let n = numIn('temperature', 'Temperature');
+    if (n != null) out.temperature = r2(Math.min(2, Math.max(0, n)));
+    n = numIn('topP', 'Top-p');
+    if (n != null) out.topP = r2(Math.min(1, Math.max(0, n)));
+    n = numIn('topK', 'Top-k');
+    if (n != null) out.topK = Math.min(1000, Math.max(1, Math.round(n)));
+    n = numIn('seed', 'Seed');
+    if (n != null) {
+        if (!Number.isInteger(n) || n < 0 || n > SEED_MAX) throw invalid('Seed must be a whole number from 0 to ' + SEED_MAX);
+        out.seed = n;
+    }
+    if (format === 'anthropic') for (const k of GEN_FIELDS) out[k] = null;
+    else if (format === 'openai-responses') { out.topK = null; out.seed = null; }
     return out;
 }
 
@@ -365,6 +406,7 @@ function create(opts) {
         for (const k of Object.keys(ep)) if (k !== 'key' && k !== '_id' && k !== 'type') o[k] = ep[k];
         const k = ep.key;
         if (typeof o.extraInstructions !== 'string') o.extraInstructions = '';
+        for (const g of GEN_FIELDS) if (o[g] === undefined) o[g] = null;   // endpoints saved before these settings existed
         o.hasKey = !!(k && (k.env || k.ct));
         o.keyHint = !k ? '' : (typeof k.env === 'string' ? 'env:' + k.env : (k.last4 ? '…' + k.last4 : ''));
         return o;

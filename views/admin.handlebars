@@ -395,6 +395,8 @@
       
       parent.pluginHandler['eventlog'].adminUpdateConfigSets = function(args, msg) {
           configSets = msg.sets;
+          // the Assistant tab's "use it for Default" offer saved the Default set: the set being edited stays selected
+          if (msg.saved && typeof elAiOfferAnswer == 'function' && elAiOfferAnswer(true, msg)) { updateConfigSetsSelects(Q('elconfigSet').value); return; }
           updateConfigSetsSelects(msg.selected);
           if (msg.saved) {
               // a new set now has its real id: without this, pressing Save again would create another copy
@@ -405,6 +407,7 @@
           }
       }
       parent.pluginHandler['eventlog'].adminSaveFailed = function(args, msg) {
+          if (typeof elAiOfferAnswer == 'function' && elAiOfferAnswer(false, msg)) return;
           clearTimeout(elSaveTimer);
           setSaveStatus('err', '\u2717 Not saved: ' + (msg.error || 'unknown error'));
       }
@@ -435,6 +438,8 @@
       var elAi = {
         seq: 0, reqs: {}, loaded: false,
         endpoints: [], settings: null, usedBy: {}, keySource: null,
+        offer: null,          // first endpoint saved: { id, name, state: 'check'|'shown'|'saving' } (Default config set offer)
+        modelsMeta: null,     // last Fetch models result's server-wide facts { genDefaults, thinkingDefault }
         settingsDirty: false,
         edit: null,           // endpoint form state { id, hasKey, keyHint, removeKey, caps }
         models: [],           // last Fetch models result [{id, ctx, tools}]
@@ -481,7 +486,8 @@
         ['deviceSummary', 'Device summary and hardware'], ['network', 'Network interfaces'], ['storedEvents', 'Stored event history'],
         ['meshEvents', 'MeshCentral device events'], ['notes', 'Device notes'], ['software', 'Installed software (asks the agent live; needs the Software right)']
       ];
-      var EL_AI_STEPS = { resolve: 'Resolve address', connect: 'Connect', auth: 'API key accepted', model: 'Model available', tools: 'Tool calls', context: 'Context size' };
+      var EL_AI_STEPS = { resolve: 'Resolve address', connect: 'Connect', auth: 'API key accepted', model: 'Model available', tools: 'Tool calls', context: 'Context size', thinking: 'Thinking', generation: 'Generation defaults' };
+      var EL_AI_LEVELS = [['off', 'Off'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High']];
 
       function elAiIsOn() { return !!(aiAdmin && aiAdmin.full && aiAdmin.available); }
       function elAiFmtNum(n) { n = Number(n); return isFinite(n) ? n.toLocaleString() : ''; }
@@ -642,7 +648,15 @@
           tag.className = 'elAiTag ' + ((ep.network == 'loopback' || ep.network == 'private') ? 'local' : (ep.network == 'public') ? 'cloud' : 'unknown');
           tag.textContent = elAiNetLabel(ep.network); t.appendChild(tag);
           var used = elAi.usedBy[ep.id] || [];
-          td(used.length ? used.join(', ') : 'Not used');
+          if (used.length) td(used.join(', '));
+          else {
+            var uc = td(null), un = document.createElement('span'); un.className = 'elAiUnused';
+            un.appendChild(document.createTextNode('Not used by any config set yet \u2014 assign it in '));
+            var lk = document.createElement('button'); lk.type = 'button'; lk.className = 'elAiLinkBtn'; lk.textContent = 'Config Sets';
+            lk.onclick = function() { return elAiGoConfigSets(); };
+            un.appendChild(lk); un.appendChild(document.createTextNode('.'));
+            uc.appendChild(un);
+          }
           var lt = ep.lastTest, ltc = td(null);
           var ltAt = lt && (lt.at || lt.time);
           if (lt && (ltAt || lt.ok != null)) {
@@ -663,6 +677,67 @@
         Q('elAiEpEmpty').hidden = (list.length > 0);
         Q('elAiEpEmpty').textContent = 'No endpoints yet. Add one to start using the Assistant.';
         elAiRenderCfgSelect();
+      }
+
+      function elAiGoConfigSets() {
+        var b = document.querySelectorAll('#eventLogAdminNav button')[1];
+        if (b) { eventLogTab(b, 'elConfigSets'); try { b.focus(); } catch (e) { } }
+        return false;
+      }
+
+      // ---- first endpoint: offer to use it for the Default config set ----
+      // Shown after a save while no config set uses any endpoint (checked with the usedBy of the refresh that follows).
+      function elAiOfferCheck() {
+        var o = elAi.offer;
+        if (!o || o.state != 'check') return;
+        var anyUsed = Object.keys(elAi.usedBy || {}).some(function(k) { return Array.isArray(elAi.usedBy[k]) && elAi.usedBy[k].length > 0; });
+        var ep = elAi.endpoints.filter(function(x) { return x.id === o.id; })[0];
+        if (anyUsed || !ep) { elAiOfferHide(); return; }
+        o.state = 'shown'; o.name = ep.name || o.name;
+        Q('elAiOfferT').textContent = 'Use \u201C' + o.name + '\u201D for the Default config set? Devices that use the Default set can then use the Assistant.';
+        setStatus('elAiOfferStatus', '', '', 'elAiOfferYes');
+        Q('elAiOffer').hidden = false;
+      }
+      function elAiOfferHide() { elAi.offer = null; var b = Q('elAiOffer'); if (b) b.hidden = true; }
+      function elAiOfferDismiss() {
+        var back = !Q('elAiOffer').hidden && Q('elAiOffer').contains(document.activeElement);
+        elAiOfferHide();
+        if (back) Q('elAiAddEp').focus();
+        return false;
+      }
+      // the same save as the Config Sets tab (adminSaveConfig on the Default set); only aiEndpointId is sent, the
+      // server merges it into the stored set
+      function elAiOfferUse() {
+        var o = elAi.offer;
+        if (!o || o.state != 'shown') return false;
+        o.state = 'saving';
+        setStatus('elAiOfferStatus', 'pending', 'Saving\u2026', 'elAiOfferYes');
+        Q('elAiOfferNo').disabled = true;
+        clearTimeout(o.t);
+        o.t = setTimeout(function() {
+          if (elAi.offer !== o || o.state != 'saving') return;
+          o.state = 'shown'; Q('elAiOfferNo').disabled = false;
+          setStatus('elAiOfferStatus', 'warn', 'No answer from the server \u2014 the Default set is not confirmed as changed. Try again.', 'elAiOfferYes');
+        }, 10000);
+        try { parent.meshserver.send({ action: 'plugin', plugin: 'eventlog', pluginaction: 'adminSaveConfig', id: '_default', opts: { aiEndpointId: o.id } }); }
+        catch (e) { clearTimeout(o.t); o.state = 'shown'; Q('elAiOfferNo').disabled = false; setStatus('elAiOfferStatus', 'err', '\u2717 Could not send the request.', 'elAiOfferYes'); }
+        return false;
+      }
+      // adminUpdateConfigSets / adminSaveFailed while the offer saves: true when the answer was the offer's
+      function elAiOfferAnswer(ok, msg) {
+        var o = elAi.offer;
+        if (!o || o.state != 'saving') return false;
+        if (ok && !(msg && msg.defaultSet)) return false;
+        clearTimeout(o.t);
+        Q('elAiOfferNo').disabled = false;
+        if (!ok) { o.state = 'shown'; setStatus('elAiOfferStatus', 'err', '\u2717 Not saved: ' + String((msg && msg.error) || 'unknown error'), 'elAiOfferYes'); return true; }
+        var focusBack = Q('elAiOffer').contains(document.activeElement);
+        elAiOfferHide();
+        setStatus('elAiEpStatus', 'ok', '\u2713 The Default config set now uses \u201C' + o.name + '\u201D.');
+        if (Q('elid') && Q('elid').value === '') elAiCfgSetValue(o.id);   // the Config Sets editor shows the Default set
+        if (focusBack) Q('elAiAddEp').focus();
+        elAiRefresh();   // usedBy
+        return true;
       }
 
       function elAiDeleteEndpoint(ep) {
@@ -718,6 +793,60 @@
         var lim = (elAi.settings && elAi.settings.limits) || {}, out = pos(lim.maxOutputTokens) || 2048;
         Q('elAiMaxOut').placeholder = (ctx && Math.floor(ctx / 2) < out) ? fmt(Math.max(256, Math.floor(ctx / 2))) + ' (half the context)' : fmt(out) + ' (default)';
         Q('elAiTimeout').placeholder = '120 (default)';
+        elAiGenHints();
+      }
+      // what the server does when a generation field is empty: { genDefaults, thinking } from the test result or the
+      // saved endpoint (same server type, address and model), else from Fetch models (same server type and address)
+      function elAiGenFacts() {
+        var caps = elAiFormCaps(), m = elAiFormModel(), e = elAi.edit || {};
+        var fromModels = (e.modelsFor === elAiFormTarget(false)) ? (elAi.modelsMeta || {}) : {};
+        var gd = (caps && caps.genDefaults) || (m && m.genDefaults) || fromModels.genDefaults || null;
+        var th = (caps && caps.thinking) || null;
+        if (!th && m && (m.thinking === true || m.thinking === false)) th = { supported: m.thinking, levels: m.thinking ? ['off', 'low', 'medium', 'high'] : [], serverDefault: null };
+        if (!th && fromModels.thinkingDefault) th = { supported: null, levels: null, serverDefault: fromModels.thinkingDefault };
+        return { genDefaults: gd, thinking: th };
+      }
+      // placeholders of the empty generation fields show the server's default (as elAiLimitHints does for the limits);
+      // levels the server does not take are disabled; Anthropic takes none of these, the Responses API no top-k / seed
+      function elAiGenHints() {
+        var fk = elAiFormKind(), f = elAiGenFacts(), g = f.genDefaults || {}, th = f.thinking;
+        var two = function(v) { return Number(v).toFixed(2); };
+        var ph = function(id, v, fmt) { Q(id).placeholder = (v == null || v === '' || !isFinite(Number(v))) ? 'server default' : fmt(Number(v)) + ' (server default)'; };
+        ph('elAiTemp', g.temperature, two);
+        ph('elAiTopP', g.topP, two);
+        ph('elAiTopK', g.topK, elAiFmtNum);
+        ph('elAiSeed', g.seed, function(v) { return v < 0 ? 'random' : elAiFmtNum(v); });
+        var sel = Q('elAiThinking'), def = th && th.serverDefault;
+        var defWord = null;
+        EL_AI_LEVELS.forEach(function(l) { if (l[0] === def) defWord = l[1]; });
+        sel.options[0].textContent = defWord ? defWord + ' (server default)' : 'Server default';
+        var levels = (th && Array.isArray(th.levels)) ? th.levels : null;
+        for (var i = 1; i < sel.options.length; i++) {
+          var o = sel.options[i], off = !!(levels && levels.indexOf(o.value) < 0);
+          o.disabled = off;
+          if (off) o.title = (th && th.supported === false && !levels.length) ? 'The server does not take a thinking setting (found by Test connection)' : 'The server does not accept this level (found by Test connection)';
+          else o.removeAttribute('title');
+        }
+        var anth = (fk.format == 'anthropic'), resp = (fk.format == 'openai-responses');
+        sel.disabled = anth;
+        ['elAiTemp', 'elAiTopP'].forEach(function(id) { Q(id).disabled = anth; });
+        ['elAiTopK', 'elAiSeed'].forEach(function(id) { Q(id).disabled = anth || resp; });
+        // a field this API format does not take is never sent: say so instead of a default
+        ['elAiTemp', 'elAiTopP', 'elAiTopK', 'elAiSeed'].forEach(function(id) { if (Q(id).disabled) Q(id).placeholder = 'not sent'; });
+        if (anth) sel.options[0].textContent = 'Set by the model';
+        var note = Q('elAiGenNote');
+        if (anth) { note.textContent = 'The Anthropic Messages API (version 2026-10-21) takes no thinking or sampling settings: the model decides. These fields are not sent.'; note.hidden = false; }
+        else if (resp) { note.textContent = 'The Responses API has no top-k or seed; thinking is sent as reasoning effort.'; note.hidden = false; }
+        else if (th && th.supported === false && levels && !levels.length) { note.textContent = 'Test connection found that this server takes no thinking setting.'; note.hidden = false; }
+        else { note.textContent = ''; note.hidden = true; }
+      }
+      // number field with decimals: empty -> null; otherwise a number in [min, max] or an inline error (returns undefined)
+      function elAiReadNum(id, min, max, errs) {
+        var i = Q(id), raw = String(i.value).trim();
+        if (i.disabled || raw === '') return null;
+        var n = Number(raw);
+        if (!isFinite(n) || n < min || n > max) { elAiFieldError(i, 'Enter a number from ' + min + ' to ' + max + ', or leave it empty.'); errs.push(i); return undefined; }
+        return n;
       }
       function elAiOpenForm(ep) {
         var f = Q('elAiEpForm');
@@ -729,7 +858,7 @@
           origType: type, origPreset: (ep && ep.preset) || null,
           net: (ep && ep.network && ep.baseUrl) ? { host: elAiHost(ep.baseUrl), network: ep.network } : null   // the server's last address check
         };
-        elAi.models = [];
+        elAi.models = []; elAi.modelsMeta = null;
         Q('elAiFormH').textContent = ep ? ('Edit endpoint \u201C' + (ep.name || '') + '\u201D') : 'Add endpoint';
         Q('elAiType').value = type;
         Q('elAiName').value = ep ? (ep.name || '') : '';
@@ -742,6 +871,11 @@
         Q('elAiMaxOut').value = ep ? num(ep.maxOutputTokens) : '';
         Q('elAiTimeout').value = (ep && Number(ep.timeoutSec) !== 120) ? num(ep.timeoutSec) : '';   // 120 s is the default an empty field stores
         Q('elAiCtx').value = ep ? num(ep.contextTokens) : '';
+        Q('elAiThinking').value = (ep && ['off', 'low', 'medium', 'high'].indexOf(ep.thinking) >= 0) ? ep.thinking : '';
+        Q('elAiTemp').value = ep ? num(ep.temperature) : '';
+        Q('elAiTopP').value = ep ? num(ep.topP) : '';
+        Q('elAiTopK').value = ep ? num(ep.topK) : '';
+        Q('elAiSeed').value = ep ? num(ep.seed) : '';
         var tm = (ep && (ep.toolMode == 'tools' || ep.toolMode == 'summary')) ? ep.toolMode : 'auto';
         document.querySelectorAll('input[name="elAiToolMode"]').forEach(function(r) { r.checked = (r.value == tm); });
         Q('elAiLinkLocal').checked = !!(ep && ep.allowLinkLocal);
@@ -812,13 +946,19 @@
         var maxOut = all ? elAiReadInt('elAiMaxOut', 64, 128000, true, errs) : null;
         var timeout = all ? elAiReadInt('elAiTimeout', 10, 900, true, errs) : null;
         var ctx = all ? elAiReadInt('elAiCtx', 1024, 4194304, true, errs) : null;
+        var temp = all ? elAiReadNum('elAiTemp', 0, 2, errs) : null;
+        var topP = all ? elAiReadNum('elAiTopP', 0, 1, errs) : null;
+        var topK = (all && !Q('elAiTopK').disabled) ? elAiReadInt('elAiTopK', 1, 1000, true, errs) : null;
+        var seed = (all && !Q('elAiSeed').disabled) ? elAiReadInt('elAiSeed', 0, 2147483647, true, errs) : null;
         if (errs.length) { errs[0].focus(); return null; }
         var tm = document.querySelector('input[name="elAiToolMode"]:checked'), fk = elAiFormKind();
         var ep = {
           name: name, format: fk.format, preset: fk.preset, baseUrl: url, model: model,
           contextTokens: ctx, numCtx: numCtx, maxOutputTokens: maxOut, timeoutSec: timeout,
           toolMode: tm ? tm.value : 'auto', allowLinkLocal: Q('elAiLinkLocal').checked,
-          extraInstructions: Q('elAiEpExtra').value
+          extraInstructions: Q('elAiEpExtra').value,
+          thinking: (Q('elAiThinking').disabled || !Q('elAiThinking').value) ? null : Q('elAiThinking').value,
+          temperature: temp, topP: topP, topK: topK, seed: seed
         };
         if (elAi.edit && elAi.edit.id) ep.id = elAi.edit.id;
         var out = { endpoint: ep, keyAction: elAiKeyAction() };
@@ -843,7 +983,7 @@
         elAi.edit.sentTarget[forTest ? 'test' : 'models'] = elAiFormTarget(forTest);
         // a saved endpoint tested unchanged is sent by id only: the server then records the result as its last test
         var stored = (forTest && elAi.edit && elAi.edit.id) ? elAi.endpoints.filter(function(x) { return x.id === elAi.edit.id; })[0] : null;
-        if (stored && d.keyAction == 'keep' && ['name', 'format', 'preset', 'baseUrl', 'model', 'contextTokens', 'numCtx', 'maxOutputTokens', 'timeoutSec', 'toolMode', 'allowLinkLocal'].every(function(k) {
+        if (stored && d.keyAction == 'keep' && ['name', 'format', 'preset', 'baseUrl', 'model', 'contextTokens', 'numCtx', 'maxOutputTokens', 'timeoutSec', 'toolMode', 'allowLinkLocal', 'thinking', 'temperature', 'topP', 'topK', 'seed'].every(function(k) {
               var a = d.endpoint[k], b = stored[k];
               if (k == 'allowLinkLocal') return !!a === !!b;
               if (k == 'baseUrl') return String(a || '').replace(/\/+$/, '') === String(b || '').replace(/\/+$/, '');
@@ -900,14 +1040,20 @@
           mark.textContent = (s.ok === true) ? '\u2713 ' : (s.ok === false) ? '\u2717 ' : '\u2013 ';
           mark.setAttribute('aria-hidden', 'true');
           li.appendChild(mark);
-          var sr = document.createElement('span'); sr.className = 'elSr'; sr.textContent = (s.ok === true) ? 'Passed: ' : (s.ok === false) ? 'Failed: ' : 'Not run: ';
+          var sr = document.createElement('span'); sr.className = 'elSr'; sr.textContent = (s.ok === true) ? 'Passed: ' : (s.ok === false) ? 'Failed: ' : (s.ok == null && s.detail && s.detail != 'Skipped') ? 'Note: ' : 'Not run: ';
           li.appendChild(sr);
           // without a configured key the auth step only says the server accepted the request
           li.appendChild(document.createTextNode((s.name == 'auth' && s.noKey === true) ? 'API key' : (EL_AI_STEPS[s.name] || String(s.name || ''))));
-          if (s.ok == null) { var nr = document.createElement('span'); nr.className = 'elAiSub'; nr.textContent = ' (not run)'; li.appendChild(nr); }
+          // ok null: not run (detail 'Skipped'), or a finding that is neither a pass nor a failure
+          var notRun = (s.ok == null && (!s.detail || s.detail == 'Skipped'));
+          if (notRun) { var nr = document.createElement('span'); nr.className = 'elAiSub'; nr.textContent = ' (not run)'; li.appendChild(nr); }
           // a step answered by an earlier step's request reports 0 ms: show a duration only for a step's own request
           else if (Number(s.ms) > 0) { var ms = document.createElement('span'); ms.className = 'elAiSub'; ms.textContent = ' ' + elAiFmtNum(Math.round(s.ms)) + ' ms'; li.appendChild(ms); }
-          if (s.detail) { var dt = document.createElement('div'); dt.className = 'elAiSub'; dt.textContent = String(s.detail); li.appendChild(dt); }
+          if (Array.isArray(s.lines) && s.lines.length) {
+            var dl = document.createElement('div'); dl.className = 'elAiSub';
+            s.lines.forEach(function(x) { var ln = document.createElement('span'); ln.className = 'elAiLine'; ln.textContent = String(x); dl.appendChild(ln); });
+            li.appendChild(dl);
+          } else if (s.detail) { var dt = document.createElement('div'); dt.className = 'elAiSub'; dt.textContent = String(s.detail); li.appendChild(dt); }
           ul.appendChild(li);
         });
         out.appendChild(ul);
@@ -1329,6 +1475,10 @@
         elAiRenderEndpoints();
         elAiRenderPrevEps();
         if (elAi.edit) elAiKeyState();
+        if (elAi.offer) {
+          if (elAi.offer.state == 'check') elAiOfferCheck();
+          else if (elAi.offer.state == 'shown' && !elAi.endpoints.some(function(x) { return x.id === elAi.offer.id; })) elAiOfferHide();
+        }
       });
       parent.pluginHandler['eventlog'].aiAdminSaved = elAiHandler(function(msg) {
         if (elAiTake(msg) == null) return;
@@ -1339,13 +1489,15 @@
         if (msg.warning) setStatus('elAiEpStatus', 'warn', '\u2713 Saved \u201C' + name + '\u201D. ' + String(msg.warning));
         else setStatus('elAiEpStatus', 'ok', '\u2713 Saved \u201C' + name + '\u201D at ' + new Date().toLocaleTimeString() + '.');
         elAiRenderEndpoints();
-        elAiRefresh();   // usedBy, network and the config set list
+        if (msg.endpoint && msg.endpoint.id) elAi.offer = { id: msg.endpoint.id, name: msg.endpoint.name || '', state: 'check' };
+        elAiRefresh();   // usedBy, network and the config set list; then elAiOfferCheck
       });
       parent.pluginHandler['eventlog'].aiAdminDeleted = elAiHandler(function(msg) {
         if (elAiTake(msg) == null) return;
         var gone = elAi.endpoints.filter(function(x) { return x.id === msg.id; })[0];
         elAi.endpoints = elAi.endpoints.filter(function(x) { return x.id !== msg.id; });
         if (elAi.edit && elAi.edit.id === msg.id) elAiCloseForm();
+        if (elAi.offer && elAi.offer.id === msg.id) elAiOfferHide();
         setStatus('elAiEpStatus', 'ok', '\u2713 Deleted \u201C' + ((gone && gone.name) || 'endpoint') + '\u201D.');
         elAiRenderEndpoints();
         elAiRefresh();
@@ -1382,6 +1534,7 @@
         elAiServerNet('models', msg.network);
         if (!msg.ok) { setStatus('elAiModelsStatus', 'err', '\u2717 ' + String(msg.error || 'The server did not return a model list.'), 'elAiFetchBtn'); return; }
         elAi.models = (Array.isArray(msg.models) ? msg.models : []).filter(function(m) { return m && typeof m.id == 'string'; });
+        elAi.modelsMeta = { genDefaults: (msg.genDefaults && typeof msg.genDefaults == 'object') ? msg.genDefaults : null, thinkingDefault: (typeof msg.thinkingDefault == 'string') ? msg.thinkingDefault : null };
         elAi.edit.modelsFor = elAi.edit.sentTarget && elAi.edit.sentTarget.models;
         var dl = Q('elAiModelList'); dl.textContent = '';
         elAi.models.forEach(function(m) { dl.appendChild(new Option(m.id, m.id)); });
@@ -1546,6 +1699,17 @@
     .elAiRadio { display: block; margin: 2px 0; }
     .elAiLimits label { display: inline-block; margin: 0 14px 4px 0; }
     .elAiLimits input[type=number] { width: 12.5em; max-width: 100%; margin-left: 4px; }
+    .elAiGen select { margin-left: 4px; min-width: 12.5em; max-width: 100%; }
+    .elAiGen input[type=number], .elAiGen select { font-variant-numeric: tabular-nums; }
+    .elAiGen :disabled { opacity: .55; cursor: not-allowed; }
+    .elAiGenNote { color: var(--evl-ink); }
+    .elAiOffer { border: 1px solid var(--evl-acc); border-left-width: 4px; background: var(--evl-alt); border-radius: 3px; padding: 8px 12px 2px 12px; margin: 8px 0; max-width: 760px; }
+    .elAiOffer p { margin: 0 0 4px 0; }
+    .elAiOffer #elAiOfferT { font-weight: bold; }
+    .elAiUnused { color: var(--evl-muted); font-size: 12px; }
+    /* beats the page-wide button rule (#eventLogAdmin button:not(...)) */
+    #eventLogAdmin #elAiEpRows button.elAiLinkBtn, #eventLogAdmin #elAiEpRows button.elAiLinkBtn:hover, #eventLogAdmin #elAiEpRows button.elAiLinkBtn:active { background: none; border: 0; border-radius: 0; padding: 0; color: var(--evl-acc); text-decoration: underline; cursor: pointer; font: inherit; transform: none; }
+    .elAiTestOut .elAiLine { display: block; }
     .elMidTxt { width: 100%; max-width: 360px; }
     .elAiChecks { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 3px 16px; }
     .elAiFs { border: 1px solid var(--evl-line2); border-radius: 4px; padding: 6px 10px 8px 10px; margin: 0 0 10px 0; max-width: 900px; }
@@ -1733,6 +1897,11 @@
             </table>
           </div>
           <p id="elAiEpEmpty" class="elAiHelp">Loading endpoints&hellip;</p>
+          <div id="elAiOffer" class="elAiOffer" role="group" aria-labelledby="elAiOfferT" hidden>
+            <p id="elAiOfferT"></p>
+            <p class="elAiHelp">You can change this later under Config Sets.</p>
+            <div class="elAiBtns"><button id="elAiOfferYes" class="elPrimary" onclick="return elAiOfferUse();">Use it for Default</button> <button id="elAiOfferNo" onclick="return elAiOfferDismiss();">Not now</button> <span id="elAiOfferStatus" class="elSaveStatus" role="status" aria-live="polite"></span></div>
+          </div>
           <div class="elAiBtns"><button id="elAiAddEp" class="elPrimary" onclick="return elAiOpenForm(null);">Add endpoint</button> <span id="elAiEpStatus" class="elSaveStatus" role="status" aria-live="polite"></span></div>
         </section>
 
@@ -1788,6 +1957,18 @@
               <label>Timeout (s) <input type="number" id="elAiTimeout" min="10" max="900" step="1" placeholder="120 (default)" aria-describedby="elAiCtxHelp"></label>
               <label>Context tokens <input type="number" id="elAiCtx" min="1024" max="4194304" step="1" placeholder="Detected when tested" aria-describedby="elAiCtxHelp" oninput="elAiLimitHints();"></label>
               <small id="elAiCtxHelp" class="elAiHelp">Leave empty to use the value shown. Max output is at most half the context. Timeout is per request to the model.</small></div>
+
+            <span class="elAiLbl" id="elAiGenL">Generation</span>
+            <div class="elAiLimits elAiGen" role="group" aria-labelledby="elAiGenL">
+              <label>Thinking <select id="elAiThinking" aria-describedby="elAiGenHelp elAiGenNote">
+                  <option value="">Server default</option><option value="off">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
+                </select></label>
+              <label>Temperature <input type="number" id="elAiTemp" min="0" max="2" step="0.05" placeholder="server default" aria-describedby="elAiGenHelp elAiGenNote"></label>
+              <label>Top-p <input type="number" id="elAiTopP" min="0" max="1" step="0.01" placeholder="server default" aria-describedby="elAiGenHelp elAiGenNote"></label>
+              <label>Top-k <input type="number" id="elAiTopK" min="1" max="1000" step="1" placeholder="server default" aria-describedby="elAiGenHelp elAiGenNote"></label>
+              <label>Seed <input type="number" id="elAiSeed" min="0" max="2147483647" step="1" placeholder="server default" aria-describedby="elAiGenHelp elAiGenNote"></label>
+              <small id="elAiGenNote" class="elAiHelp elAiGenNote" hidden></small>
+              <small id="elAiGenHelp" class="elAiHelp">Leave empty to use the server's default, shown in the field when the server reports it. Only the settings you fill in are sent. Test connection checks that the server accepts them.</small></div>
 
             <label for="elAiEpExtra">Model-specific instructions</label>
             <div><textarea id="elAiEpExtra" class="elAiMono" rows="3" maxlength="4000" aria-describedby="elAiEpExtraHelp elAiEpExtraCount" placeholder="For example: /no_think"></textarea>
