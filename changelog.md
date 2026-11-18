@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-11-18
 ### Added
 - **Assistant: help from a language model to understand a device's event log.** It reads the device's stored events and MeshCentral data and answers in three places on the Event Log tab. It only reads: it runs no commands, and suggested commands are text for the technician. Answers can be wrong; they cite the stored events they rely on (`E1`, `E2`, ...), and selecting a citation finds and highlights the event in the table
   - *Explain this event* on History rows: what it means, what it means on this device, whether it is usually harmless, what to check next. Can be continued in Ask
