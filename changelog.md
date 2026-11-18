@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+
+## [0.5.0] - 2026-11-18
 ### Added
 - Assistant: questions can be edited or deleted and answers retried; questions can be copied
 - Assistant: thinking level and temperature can be changed per chat (admins can turn this off); “Suggest questions” creates new follow-up questions
