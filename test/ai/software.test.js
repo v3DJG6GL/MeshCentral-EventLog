@@ -38,7 +38,11 @@ test('errors: offline, timeout, denied, unsupported, bad data; list capped', asy
     const a = agent('n');
     const sw = softwareMod.create({ getAgent: function (id) { return id === 'n' ? a : null; }, maxItems: 3 });
     await assert.rejects(sw.request('gone', 0), function (e) { return e.code === 'offline'; });
-    await assert.rejects(sw.request('n', 0, 20), function (e) { return e.code === 'timeout'; });
+    // the request's timeout timer is unref'd (right for MeshCentral); keep the loop alive meanwhile, or
+    // Node 22/24 end the test with "Promise resolution is still pending but the event loop has already resolved"
+    const keepAlive = setInterval(function () { }, 1000);
+    try { await assert.rejects(sw.request('n', 0, 20), function (e) { return e.code === 'timeout'; }); }
+    finally { clearInterval(keepAlive); }
     let p = sw.request('n', 0x00800000);
     sw.onAgentData({ action: 'software', sessionid: a.sent[a.sent.length - 1].sessionid, value: JSON.stringify({ success: false, error: 'Denied' }) }, a);
     await assert.rejects(p, function (e) { return e.code === 'denied'; });
