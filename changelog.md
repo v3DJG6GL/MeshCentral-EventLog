@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Changed
+- Event Log tab: when the Assistant is not available on a device, users with the Assistant permission see why (for example no endpoint assigned to the device's config set, or the Assistant turned off)
 
 ## [0.3.2] - 2026-11-18
 ### Changed

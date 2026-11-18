@@ -227,6 +227,54 @@ test('shell: views by permission, Diagnosis only with the Assistant, Ask toggle'
     assert.strictEqual(w3.document.getElementById('evlAiBtn'), null);
 });
 
+test('aiUnavailText: one plain sentence per reason, admin hint only with canManage, nothing for the permission', function () {
+    var p = loadPlugin(), t = p.aiUnavailText;
+    assert.strictEqual(t({ assistant: false, assistantReason: 'noEndpoint', configSetName: 'Default' }), 'Assistant: no endpoint is assigned to this device\'s config set (Default).');
+    assert.strictEqual(t({ assistant: false, assistantReason: 'noEndpoint', configSetName: null }), 'Assistant: no endpoint is assigned to this device\'s config set.');
+    assert.strictEqual(t({ assistant: false, assistantReason: 'noEndpoint', configSetName: 'Servers', canManage: true }),
+        'Assistant: no endpoint is assigned to this device\'s config set (Servers). Assign one in My Server \u2192 Plugins \u2192 Event Log \u2192 Config Sets.');
+    assert.strictEqual(t({ assistant: false, assistantReason: 'disabled' }), 'Assistant: turned off in the plugin settings.');
+    assert.ok(/Turn it on in My Server .* Assistant\.$/.test(t({ assistant: false, assistantReason: 'disabled', canManage: true })));
+    assert.strictEqual(t({ assistant: false, assistantReason: 'deviceRights', canManage: true }), 'Assistant: needs the Details right on this device.');
+    assert.strictEqual(t({ assistant: false, assistantReason: 'unavailable' }), 'Assistant: not available on this server (see the server log).');
+    assert.strictEqual(t({ assistant: false, assistantReason: 'error' }), 'Assistant: not available on this server (see the server log).');
+    assert.strictEqual(t({ assistant: false, assistantReason: 'permission', canManage: true, configSetName: 'X' }), '');
+    assert.strictEqual(t({ assistant: false }), '');
+    assert.strictEqual(t({ assistant: true, assistantReason: 'noEndpoint' }), '');
+    assert.strictEqual(t(null), '');
+});
+
+test('shell: a note says why the Assistant is not offered; none without the permission', { skip: SKIP }, async function () {
+    function note(a) {
+        var w = makeDom(); grant(w, Object.assign({ assistant: false, endpoint: null }, a));
+        assert.strictEqual(w.document.getElementById('evlAiBtn'), null);
+        var n = w.document.getElementById('evlAiWhy');
+        if (n) { assert.strictEqual(n.getAttribute('role'), 'note'); assert.ok(n.closest('#evlToolbar')); }
+        return n ? n.textContent : null;
+    }
+    assert.strictEqual(note({ assistantReason: 'noEndpoint', configSetName: 'Default' }), 'Assistant: no endpoint is assigned to this device\'s config set (Default).');
+    assert.ok(/Assign one in My Server \u2192 Plugins \u2192 Event Log \u2192 Config Sets\.$/.test(note({ assistantReason: 'noEndpoint', configSetName: 'Default', canManage: true })));
+    assert.strictEqual(note({ assistantReason: 'disabled' }), 'Assistant: turned off in the plugin settings.');
+    assert.strictEqual(note({ assistantReason: 'deviceRights' }), 'Assistant: needs the Details right on this device.');
+    assert.strictEqual(note({ assistantReason: 'unavailable' }), 'Assistant: not available on this server (see the server log).');
+    assert.strictEqual(note({ assistantReason: 'error' }), 'Assistant: not available on this server (see the server log).');
+    assert.strictEqual(note({ assistantReason: 'permission' }), null);
+    assert.strictEqual(note({ assistantReason: 'permission', canManage: true, configSetName: 'Default' }), null);
+    // escaped: a config set name is shown as text
+    assert.strictEqual(note({ assistantReason: 'noEndpoint', configSetName: '<b>x</b>' }), 'Assistant: no endpoint is assigned to this device\'s config set (<b>x</b>).');
+    // the reason changes while the tab is open: the note follows
+    var w = makeDom(); grant(w, { assistant: false, endpoint: null, assistantReason: 'disabled' });
+    grant(w, { assistant: false, endpoint: null, assistantReason: 'noEndpoint', configSetName: 'Default' });
+    assert.ok(/config set \(Default\)/.test(w.document.getElementById('evlAiWhy').textContent));
+    // the Assistant is the only permitted view but not available: the notice says why instead of "no permission"
+    var w2 = makeDom(); grant(w2, { history: false, assistant: false, endpoint: null, assistantReason: 'noEndpoint', configSetName: 'Default' });
+    var ntc = w2.document.getElementById('evlNotice');
+    assert.ok(ntc && /no endpoint is assigned/.test(ntc.textContent) && !/do not have permission/.test(ntc.textContent));
+    assert.strictEqual(ntc.getAttribute('role'), 'note');
+    var w3 = makeDom(); grant(w3, { history: false, assistant: false, endpoint: null, assistantReason: 'permission' });
+    assert.ok(/do not have permission/.test(w3.document.getElementById('evlNotice').textContent));
+});
+
 test('Ask: start, steps, streaming, done with citations -> gutter chip, chip jumps to the row; stale replies dropped', { skip: SKIP }, async function () {
     var w = makeDom(), ph = w.ph, doc = w.document;
     grant(w); loadHistory(w);

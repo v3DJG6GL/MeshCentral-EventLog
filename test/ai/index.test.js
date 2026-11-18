@@ -81,6 +81,39 @@ test('accessInfo: assistant true with endpoint info; every refusal reason', asyn
     u.close();
 });
 
+test('accessInfo: why the Assistant is off names the config set and tells full administrators; nothing more without the permission', async function () {
+    const t = F.setup({ mock: mock });
+    let admin = false;
+    t.plugin.isFullAdmin = function (mp) { return admin && mp === t.myparent; };
+    t.db.config = Object.assign({}, t.db.config, { aiEndpointId: '' });
+    let a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual([a.assistant, a.assistantReason, a.configSetName, a.canManage], [false, 'noEndpoint', 'Default', undefined]);
+    admin = true;
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual([a.assistantReason, a.configSetName, a.canManage], ['noEndpoint', 'Default', true]);
+    t.db.config = { _id: 'cs2', name: 'Servers', aiEndpointId: 'deleted' };
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.strictEqual(a.configSetName, 'Servers');
+    t.db.config = { _id: 'default', default: true, aiEndpointId: '' };   // default set without a stored name
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.strictEqual(a.configSetName, 'Default');
+    t.db.config = null;
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual([a.assistantReason, a.configSetName], ['noEndpoint', null]);
+    t.store.settings.enabled = false;
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual([a.assistantReason, a.canManage, 'configSetName' in a], ['disabled', true, false]);
+    a = await t.ai.accessInfo(t.myparent, t.node, 0x8);
+    assert.deepStrictEqual([a.assistantReason, a.canManage], ['deviceRights', true]);
+    // without the permission: the reason and nothing else, also for an administrator flag
+    t.store.settings.enabled = true;
+    t.db.config = Object.assign({}, t.db.config || {}, { name: 'Servers', aiEndpointId: '' });
+    t.plugin.perms.deviceAssistant = false;
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual(a, { assistant: false, assistantReason: 'permission', endpoint: null, categories: {}, remaining: null });
+    t.close();
+});
+
 test('aiStart refusals: bad input, permission, rights, no endpoint, blocked address, missing event', async function () {
     const t = F.setup({ mock: mock });
     await t.start('nonsense', {});

@@ -252,6 +252,23 @@ test('without an Assistant instance, device actions answer onAiError unavailable
     assert.deepStrictEqual([me.sent[0].method, me.sent[0].code, me.sent[0].reqId, me.sent[0].nodeid], ['onAiError', 'unavailable', 'r1', 'node/d/nA']);
 });
 
+test('checkAccess without an Assistant instance: the reason only for users with the permission, canManage for full admins', async function () {
+    async function access(grants, user, broken) {
+        var s = setupAi({ noAi: !broken, grants: grants });
+        if (broken) s.ai.accessInfo = function () { return Promise.reject(new Error('boom')); };
+        var me = F.makeSession(user);
+        s.plugin.serveraction({ pluginaction: 'checkAccess', nodeid: 'node/d/nA' }, me, s.gp);
+        await F.settle();
+        var a = me.sent.filter(function (m) { return m.method == 'onAccess'; })[0];
+        return [a.assistant, a.assistantReason, a.canManage];
+    }
+    assert.deepStrictEqual(await access({ 'user/d/alice|deviceHistoryTab': true }, ALICE), [false, 'permission', undefined]);
+    assert.deepStrictEqual(await access({ 'user/d/alice|deviceAssistant': true }, ALICE), [false, 'unavailable', undefined]);
+    assert.deepStrictEqual(await access({ 'user/d/alice|deviceHistoryTab': true }, ALICE, true), [false, 'permission', undefined]);
+    assert.deepStrictEqual(await access({}, ROOT), [false, 'unavailable', true]);
+    assert.deepStrictEqual(await access({}, ROOT, true), [false, 'error', true]);
+});
+
 test('reauthorize re-checks rights, permission and the Details right', async function () {
     var gp = F.makeWebserver(F.makeNodes(), { 'mesh/d/A': 0x00100000, 'mesh/d/B': 0x8 });
     var s = setupAi({ grants: { 'user/d/alice|deviceAssistant': true } });

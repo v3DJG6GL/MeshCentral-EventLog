@@ -556,6 +556,20 @@ module.exports.attach = function (obj) {
     };
 
     // ---- shared pieces --------------------------------------------------------------------------------------------
+    // Why the Assistant is not offered on this device, as one plain sentence ('' when it is, or when the user lacks
+    // the permission: those users see nothing about the Assistant). a = the onAccess answer.
+    obj.aiUnavailText = function (a) {
+        if (a == null || a.assistant === true) return '';
+        var r = a.assistantReason, admin = (a.canManage === true), path = 'My Server \u2192 Plugins \u2192 Event Log \u2192 ';
+        if (r == 'noEndpoint') {
+            var set = (typeof a.configSetName == 'string' && a.configSetName) ? ' (' + a.configSetName + ')' : '';
+            return 'Assistant: no endpoint is assigned to this device\'s config set' + set + '.' + (admin ? ' Assign one in ' + path + 'Config Sets.' : '');
+        }
+        if (r == 'disabled') return 'Assistant: turned off in the plugin settings.' + (admin ? ' Turn it on in ' + path + 'Assistant.' : '');
+        if (r == 'deviceRights') return 'Assistant: needs the Details right on this device.';
+        if (r == 'unavailable' || r == 'error') return 'Assistant: not available on this server (see the server log).';
+        return '';
+    };
     // phase: for 'timeout', where it happened (connect = the endpoint was never reached)
     obj.aiErrText = function (code, phase) {
         if (code == 'timeout' && phase == 'connect') return 'Could not connect to the endpoint. Try again; if it keeps failing, an administrator needs to check the endpoint address.';
@@ -1649,6 +1663,7 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlMain { display:flex; align-items:flex-start; position:relative; }
 #pluginEventLog .evlCol { flex:1 1 0; min-width:0; align-self:flex-start; }
 #pluginEventLog .evlAiBtn { margin-left:auto; display:inline-flex; align-items:center; gap:6px; }
+#pluginEventLog .evlAiWhy { margin-left:auto; color:var(--evl-muted); font-size:12px; }
 #pluginEventLog .evlAi { flex:0 0 var(--evl-ai-w, 400px); max-width:60%; align-self:stretch; position:relative; min-height:440px; margin-left:10px; border:1px solid var(--evl-line); border-radius:3px; background:var(--evl-panel); }
 #pluginEventLog .evlAiIn { position:absolute; top:0; right:0; bottom:0; left:0; display:flex; flex-direction:column; min-height:0; }
 #pluginEventLog .evlMain.evlStack { flex-direction:column; align-items:stretch; }
@@ -1878,7 +1893,7 @@ body.night #evlAiDlg {
         'onAiStarted', 'onAiPreview', 'onAiStep', 'onAiDelta', 'onAiDone', 'onAiError',
         'aiRefresh', 'aiSchedule', 'aiFlush', 'aiVisible',
         'aiMdInit', 'aiMd', 'aiChipHtml', 'aiMdFallback', 'aiMdPost', 'aiCopyCode',
-        'aiErrText', 'aiErrHtml', 'aiArgsShort', 'aiStepResult', 'aiUsageText', 'aiStepsHtml', 'aiStepsClick', 'aiWaitHtml', 'aiInfoLine', 'aiNotesHtml', 'aiVoteHtml',
+        'aiUnavailText', 'aiErrText', 'aiErrHtml', 'aiArgsShort', 'aiStepResult', 'aiUsageText', 'aiStepsHtml', 'aiStepsClick', 'aiWaitHtml', 'aiInfoLine', 'aiNotesHtml', 'aiVoteHtml',
         'aiTurnText', 'aiCopyTurn', 'aiVote', 'aiRetry', 'aiStop',
         'aiCiteMap', 'aiRowRefs', 'aiGutterTd', 'aiApplySel', 'aiGutter', 'aiGotoCite', 'aiReveal', 'aiAfterLoad', 'aiFlashRow', 'aiNoticeHtml', 'aiNoteClose', 'aiShowAnyway',
         'aiOpenCited', 'aiPeekHtml', 'aiRenderPeek', 'aiPeekClose',

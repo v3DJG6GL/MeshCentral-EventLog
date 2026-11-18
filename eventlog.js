@@ -670,10 +670,13 @@ body.night #pluginEventLog {
             if (Q('evlNotice')) QH('pluginEventLog', '');   // permission was granted since the notice was drawn
             return true;
         }
-        var key = known ? 'denied' : 'checking';
-        if (!Q('evlNotice') || Q('evlNotice').getAttribute('data-k') != key) {
-            QH('pluginEventLog', '<div id=evlNotice data-k=' + key + ' style="padding:18px 14px;opacity:.85">' +
-                (known ? 'You do not have permission to use the Event Log on this device. A MeshCentral administrator can grant it in the plugin\'s permissions (My Server, Plugins, Event Log, Permissions). <a href=# onclick="return pluginHandler.eventlog.elRecheckAccess()">Check again</a>'
+        // only the Assistant is permitted but it is not available here: say why instead of "no permission"
+        var why = known ? ph.aiUnavailText(a) : '';
+        var key = known ? (why ? 'why' : 'denied') : 'checking';
+        if (!Q('evlNotice') || Q('evlNotice').getAttribute('data-k') != key || Q('evlNotice').getAttribute('data-w') != why) {
+            QH('pluginEventLog', '<div id=evlNotice data-k=' + key + ' data-w="' + EscapeHtml(why) + '" style="padding:18px 14px;opacity:.85"' + (why ? ' role=note' : '') + '>' +
+                (why ? EscapeHtml(why) + ' <a href=# onclick="return pluginHandler.eventlog.elRecheckAccess()">Check again</a>'
+                 : known ? 'You do not have permission to use the Event Log on this device. A MeshCentral administrator can grant it in the plugin\'s permissions (My Server, Plugins, Event Log, Permissions). <a href=# onclick="return pluginHandler.eventlog.elRecheckAccess()">Check again</a>'
                        : 'Checking permissions&hellip;') + '</div>');
         }
         if (!known) ph.elRequestAccess();
@@ -685,7 +688,8 @@ body.night #pluginEventLog {
         a.live = (message.live === true); a.history = (message.history === true); a.assistant = (message.assistant === true);
         ph.elAccess = a;
         if (typeof currentNode == 'undefined' || currentNode == null || currentNode._id != message.nodeid) return;
-        var same = (prev != null && prev.nodeid == a.nodeid && prev.live == a.live && prev.history == a.history && prev.assistant == a.assistant);
+        var same = (prev != null && prev.nodeid == a.nodeid && prev.live == a.live && prev.history == a.history && prev.assistant == a.assistant &&
+            prev.assistantReason == a.assistantReason && prev.configSetName == a.configSetName && prev.canManage == a.canManage);
         if (same && (Q('evlWrap') || Q('evlNotice'))) {   // nothing changed: keep the tab as it is (the endpoint shown may have)
             if (Q('evlAiHd') && ph.st != null) QH('evlAiHd', ph.aiHeadHtml(ph.st.ai.convs[ph.st.ai.chat] || null));
             return;
@@ -788,6 +792,9 @@ body.night #pluginEventLog {
         if (ph.elCan('assistant')) {
             h += '<button id=evlAiBtn class="evlBtn evlAiBtn' + (st.ai.open ? ' on' : '') + '" aria-expanded=' + (st.ai.open ? 'true' : 'false') + ' aria-controls=evlAi onclick="return pluginHandler.eventlog.aiToggle()">' +
                  '<svg width=14 height=14 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 aria-hidden=true><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/></svg>Ask about this device</button>';
+        } else {   // say why the Assistant is not offered here (nothing for users without its permission)
+            var why = ph.aiUnavailText(ph.elAccess);
+            if (why) h += '<span id=evlAiWhy class=evlAiWhy role=note>' + esc(why) + '</span>';
         }
         h += '</div>';
         QH('evlToolbar', h);
@@ -2028,16 +2035,23 @@ body.night #pluginEventLog {
 
     // What the Assistant offers this user on this device. Resolves to {assistant:false, assistantReason} until the
     // Assistant is configured; never rejects.
+    // Users without the Assistant permission learn nothing more than 'permission'.
     obj.assistantAccess = function(myparent, node, rights) {
+        var why = function(reason) {
+            if (!obj.hasPerm(myparent && myparent.user, 'deviceAssistant', node)) return { assistant: false, assistantReason: 'permission' };
+            var r = { assistant: false, assistantReason: reason };
+            if (obj.isFullAdmin(myparent)) r.canManage = true;
+            return r;
+        };
         try {
             if (obj.ai != null && typeof obj.ai.accessInfo == 'function') {
                 return Promise.resolve(obj.ai.accessInfo(myparent, node, rights)).catch(function (e) {
                     console.log('EVENTLOG AI: access check failed: ' + ((e && e.message) || e));
-                    return { assistant: false, assistantReason: 'error' };
+                    return why('error');
                 });
             }
         } catch (e) { }
-        return Promise.resolve({ assistant: false, assistantReason: 'unavailable' });
+        return Promise.resolve(why('unavailable'));
     };
     // Tell the tab which views this user may use on this device.
     obj.sendAccess = function(myparent, node, rights) {

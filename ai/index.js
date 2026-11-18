@@ -12,6 +12,8 @@
 //     flushMs, softwareTimeoutMs, timeouts
 //
 // accessInfo(myparent, node, rights) -> Promise<{ assistant, assistantReason, endpoint, categories, remaining }> (never rejects)
+//   when assistant is false for a reason other than 'permission': canManage (full administrator) and, for
+//   'noEndpoint', configSetName (the device's config set; null when none was found)
 // handle(command, myparent, grandparent) -> Promise (never rejects) for pluginaction aiStart / aiConfirm / aiSend /
 //   aiFeedback (device rights and the permission were checked by eventlog.js; command._node / _rights are set) and
 //   aiStop / aiClose (authorized here by session ownership: same user and same connection).
@@ -170,7 +172,7 @@ function create(o) {
         const cfg = await getConfig(node);
         const epId = cfg && typeof cfg.aiEndpointId === 'string' ? cfg.aiEndpointId : '';
         const ep = epId ? await store.getEndpoint(epId) : null;
-        if (!ep) return { ok: false, reason: 'noEndpoint', settings: settings };
+        if (!ep) return { ok: false, reason: 'noEndpoint', settings: settings, cfg: cfg };
         return { ok: true, settings: settings, ep: ep, cfg: cfg };
     }
     async function quota(userid, settings) {
@@ -207,12 +209,26 @@ function create(o) {
     }
     function anyOn(enabled) { return Object.keys(enabled).some(function (k) { return enabled[k]; }); }
 
+    function isFullAdmin(myparent) {
+        try { return typeof plugin.isFullAdmin === 'function' && plugin.isFullAdmin(myparent) === true; } catch (e) { return false; }
+    }
+    // the name shown for the device's config set ('Default' for the default set), null when none was found
+    function configSetName(cfg) {
+        if (!isObj(cfg)) return null;
+        return str(cfg.name, 120) || (cfg.default === true ? 'Default' : null);
+    }
     async function accessInfo(myparent, node, rights) {
         const out = { assistant: false, assistantReason: null, endpoint: null, categories: {}, remaining: null };
         try {
             const g = await gate(myparent, node, rights);
             if (g.settings) out.categories = categoriesFor(g.settings, rights, null);
-            if (!g.ok) { out.assistantReason = g.reason; return out; }
+            if (!g.ok) {
+                out.assistantReason = g.reason;
+                if (g.reason === 'permission') return out;   // nothing more for users without the permission
+                if (isFullAdmin(myparent)) out.canManage = true;
+                if (g.reason === 'noEndpoint') out.configSetName = configSetName(g.cfg);
+                return out;
+            }
             const c = await networkOf(g.ep);
             const network = c.ok ? c.network : null;
             const forced = network !== 'loopback' && network !== 'private';
@@ -227,7 +243,8 @@ function create(o) {
             return out;
         } catch (e) {
             log('EVENTLOG AI: access check failed (' + ((e && e.message) || e) + ')');
-            out.assistant = false; out.assistantReason = 'unavailable';
+            out.assistant = false; out.assistantReason = 'unavailable'; out.endpoint = null; out.remaining = null;
+            delete out.configSetName;
             return out;
         }
     }
