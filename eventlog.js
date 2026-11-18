@@ -128,6 +128,8 @@ module.exports.eventlog = function (parent) {
       'onAccess',
       'onAccessDenied'
     ];
+    // the Assistant on the device tab (Explain, Diagnosis, Ask, data preview): ui_ai.js adds its functions and names
+    require(__dirname + '/ui_ai.js').attach(obj);
 
     obj._pluginPermissions = function() {
         return {
@@ -185,6 +187,47 @@ module.exports.eventlog = function (parent) {
         obj.registerPermissions();
         obj.meshServer.pluginHandler.eventlog_db = require (__dirname + '/db.js').CreateDB(obj.meshServer);
         obj.db = obj.meshServer.pluginHandler.eventlog_db;
+        obj.startAssistant();
+    };
+
+    // The Assistant (ai/*). A failure here only disables the Assistant; the rest of the plugin keeps working.
+    // A previous instance (plugin reload, or server_startup running again) is closed first, so its conversations
+    // and timers do not outlive it.
+    obj.ai = null;
+    obj.startAssistant = function() {
+        var ph = obj.meshServer.pluginHandler;
+        var prev = [obj.ai, (ph != null) ? ph.eventlog_ai : null];
+        prev.forEach(function (p, i) {
+            if (p == null || (i == 1 && p === prev[0])) return;
+            try { if (typeof p.close == 'function') p.close(); } catch (e) { console.log('EVENTLOG AI: could not close the previous Assistant: ' + ((e && e.message) || e)); }
+        });
+        obj.ai = null;
+        if (ph != null) ph.eventlog_ai = null;
+        try {
+            obj.ai = require(__dirname + '/ai/index.js').create({ plugin: obj, log: function (m) { console.log(String(m)); } });
+        } catch (e) {
+            obj.ai = null;
+            console.log('EVENTLOG AI: the Assistant could not be started: ' + ((e && e.message) || e));
+        }
+        if (ph != null) ph.eventlog_ai = obj.ai;
+        return obj.ai;
+    };
+
+    // Re-checks, during a running conversation, that the user may still use the Assistant on the device:
+    // device rights from the database, the Assistant permission and the Details right. Never rejects.
+    obj.reauthorize = function(myparent, grandparent, nodeid) {
+        return new Promise(function (resolve) {
+            try {
+                if (myparent == null || myparent.user == null) { resolve({ ok: false, node: null, rights: 0, reason: 'no user' }); return; }
+                obj.resolveNodeRights(myparent, grandparent, nodeid, function (node, rights) {
+                    if (node == null) { resolve({ ok: false, node: null, rights: rights || 0, reason: 'no rights on this device' }); return; }
+                    if (!obj.hasPerm(myparent.user, 'deviceAssistant', node)) { resolve({ ok: false, node: node, rights: rights, reason: 'missing permission deviceAssistant' }); return; }
+                    var r = rights >>> 0;
+                    if (r !== obj.MESHRIGHT_ADMIN && (r & obj.MESHRIGHT_DEVICEDETAILS) == 0) { resolve({ ok: false, node: node, rights: rights, reason: 'missing device right Details' }); return; }
+                    resolve({ ok: true, node: node, rights: rights, reason: null });
+                });
+            } catch (e) { resolve({ ok: false, node: null, rights: 0, reason: 'error' }); }
+        });
     };
 
     obj.consoleaction = function() {
@@ -307,7 +350,9 @@ module.exports.eventlog = function (parent) {
                 srcMore: false,
                 paused: false, pending: [],
                 live: { events: [], last: null },
-                hist: { events: [], total: 0, stored: 0, lastCollected: null, skip: 0, loaded: false, loading: false, enabled: true, retentionDays: null, facets: null }
+                // recIds: show exactly these stored events (citations); base: offset of the first loaded event (page around a cited one)
+                hist: { events: [], total: 0, stored: 0, lastCollected: null, skip: 0, base: 0, recIds: null, loaded: false, loading: false, enabled: true, retentionDays: null, facets: null },
+                ai: ph.aiNewState()                                  // Assistant conversations of this device (ui_ai.js)
             };
         }
         return ph.st;
@@ -415,14 +460,16 @@ module.exports.eventlog = function (parent) {
         st._text = String(st.filters.text || '').trim().toLowerCase();
         var ranges = { '1h': 3600e3, '24h': 86400e3, '7d': 7 * 86400e3, '30d': 30 * 86400e3 };
         st._cutoff = ranges[st.range] ? (Date.now() - ranges[st.range]) : 0;
-        var evs = (st.view == 'live') ? st.live.events : st.hist.events;
+        // Diagnosis has no event table; History with recIds shows exactly the cited events (the server picked them)
+        var evs = (st.view == 'live') ? st.live.events : ((st.view == 'history') ? st.hist.events : []);
+        var exact = (st.view == 'history' && st.hist.recIds != null && st.hist.recIds.length > 0);
         var rows = [], counts = { level: {}, log: {}, source: {} };
         for (var i in evs) {
             var ev = evs[i];
             if (ph.elMatch(ev, 'level'))  { counts.level[ev.level] = (counts.level[ev.level] || 0) + 1; }
             if (ph.elMatch(ev, 'log'))    { counts.log[ev.log] = (counts.log[ev.log] || 0) + 1; }
             if (ph.elMatch(ev, 'source')) { counts.source[ev.source] = (counts.source[ev.source] || 0) + 1; }
-            if (ph.elMatch(ev, null)) rows.push(ev);
+            if (exact || ph.elMatch(ev, null)) rows.push(ev);
         }
         var k = st.sort.key, dir = st.sort.dir;
         rows.sort(function(a, b) {
@@ -453,6 +500,7 @@ module.exports.eventlog = function (parent) {
 
     // ---- rendering ----
     obj.elInjectStyles = function() {
+        pluginHandler.eventlog.aiInjectStyles();   // the Assistant's rules (own <style id=evlAiStyles>)
         if (document.getElementById('evlStyles')) return;
         var css = `
 #pluginEventLog {
@@ -460,6 +508,7 @@ module.exports.eventlog = function (parent) {
   --evl-alt:#f4f6f5; --evl-hover:#e9f0f1; --evl-sel:#dbe9eb; --evl-chip:#eef1f0; --evl-input:#fff;
   --evl-acc:#1F6F78; --evl-acc-ink:#fff; --evl-ok:#1e8a4c; --evl-bline:#c9c9c9;
   --evl-crit:#8E1B1B; --evl-err:#C9352B; --evl-warn:#B86F00; --evl-info:#2E6DBF; --evl-verb:#7F8A86;
+  --evl-ps-bg:#F3E8D2; --evl-ps-ink:#6B4E16; --evl-bubble:#e9f0f1; --evl-bubble-line:#cfe0e2; --evl-code:#f4f6f5; --evl-code-line:#dfe3e1; --evl-panel:#fafbfa;
   color: var(--evl-ink);
 }
 body.night #pluginEventLog {
@@ -467,6 +516,7 @@ body.night #pluginEventLog {
   --evl-alt:#0d1110; --evl-hover:#18201f; --evl-sel:#18302f; --evl-chip:#1a1f1e; --evl-input:#111;
   --evl-acc:#5fb3bb; --evl-acc-ink:#000; --evl-ok:#3dbf7a; --evl-bline:#4a5250;
   --evl-crit:#ff7b73; --evl-err:#ff8a7e; --evl-warn:#f0b848; --evl-info:#8bb8ff; --evl-verb:#8b9591;
+  --evl-ps-bg:#3a2e17; --evl-ps-ink:#f0d9a8; --evl-bubble:#122224; --evl-bubble-line:#24393b; --evl-code:#0d1110; --evl-code-line:#2a302e; --evl-panel:#070a0a;
 }
 #pluginEventLog .evlMono { font-family: Consolas, "DejaVu Sans Mono", monospace; font-size: 12px; font-variant-numeric: tabular-nums; }
 #pluginEventLog .evlBar { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:2px 0 6px; }
@@ -630,8 +680,17 @@ body.night #pluginEventLog {
         ph.elAccess = a;
         if (typeof currentNode == 'undefined' || currentNode == null || currentNode._id != message.nodeid) return;
         var same = (prev != null && prev.nodeid == a.nodeid && prev.live == a.live && prev.history == a.history && prev.assistant == a.assistant);
-        if (same && (Q('evlWrap') || Q('evlNotice'))) return;   // nothing changed: keep the tab as it is
+        if (same && (Q('evlWrap') || Q('evlNotice'))) {   // nothing changed: keep the tab as it is (the endpoint shown may have)
+            if (Q('evlAiHd') && ph.st != null) QH('evlAiHd', ph.aiHeadHtml(ph.st.ai.convs[ph.st.ai.chat] || null));
+            return;
+        }
         if (!a.live) ph.elStopLive();
+        if (!a.assistant && ph.st != null && ph.st.ai != null) {   // Assistant revoked: stop what runs, close its views
+            ph.aiAbortAll();
+            ph.aiDlgClose(true);
+            ph.st.ai.open = false;
+            if (ph.st.view == 'diag') ph.st.view = a.history ? 'history' : 'live';
+        }
         if (Q('evlWrap')) QH('pluginEventLog', '');   // rebuild the shell with the views this user may use
         if (ph.elEnsureShell()) {
             var st = ph.elState();
@@ -644,6 +703,10 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog;
         if (typeof currentNode == 'undefined' || currentNode == null || currentNode._id != message.nodeid) return;
         if (message.act == 'checkAccess') { ph.onAccess(server, { nodeid: message.nodeid, live: false, history: false, assistant: false }); return; }
+        // a refused Assistant request: end it in the UI (onAiError asks for the permissions again)
+        if ((message.reqId != null || message.convId != null) && String(message.act || '').indexOf('ai') === 0) {
+            ph.onAiError(server, { nodeid: message.nodeid, reqId: message.reqId, convId: message.convId, code: 'denied', message: '' });
+        }
         ph.elRequestAccess(true);
     };
 
@@ -653,14 +716,24 @@ body.night #pluginEventLog {
         if (!Q('pluginEventLog')) return false;
         if (!ph.elAccessGate()) return false;
         if (!Q('evlWrap')) {
-            var st0 = ph.elState();   // open on a view this user is allowed to see
-            if (st0.view == 'live' && !ph.elCan('live') && ph.elCan('history')) st0.view = 'history';
-            else if (st0.view == 'history' && !ph.elCan('history') && ph.elCan('live')) st0.view = 'live';
-            QH('pluginEventLog', '<div id=evlWrap><div id=evlToolbar></div><div id=evlChips class=evlChips></div><div id=evlBody></div><div id=evlStatus class=evlStatus></div></div>');
+            var st0 = ph.elState();   // open on a view this user is allowed to see (Diagnosis when the Assistant is all they have)
+            var canL = ph.elCan('live'), canH = ph.elCan('history'), canA = ph.elCan('assistant');
+            if (st0.view == 'live' && !canL) st0.view = canH ? 'history' : (canA ? 'diag' : 'live');
+            else if (st0.view == 'history' && !canH) st0.view = canL ? 'live' : (canA ? 'diag' : 'history');
+            else if (st0.view == 'diag' && !canA) st0.view = canL ? 'live' : 'history';
+            // #evlCol holds the table (or the Diagnosis view) and its status line; the Ask panel #evlAi docks beside it
+            // (or below it on narrow screens). Both render from state: MeshCentral rebuilds this DOM on every refresh.
+            QH('pluginEventLog', '<div id=evlWrap><div id=evlToolbar></div><div id=evlMain class=evlMain><div id=evlCol class=evlCol>' +
+                '<div id=evlChips class=evlChips></div><div id=evlBody></div><div id=evlDiag class=evlDiag hidden></div><div id=evlStatus class=evlStatus></div></div>' +
+                '<aside id=evlAi class=evlAi aria-label="Ask about this device" hidden></aside></div>' +
+                '<div id=evlAiSay class=evlSr role=status aria-live=polite></div></div>');
             ph.elRenderShell();
+            if (typeof ResizeObserver == 'function') {   // the page can change width without a window resize (side menu)
+                try { if (ph._aiRO) ph._aiRO.disconnect(); ph._aiRO = new ResizeObserver(function() { try { pluginHandler.eventlog.aiLayout(); } catch (e) { } }); ph._aiRO.observe(Q('evlWrap')); } catch (e) { }
+            }
         }
         ph.elFitHeight();   // the tab may have been hidden during the last render
-        if (!ph._fitBound) { ph._fitBound = true; window.addEventListener('resize', function() { pluginHandler.eventlog.elFitHeight(); }); }
+        if (!ph._fitBound) { ph._fitBound = true; window.addEventListener('resize', function() { pluginHandler.eventlog.elFitHeight(); pluginHandler.eventlog.aiLayout(); }); }
         return true;
     };
 
@@ -668,9 +741,16 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         var esc = EscapeHtml;
         var h = '<div class=evlBar>';
-        h += '<div class=evlSeg>' +
-             '<button id=evlVLive' + (ph.elCan('live') ? '' : ' style=display:none') + ' class="' + (st.view == 'live' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetView(\'live\')">&#9679; Live</button>' +
-             '<button id=evlVHist' + (ph.elCan('history') ? '' : ' style=display:none') + ' class="' + (st.view == 'history' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetView(\'history\')">History</button></div>';
+        var seg = function(id, v, perm, label) {
+            return '<button id=' + id + (ph.elCan(perm) ? '' : ' hidden') + ' class="' + (st.view == v ? 'on' : '') + '" aria-pressed=' + (st.view == v ? 'true' : 'false') + ' onclick="return pluginHandler.eventlog.elSetView(\'' + v + '\')">' + label + '</button>';
+        };
+        h += '<div class=evlSeg role=group aria-label="View">' + seg('evlVLive', 'live', 'live', '&#9679; Live') + seg('evlVHist', 'history', 'history', 'History') + seg('evlVDiag', 'diag', 'assistant', 'Diagnosis') + '</div>';
+        if (st.view == 'diag') {
+            // Diagnosis: a time window and an explicit Diagnose button (it never runs by itself: it uses the model)
+            h += '<label class=evlLbl for=evlDiagWin>Window</label> <select id=evlDiagWin class=evlSel onchange="return pluginHandler.eventlog.aiSetWin(this.value)">';
+            [['24h', 'Last 24 hours'], ['7d', 'Last 7 days'], ['restart', 'Around the last restart']].forEach(function(o) { h += '<option value=' + o[0] + (st.ai.diagWin == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
+            h += '</select><span id=evlDiagTb class=evlDiagTb></span>';
+        } else {
         if (st.os == 'linux') {
             h += '<span class=evlLbl>View</span> <select id=evlLxSel class=evlSel title="Log view - in Live view this is queried from journalctl directly (Kernel = -k, Security = auth facilities, This boot = -b)" onchange="return pluginHandler.eventlog.elSelCat(this.value)">';
             [['','All'],['kernel','Kernel'],['auth','Security (auth)'],['audit','Audit'],['boot','This boot']].forEach(function(o){ h += '<option value="' + o[0] + '"' + (st.lsel == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
@@ -692,21 +772,32 @@ body.night #pluginEventLog {
         [['dense','Compact'],['normal','Normal'],['wrap','Wrap']].forEach(function(o){ h += '<option value=' + o[0] + (st.rows == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
         h += '</select>';
         h += '<button id=evlFoldBtn class="evlBtn ' + (st.fold ? 'on' : '') + '" title="Fold repeated events into one line" onclick="return pluginHandler.eventlog.elToggleFold()">&#8659; Fold repeats</button>';
-        h += '<button id=evlPauseBtn class=evlBtn title="Pause live updates" onclick="return pluginHandler.eventlog.elTogglePause()" ' + (st.view == 'history' ? 'style=display:none' : '') + '>' + (st.paused ? '&#9654;' : '&#10074;&#10074;') + '</button>';
+        h += '<button id=evlPauseBtn class=evlBtn title="Pause live updates" onclick="return pluginHandler.eventlog.elTogglePause()" ' + (st.view != 'live' ? 'hidden' : '') + '>' + (st.paused ? '&#9654;' : '&#10074;&#10074;') + '</button>';
         h += '<button class=evlBtn title="Refresh" onclick="return pluginHandler.eventlog.elRefresh()">&#8635;</button>';
         h += '<button class=evlBtn title="Export the filtered rows as CSV" onclick="return pluginHandler.eventlog.elExportCsv()">&#10515; CSV</button>';
         h += '<div class=evlSeg title="Layout">' +
              '<button class="' + (st.layout == 'ledger' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetLayout(\'ledger\')">Table</button>' +
              '<button class="' + (st.layout == 'viewer' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetLayout(\'viewer\')">Viewer</button></div>';
+        }
+        if (ph.elCan('assistant')) {
+            h += '<button id=evlAiBtn class="evlBtn evlAiBtn' + (st.ai.open ? ' on' : '') + '" aria-expanded=' + (st.ai.open ? 'true' : 'false') + ' aria-controls=evlAi onclick="return pluginHandler.eventlog.aiToggle()">' +
+                 '<svg width=14 height=14 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 aria-hidden=true><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/></svg>Ask about this device</button>';
+        }
         h += '</div>';
         QH('evlToolbar', h);
         ph.elUpdate();
+        ph.aiRenderDiag();
+        ph.aiRenderPanel();
     };
 
     obj.elUpdate = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
         if (!Q('evlWrap')) return;
         var fr = ph.elFiltered();
+        // Diagnosis replaces the table; it is re-rendered by its own events only (live ticks must not touch it)
+        var diag = (st.view == 'diag'), b0 = Q('evlBody'), d0 = Q('evlDiag'), c0 = Q('evlChips');
+        if (b0) b0.hidden = diag; if (d0) d0.hidden = !diag; if (c0) c0.hidden = diag;
+        if (diag) { ph.elRenderStatus(); return; }
         ph.elRenderChips(fr);
         ph.elRenderBody(fr);
         ph.elRenderStatus();
@@ -743,6 +834,7 @@ body.night #pluginEventLog {
         if (st.filters.sources != null) { var k2 = Object.keys(st.filters.sources); filts.push(['sources', 'Source: ' + (k2.length == 1 ? esc(k2[0]) : k2.length + ' selected')]); }
         if (String(st.filters.ids).trim()  != '') filts.push(['ids',  'ID: '     + esc(st.filters.ids)]);
         if (String(st.filters.text).trim() != '') filts.push(['text', 'Search: ' + esc(st.filters.text)]);
+        if (st.view == 'history' && st.hist.recIds != null && st.hist.recIds.length) filts.push(['recIds', 'Cited by the assistant: ' + st.hist.recIds.length + (st.hist.recIds.length == 1 ? ' event' : ' events')]);
         if (filts.length) {
             h += '<span class=evlLbl style=margin-left:12px>Active</span>';
             filts.forEach(function(f) {
@@ -750,6 +842,7 @@ body.night #pluginEventLog {
             });
             h += '<span class="evlChip" role=button tabindex=0 onclick="return pluginHandler.eventlog.elResetFilters()">Reset all</span>';
         }
+        h += ph.aiNoticeHtml();   // "E3 is hidden by the current filters. Show anyway"
         QH('evlChips', h);
     };
 
@@ -791,11 +884,14 @@ body.night #pluginEventLog {
         };
         var dens = (st.rows == 'dense') ? ' evlDense' : (st.rows == 'wrap') ? ' evlWrap' : '';
         var hstyle = st.heights[st.layout] ? ' style="height:' + st.heights[st.layout] + 'px;max-height:none;min-height:0"' : '';
+        // gutter column with the citation chips of the conversation in focus (only while it cites something)
+        var cm = ph.aiCiteMap(), gut = (cm.n > 0), gutTh = gut ? '<th class=evlCCite style=width:52px><span class=evlSr>Cited</span></th>' : '';
         var rowHtml = function(r, mode) {
             var ev = r.ev;
             var selCls = (mode == 'viewer' && st.selected == ev.key) || (mode == 'ledger' && st.expanded[ev.key]) ? ' class=evlSelRow' : '';
             var rep = (r.count > 1) ? '<span class=evlRep title="Identical event repeated"><b>&times;' + r.count + '</b></span>' : '';
-            var h = '<tr' + selCls + ' onclick="return pluginHandler.eventlog.elRowClick(\'' + ev.key + '\')">';
+            var h = '<tr id=evlR_' + ev.key + selCls + ' onclick="return pluginHandler.eventlog.elRowClick(\'' + ev.key + '\')">';
+            if (gut) h += ph.aiGutterTd(r, cm);
             h += '<td class=evlCLv><span class="evlLv ' + ev.levelCls + '"><i></i>' + esc(ev.levelName) + '</span></td>';
             h += '<td class="evlCTm evlMono">' + ph.elFmtTime(ev.time) + '</td>';
             if (mode == 'ledger') h += '<td class=evlCLog title="' + esc(ev.log) + '">' + esc(ev.log) + '</td>';
@@ -803,7 +899,7 @@ body.night #pluginEventLog {
             h += '<td class="evlCId evlMono">' + esc(ev.id) + '</td>';
             h += '<td class=evlCMsg title="' + esc(ev.message).substring(0, 500) + '">' + rep + esc(ev.message) + '</td></tr>';
             if (mode == 'ledger' && st.expanded[ev.key]) {
-                h += '<tr class=evlExpand onclick="event.stopPropagation()"><td colspan=6>' + ph.elRenderDetailHtml(r) + '</td></tr>';
+                h += '<tr class=evlExpand onclick="event.stopPropagation()"><td colspan=' + (gut ? 7 : 6) + '>' + ph.elRenderDetailHtml(r) + '</td></tr>';
             }
             return h;
         };
@@ -811,12 +907,12 @@ body.night #pluginEventLog {
         if (st.layout == 'viewer') {
             h += '<div class=evlViewer id=evlViewer' + (st.sideW ? ' style="--evl-side:' + st.sideW + 'px"' : '') + '><div class=evlFacets id=evlFacets>' + ph.elRenderFacets(fr) + '</div>';
             h += '<div class=evlVSplit title="Drag to change the sidebar width &middot; double-click to reset" onpointerdown="return pluginHandler.eventlog.elVSplitDown(event)" ondblclick="return pluginHandler.eventlog.elVSplitReset()"></div>';
-            h += '<div><div class="evlVList' + dens + '" id=evlVList tabindex=0' + hstyle + ' onkeydown="return pluginHandler.eventlog.elKeyNav(event)"><table class=evlLog><thead><tr>' +
+            h += '<div><div class="evlVList' + dens + '" id=evlVList tabindex=0' + hstyle + ' onkeydown="return pluginHandler.eventlog.elKeyNav(event)"><table class=evlLog><thead><tr>' + gutTh +
                  sortTh('level', 'Level') + sortTh('time', 'Time') + sortTh('source', 'Source') + sortTh('id', ph.elLbl('idShort')) + sortTh('message', 'Message') +
                  '</tr></thead><tbody>';
             var selRep = null;
             frows.forEach(function(r) { h += rowHtml(r, 'viewer'); if (st.selected == r.ev.key) selRep = r; });
-            if (!frows.length) h += '<tr><td colspan=5><div class=evlEmpty>' + ph.elEmptyText() + '</div></td></tr>';
+            if (!frows.length) h += '<tr><td colspan=' + (gut ? 6 : 5) + '><div class=evlEmpty>' + ph.elEmptyText() + '</div></td></tr>';
             h += '</tbody></table></div>';
             h += '<div class=evlSplit title="Drag to change the list height &middot; double-click to reset" onpointerdown="return pluginHandler.eventlog.elGripDown(event,\'evlVList\')" ondblclick="return pluginHandler.eventlog.elGripReset()"></div>';
             if (selRep == null && frows.length) { selRep = frows[0]; st.selected = selRep.ev.key; }
@@ -825,40 +921,45 @@ body.night #pluginEventLog {
                 h += '<div class=evlDTabs>' +
                      '<button class="' + (st.dtab == 'general' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetDTab(\'general\')">General</button>' +
                      '<button class="' + (st.dtab == 'json' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetDTab(\'json\')">Details (JSON)</button><span class=sp></span>' +
+                     ph.aiExplainBtn(selRep.ev).replace('<button ', '<button style=margin:4px ') +
                      '<button class="evlBtn mini" style=margin:4px title="' + (st.dtab == 'json' ? 'Copy the JSON shown below' : 'Copy this event as text (log, source, date, ID, level, message)') + '" onclick="return pluginHandler.eventlog.elCopy(\'' + selRep.ev.key + '\',\'' + (st.dtab == 'json' ? 'json' : 'details') + '\',this)">Copy</button>' +
                      '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elFilterBy(\'source\',\'' + selRep.ev.key + '\')">Filter: this source</button>' +
                      '<button class="evlBtn mini" style=margin:4px onclick="return pluginHandler.eventlog.elFilterBy(\'id\',\'' + selRep.ev.key + '\')">Filter: ID ' + esc(selRep.ev.id) + '</button></div>';
                 if (st.dtab == 'json') {
                     h += '<pre class=evlRaw style="margin:10px 13px">' + esc(JSON.stringify(ph.elRawOf(selRep.ev), null, 2)) + '</pre>';
                 } else {
-                    h += '<div class=evlDBody><div class=evlMsgFull>' + esc(selRep.ev.message) + '</div><dl class=evlKv>' +
+                    var exH = ph.aiExplainHtml(selRep.ev);   // the explanation sits beside the details
+                    h += '<div class="evlDBody' + (exH ? ' evlDBodyEx' : '') + '">' + (exH ? '<div>' : '') + '<div class=evlMsgFull>' + esc(selRep.ev.message) + '</div><dl class=evlKv>' +
                          '<dt>' + ph.elLbl('log') + '</dt><dd>' + esc(selRep.ev.log) + '</dd><dt>Source</dt><dd title="' + esc(selRep.ev.source) + '">' + esc(selRep.ev.source) + '</dd>' +
                          '<dt>' + ph.elLbl('id') + '</dt><dd class=evlMono>' + esc(selRep.ev.id) + '</dd><dt>Level</dt><dd>' + esc(selRep.ev.levelName) + ' (' + selRep.ev.level + ')</dd>' +
                          (selRep.ev.unit ? '<dt>Unit</dt><dd title="' + esc(selRep.ev.unit) + '">' + esc(selRep.ev.unit) + '</dd>' : '') +
                          (selRep.ev.pri != null ? '<dt>Priority</dt><dd>' + esc(ph.elPriName(selRep.ev.pri)) + ' (' + selRep.ev.pri + ')</dd>' : '') +
                          '<dt>Recorded</dt><dd class=evlMono>' + ph.elFmtTime(selRep.ev.time) + '</dd>' +
                          (selRep.count > 1 ? '<dt>Seen</dt><dd>' + selRep.count + '&times; &mdash; ' + selRep.times.slice(0, 6).map(function(t) { return ph.elFmtTime(t, true); }).join(', ') + (selRep.times.length > 6 ? '&hellip;' : '') + '</dd>' : '') +
-                         '</dl></div>';
+                         '</dl>' + (exH ? '</div><div>' + exH + '</div>' : '') + '</div>';
                 }
             } else { h += '<div class=evlEmpty>Select an event to see its details.</div>'; }
             h += '</div></div></div>';
         } else {
-            h += '<div class="evlScroll' + dens + '" id=evlScroll' + hstyle + '><table class=evlLog><thead><tr>' +
+            h += '<div class="evlScroll' + dens + '" id=evlScroll' + hstyle + '><table class=evlLog><thead><tr>' + gutTh +
                  sortTh('level', 'Level') + sortTh('time', 'Time') + sortTh('log', ph.elLbl('log')) + sortTh('source', 'Source') + sortTh('id', ph.elLbl('id')) + sortTh('message', 'Message') +
                  '</tr></thead><tbody>';
             frows.forEach(function(r) { h += rowHtml(r, 'ledger'); });
-            if (!frows.length) h += '<tr><td colspan=6><div class=evlEmpty>' + ph.elEmptyText() + '</div></td></tr>';
+            if (!frows.length) h += '<tr><td colspan=' + (gut ? 7 : 6) + '><div class=evlEmpty>' + ph.elEmptyText() + '</div></td></tr>';
             h += '</tbody></table></div>';
             h += '<div class=evlGrip title="Drag to change the table height &middot; double-click to reset" onpointerdown="return pluginHandler.eventlog.elGripDown(event,\'evlScroll\')" ondblclick="return pluginHandler.eventlog.elGripReset()"></div>';
         }
         QH('evlBody', h);
+        ph.aiApplySel();
         ph.elFitHeight();
     };
 
     obj.elEmptyText = function() {
         var st = pluginHandler.eventlog.elState();
+        if (st.view == 'diag') return 'Choose a window and select Diagnose.';
         if (st.view == 'history') {
             if (st.hist.loading) return 'Loading history&hellip;';
+            if (st.hist.recIds != null && st.hist.recIds.length) return 'None of the cited events is stored any more. Retention may have removed them. Clear the &quot;Cited by the assistant&quot; filter to see the history again.';
             if (st.hist.enabled === false) return 'History collection is disabled for this device. Enable it in the plugin administration (Config Sets).';
             if (st.hist.stored == 0) return 'No events stored yet. The agent sends collected events about once a minute once its core is loaded &mdash; use &quot;Collect now&quot; below, or check back shortly.';
             return 'No events match the current filters. Adjust the filters above or reset them.';
@@ -884,10 +985,12 @@ body.night #pluginEventLog {
              '<button class="evlBtn mini" title="Copy only the message text" onclick="return pluginHandler.eventlog.elCopy(\'' + ev.key + '\',\'message\',this)">Copy message</button>' +
              '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elFilterBy(\'source\',\'' + ev.key + '\')">Filter: this source</button>' +
              '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elFilterBy(\'id\',\'' + ev.key + '\')">Filter: ID ' + esc(ev.id) + '</button>' +
-             '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elToggleRaw(\'' + ev.key + '\')">' + (st.raw[ev.key] ? 'Hide' : 'Show') + ' raw JSON</button></div>';
+             '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elToggleRaw(\'' + ev.key + '\')">' + (st.raw[ev.key] ? 'Hide' : 'Show') + ' raw JSON</button>' +
+             ph.aiExplainBtn(ev) + '</div>';
         if (st.raw[ev.key]) {
             h += '<pre class=evlRaw>' + esc(JSON.stringify(ph.elRawOf(ev), null, 2)) + '</pre>';
         }
+        h += ph.aiExplainHtml(ev);
         return h;
     };
 
@@ -895,6 +998,13 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         if (!Q('evlStatus')) return;
         var h = '';
+        if (st.view == 'diag') {
+            h += '<span>Diagnosis of the events stored for this device</span>';
+            if (st.hist.lastCollected) h += '<span>Last collected: <span class=evlMono>' + ph.elFmtTime(st.hist.lastCollected) + '</span></span>';
+            QH('evlStatus', h);
+            ph.elFitHeight();
+            return;
+        }
         if (st.view == 'live') {
             if (ph.livelog == null) h += '<span class=warn>&#9679; Agent not connected &mdash; live view resumes when it reconnects</span>';
             else if (st.paused) h += '<span class=warn>&#10074;&#10074; Paused' + (st.pending.length ? ' &middot; ' + st.pending.length + ' new buffered' : '') + '</span>';
@@ -906,7 +1016,8 @@ body.night #pluginEventLog {
             if (st.hist.loading) h += '<span>Loading&hellip;</span>';
             h += '<span>Showing ' + (st.fold ? ((st._visible || 0) + ' folded rows (' + st._shown + ' events)') : st._shown) + ' of ' + st.hist.total + ' in range &middot; ' + st.hist.stored + ' stored total' + (st.hist.retentionDays ? ' &middot; retention ' + st.hist.retentionDays + ' days' : '') + '</span>';
             h += '<span>Last collected: <span class=evlMono>' + (st.hist.lastCollected ? ph.elFmtTime(st.hist.lastCollected) : 'never') + '</span></span>';
-            if (st.hist.events.length < st.hist.total) h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elLoadMore()">Load ' + Math.min(st.show, st.hist.total - st.hist.events.length) + ' more</button>';
+            var histEnd = (st.hist.base || 0) + st.hist.events.length;   // base > 0 after a jump to a cited event
+            if (histEnd < st.hist.total) h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elLoadMore()">Load ' + Math.min(st.show, st.hist.total - histEnd) + ' more</button>';
             h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elCollectNow()">Collect now</button>';
             if (st.collectMsg) h += '<span>' + st.collectMsg + '</span>';
         }
@@ -926,8 +1037,10 @@ body.night #pluginEventLog {
     // ---- interactions ----
     obj.elSetView = function(v) {
         var ph = pluginHandler.eventlog, st = ph.elState();
-        if (!ph.elCan(v == 'live' ? 'live' : 'history')) return false;
+        if (v != 'live' && v != 'history' && v != 'diag') return false;
+        if (!ph.elCan(v == 'diag' ? 'assistant' : v)) return false;
         st.view = v;
+        st.ai.notice = null; st.ai.peek = null;
         if (v == 'history' && !st.hist.loaded && !st.hist.loading) ph.elLoadHistory(true);
         ph.elRenderShell();
         return false;
@@ -950,6 +1063,7 @@ body.night #pluginEventLog {
     obj.elSetShow = function(n) {
         var ph = pluginHandler.eventlog, st = ph.elState();
         st.show = Number(n) || 100; putstore('evl_show', String(st.show));
+        st.hist.recIds = null;   // any filter change ends "Cited by the assistant"
         if (st.view == 'live') ph.elRequestLive(null);
         else ph.elLoadHistory(true);   // History: reload the first page with the new page size
         ph.elUpdate();
@@ -958,6 +1072,7 @@ body.night #pluginEventLog {
     obj.elSetRange = function(r) {
         var ph = pluginHandler.eventlog, st = ph.elState();
         st.range = r; putstore('evl_range', r);
+        st.hist.recIds = null;
         if (st.view == 'history') ph.elLoadHistory(true); else ph.elUpdate();
         return false;
     };
@@ -1032,6 +1147,7 @@ body.night #pluginEventLog {
     };
     obj.elClearFilter = function(kind) {
         var ph = pluginHandler.eventlog, st = ph.elState();
+        if (kind == 'recIds') { st.hist.recIds = null; ph.elLoadHistory(true); ph.elUpdate(); return false; }
         if (kind == 'ids' || kind == 'text') { st.filters[kind] = ''; var el = Q(kind == 'ids' ? 'evlIdIn' : 'evlTxtIn'); if (el) el.value = ''; }
         else st.filters[kind] = null;
         ph.elUpdate();
@@ -1161,7 +1277,10 @@ body.night #pluginEventLog {
         // measure from where the table sits when the page is scrolled to the top
         if (sc) { top += sc.scrollTop; bottom = Math.min(bottom, sc.getBoundingClientRect().bottom); }
         else top += (window.pageYOffset || 0);
-        var below = wrap.getBoundingClientRect().bottom - r.bottom;
+        // only what sits below the table in its own column (grip, details pane, status line) counts: the Ask panel,
+        // stacked below on narrow screens, must not shrink the table (that would feed back into the layout)
+        var body = Q('evlBody'), stl = Q('evlStatus');
+        var below = (body ? Math.max(0, body.getBoundingClientRect().bottom - r.bottom) : 0) + (stl ? stl.getBoundingClientRect().height : 0);
         return Math.max(90, Math.floor(bottom - top - below - 6));
     };
     // Automatic height fills the window; a user-dragged height is kept but never grows past it.
@@ -1349,8 +1468,8 @@ body.night #pluginEventLog {
     obj.elRefresh = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
         if (st.view == 'live') ph.elRequestLive(null);
-        else ph.elLoadHistory(true);
-        return false;
+        else if (st.view == 'history') ph.elLoadHistory(true);
+        return false;   // Diagnosis: nothing to refresh (a new run uses the model, so it needs the Diagnose button)
     };
     obj.elTogglePause = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
@@ -1366,22 +1485,29 @@ body.night #pluginEventLog {
     };
 
     // ---- history data ----
-    obj.elLoadHistory = function(reset) {
+    // aroundId (optional): load the page that contains this stored event (jump to a citation)
+    obj.elLoadHistory = function(reset, aroundId) {
         var ph = pluginHandler.eventlog, st = ph.elState();
         if (!ph.elCan('history')) return false;
         if (typeof currentNode == 'undefined' || currentNode == null) return false;
-        if (reset) { st.hist.skip = 0; }
+        if (reset === true) { st.hist.skip = 0; st.hist.base = 0; }
         st.hist.loading = true;
         var ranges = { '1h': 3600e3, '24h': 86400e3, '7d': 7 * 86400e3, '30d': 30 * 86400e3 };
         var since = ranges[st.range] ? (Date.now() - ranges[st.range]) : null;
         var msg = { action: 'plugin', plugin: 'eventlog', pluginaction: 'getNodeHistory', nodeid: currentNode._id, meshid: currentNode.meshid, limit: st.show, skip: st.hist.skip, since: since };
-        // push the tab's filters into the server query so they cover all stored events, not just the loaded page
-        var f = st.filters;
-        if (f.levels != null) msg.levels = Object.keys(f.levels).map(Number);
-        if (f.logs != null) msg.logs = Object.keys(f.logs);
-        if (f.sources != null) msg.sources = Object.keys(f.sources);
-        if (String(f.text || '').trim() != '') msg.text = String(f.text).trim();
-        if (String(f.ids || '').trim() != '') msg.ids = String(f.ids).trim();
+        if (st.hist.recIds != null && st.hist.recIds.length) {
+            msg.recIds = st.hist.recIds.slice(0, 200);   // exactly the events an answer cited, whatever the filters say
+            msg.since = null;
+        } else {
+            // push the tab's filters into the server query so they cover all stored events, not just the loaded page
+            var f = st.filters;
+            if (f.levels != null) msg.levels = Object.keys(f.levels).map(Number);
+            if (f.logs != null) msg.logs = Object.keys(f.logs);
+            if (f.sources != null) msg.sources = Object.keys(f.sources);
+            if (String(f.text || '').trim() != '') msg.text = String(f.text).trim();
+            if (String(f.ids || '').trim() != '') msg.ids = String(f.ids).trim();
+        }
+        if (aroundId != null && typeof aroundId != 'object') msg.aroundId = String(aroundId);
         meshserver.send(msg);
         ph.elRenderStatus();
         return false;
@@ -1389,6 +1515,7 @@ body.night #pluginEventLog {
     // History filters run on the SERVER (the tab only holds one page): any filter change re-queries, debounced.
     obj.elHistRefilter = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
+        if (st.hist.recIds != null) { st.hist.recIds = null; if (st.view == 'history') ph.elUpdate(); }   // a filter change ends "Cited by the assistant"
         if (st.view != 'history') return false;
         if (st._refilterT) clearTimeout(st._refilterT);
         st._refilterT = setTimeout(function() { pluginHandler.eventlog.elLoadHistory(true); }, 250);
@@ -1406,16 +1533,16 @@ body.night #pluginEventLog {
     obj.elHistAutoFill = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
         if (st.view != 'history' || !st.fold || st.hist.loading) return false;
-        if (st.hist.events.length >= st.hist.total || st.hist.events.length >= 5000) return false;
+        if ((st.hist.base || 0) + st.hist.events.length >= st.hist.total || st.hist.events.length >= 5000) return false;
         var folded = ph.elFold(ph.elFiltered().rows).length;
         if (folded >= st.show) return false;
-        st.hist.skip = st.hist.events.length;
+        st.hist.skip = (st.hist.base || 0) + st.hist.events.length;
         ph.elLoadHistory(false);
         return true;
     };
     obj.elLoadMore = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
-        st.hist.skip = st.hist.events.length;
+        st.hist.skip = (st.hist.base || 0) + st.hist.events.length;
         ph.elLoadHistory(false);
         return false;
     };
@@ -1461,19 +1588,24 @@ body.night #pluginEventLog {
             st.hist.lastCollected = (typeof lc == 'string' || typeof lc == 'object') ? new Date(lc).getTime() : Number(lc);
         }
         var evs = message.events || [];
-        if (!message.skip) st.hist.events = [];
+        // a page around a cited event replaces what is loaded; its offset becomes the base for "Load more"
+        var around = (message.aroundId != null && !message.aroundMissing);
+        if (!message.skip || around) st.hist.events = [];
+        if (around) st.hist.base = Number(message.skip) || 0;
+        else if (!message.skip) st.hist.base = 0;
         var prevCount = st.hist.events.length;
         for (var i in evs) {
             var n = ph.elNormalize(evs[i]);
             if (n == null) continue;
             ph.byKey[n.key] = n;
             var dup = false;
-            if (message.skip) { for (var j in st.hist.events) { if (st.hist.events[j].key == n.key) { dup = true; break; } } }
+            if (message.skip && !around) { for (var j in st.hist.events) { if (st.hist.events[j].key == n.key) { dup = true; break; } } }
             if (!dup) st.hist.events.push(n);
         }
         ph.elUpdate();
+        ph.aiAfterLoad(message);   // finish a jump to a cited event
         // only continue auto-filling folded pages while responses actually add events (loop guard)
-        if (st.hist.events.length > prevCount) ph.elHistAutoFill();
+        if (st.hist.events.length > prevCount && message.aroundId == null) ph.elHistAutoFill();
     };
 
     // ---- plumbing (tunnel to the agent) ----
@@ -1634,6 +1766,7 @@ body.night #pluginEventLog {
       if (!sameNode) {
           ph.elStopLive();
           ph.livelognode = null;
+          if (ph.st != null && ph.st.ai != null) ph.aiStashSave();   // stop the Assistant's requests, keep its chats for a return visit
           ph.st = null;      // reset UI state for the new node
           ph.byKey = {};
       }
@@ -1677,6 +1810,13 @@ body.night #pluginEventLog {
             }));
         })
         .catch((e) => console.log('EVENTLOG: could not send the config to ' + myparent.dbNodeKey + ': ' + (e.message || e)));
+    };
+
+    // Called by MeshCentral for every message from every agent, so it returns at once unless the message is an
+    // installed-software reply the Assistant asked for (ai/software.js checks the session id and the agent).
+    obj.hook_processAgentData = function(command, agentObj, webserver) {
+        if (command == null || command.action != 'software' || obj.ai == null) return;
+        try { obj.ai.onAgentData(command, agentObj); } catch (e) { }
     };
 
     // Repair UTF-8 text that the agent decoded as Latin-1 (the PowerShell output file is UTF-8).
@@ -1837,10 +1977,16 @@ body.night #pluginEventLog {
     // Which plugin actions may come from where. Agent actions are only accepted from an agent connection;
     // device actions only from a user session, after the user's rights on that device are confirmed.
     obj.AGENT_ACTIONS = { sendlog: true, gatherlogs: true };
-    obj.NODE_ACTIONS = { checkAccess: true, getNodeHistory: true, collectNow: true };
+    obj.NODE_ACTIONS = { checkAccess: true, getNodeHistory: true, collectNow: true, aiStart: true, aiConfirm: true, aiSend: true, aiFeedback: true };
     // Device actions that need a plugin permission, and device actions that need MeshCentral device rights on top.
-    obj.ACTION_PERMISSION = { getNodeHistory: 'deviceHistoryTab', collectNow: 'deviceHistoryTab' };
-    obj.ACTION_RIGHTS = {};
+    obj.ACTION_PERMISSION = { getNodeHistory: 'deviceHistoryTab', collectNow: 'deviceHistoryTab', aiStart: 'deviceAssistant', aiConfirm: 'deviceAssistant', aiSend: 'deviceAssistant', aiFeedback: 'deviceAssistant' };
+    obj.ACTION_RIGHTS = { aiStart: obj.MESHRIGHT_DEVICEDETAILS, aiConfirm: obj.MESHRIGHT_DEVICEDETAILS, aiSend: obj.MESHRIGHT_DEVICEDETAILS, aiFeedback: obj.MESHRIGHT_DEVICEDETAILS };
+    // Assistant actions authorized by conversation ownership inside ai/index.js (same user and connection), so Stop
+    // and Close keep working after a permission was revoked; and the Assistant admin actions (full administrators).
+    obj.AI_SESSION_ACTIONS = { aiStop: true, aiClose: true };
+    obj.AI_ADMIN_ACTIONS = { aiAdminGet: true, aiAdminSaveEndpoint: true, aiAdminDeleteEndpoint: true, aiAdminSaveSettings: true, aiAdminTest: true, aiAdminModels: true, aiAdminAudit: true };
+    // Every Assistant action is a user action; an agent connection never reaches one.
+    obj.isAiAction = function(act) { return typeof act == 'string' && act.substring(0, 2) == 'ai'; };
 
     // Send to a browser session if it is still open. Never throws.
     obj.safeSend = function(myparent, o) {
@@ -1865,7 +2011,13 @@ body.night #pluginEventLog {
     };
     obj.sendDenied = function(myparent, command, reason) {
         obj.logDenied(myparent, command.nodeid, command.pluginaction, reason);
-        obj.safeSend(myparent, { method: 'onAccessDenied', nodeid: command.nodeid, act: command.pluginaction, reason: reason });
+        var msg = { method: 'onAccessDenied', nodeid: command.nodeid, act: command.pluginaction, reason: reason };
+        // Assistant requests are matched by reqId / convId in the tab: echo them (short strings or numbers only)
+        ['reqId', 'convId'].forEach(function (k) {
+            var v = command[k];
+            if ((typeof v == 'string' && v.length <= 64) || (typeof v == 'number' && isFinite(v))) msg[k] = v;
+        });
+        obj.safeSend(myparent, msg);
     };
 
     // What the Assistant offers this user on this device. Resolves to {assistant:false, assistantReason} until the
@@ -1889,6 +2041,45 @@ body.night #pluginEventLog {
             for (var k in a) { if (k != 'method' && k != 'nodeid') msg[k] = a[k]; }
             obj.safeSend(myparent, msg);
         });
+    };
+
+    // Short strings / finite numbers only: these ids are echoed back to the tab.
+    obj.aiId = function(v) {
+        if (typeof v == 'string' && v.length <= 64) return v;
+        if (typeof v == 'number' && isFinite(v)) return v;
+        return null;
+    };
+    // Assistant device actions, after serveraction's checks (aiStart / aiConfirm / aiSend / aiFeedback carry the
+    // device and rights it resolved in command._node / _rights; aiStop / aiClose are checked by conversation
+    // ownership in ai/index.js). The conversation answers asynchronously; nothing here waits for it.
+    obj.aiDeviceAction = function(command, myparent, grandparent) {
+        var act = command.pluginaction;
+        if (myparent == null || myparent.user == null) return;   // user sessions only
+        if (obj.NODE_ACTIONS[act] && command._node == null) { obj.sendDenied(myparent, command, 'no rights on this device'); return; }
+        if (obj.ai == null || typeof obj.ai.handle != 'function') {
+            if (obj.AI_SESSION_ACTIONS[act]) return;   // nothing to stop or close
+            obj.safeSend(myparent, { method: 'onAiError', nodeid: command.nodeid, reqId: obj.aiId(command.reqId), convId: obj.aiId(command.convId), code: 'unavailable', message: 'The Assistant is not available on this server', retryable: false });
+            return;
+        }
+        try {
+            var p = obj.ai.handle(command, myparent, grandparent);
+            if (p != null && typeof p.catch == 'function') p.catch(function (e) { console.log('EVENTLOG AI: ' + act + ' failed: ' + ((e && e.message) || e)); });
+        } catch (e) { console.log('EVENTLOG AI: ' + act + ' failed: ' + ((e && e.message) || e)); }
+    };
+    // Assistant admin page actions: full administrators only (other administrators manage everything else).
+    obj.aiAdminAction = function(command, myparent) {
+        if (myparent == null || myparent.user == null) return;   // user sessions only
+        var reqId = obj.aiId(command.reqId);
+        if (!obj.isFullAdmin(myparent)) {
+            obj.safeSend(myparent, { method: 'aiAdminError', reqId: reqId, scope: 'access', error: 'Only full administrators can manage the Assistant.' });
+            return;
+        }
+        if (obj.ai == null || obj.ai.admin == null || typeof obj.ai.admin.handle != 'function') {
+            obj.safeSend(myparent, { method: 'aiAdminError', reqId: reqId, scope: 'unavailable', error: 'The Assistant is not available on this server (see the server log).' });
+            return;
+        }
+        try { obj.ai.admin.handle(command, myparent); }
+        catch (e) { console.log('EVENTLOG AI: ' + command.pluginaction + ' failed: ' + ((e && e.message) || e)); }
     };
 
     // Resolve the device and the user's rights on it from the database, never from what the browser sent:
@@ -1923,6 +2114,7 @@ body.night #pluginEventLog {
         var fromUser = (myparent.user != null);
         if (fromUser && obj.AGENT_ACTIONS[command.pluginaction]) return;   // a browser session cannot pose as an agent
         if (!fromUser && obj.NODE_ACTIONS[command.pluginaction]) return;   // device actions are user actions
+        if (!fromUser && obj.isAiAction(command.pluginaction)) return;     // so is everything of the Assistant
         if (fromUser) { for (var f in command) { if (f.charAt(0) == '_') delete command[f]; } }   // '_' fields are set by the server only
         if (!fromUser || !obj.NODE_ACTIONS[command.pluginaction]) return obj._serveraction(command, myparent, grandparent);
         obj.resolveNodeRights(myparent, grandparent, command.nodeid, function (node, rights) {
@@ -1966,6 +2158,16 @@ body.night #pluginEventLog {
       }
 
       switch (command.pluginaction) {
+        case 'aiStart': case 'aiConfirm': case 'aiSend': case 'aiFeedback':   // device rights + permission checked in serveraction
+        case 'aiStop': case 'aiClose': {                                      // ownership checked in ai/index.js
+            obj.aiDeviceAction(command, myparent, grandparent);
+            break;
+        }
+        case 'aiAdminGet': case 'aiAdminSaveEndpoint': case 'aiAdminDeleteEndpoint': case 'aiAdminSaveSettings':
+        case 'aiAdminTest': case 'aiAdminModels': case 'aiAdminAudit': {
+            obj.aiAdminAction(command, myparent);
+            break;
+        }
         case 'sendlog': {
           command.method = 'fe_on_message';
           if (command.sessionid != null) {
@@ -2062,6 +2264,11 @@ body.night #pluginEventLog {
                     levels: command.levels, logs: command.logs, sources: command.sources,
                     text: command.text, ids: command.ids
                 };
+                // recIds: exactly these stored events (<= 200 ids); aroundId: the page that holds this event
+                var recIds = Array.isArray(command.recIds)
+                    ? command.recIds.filter(function (id) { return typeof id == 'string' && id.length > 0 && id.length <= 64; }).slice(0, 200)
+                    : null;
+                var aroundId = (recIds == null && typeof command.aroundId == 'string' && command.aroundId.length > 0 && command.aroundId.length <= 64) ? command.aroundId : null;
                 var withMeta = function(meta) {
                   obj.db.getConfigFor(command.nodeid, command.meshid)
                   .catch(function (e) { console.log('EVENTLOG: getNodeHistory config lookup failed: ' + (e.message || e)); return null; })
@@ -2072,7 +2279,7 @@ body.night #pluginEventLog {
                         // stored categories (Kernel, Auth, ...) from the query
                         opts = Object.assign({}, opts); delete opts.historyLogs;
                     }
-                    obj.db.getEventsFor(command.nodeid, opts, q, function(events, total) {
+                    var reply = function(events, total, extra) {
                       // stored/lastCollected describe the node as a whole, not the page: only the first
                       // page needs them (the tab keeps the previous values for paged loads).
                       var withStats = function(stats) {
@@ -2085,10 +2292,37 @@ body.night #pluginEventLog {
                                 config: cfg, meta: meta || null, facets: facets || null
                             };
                             if (stats != null) { msg.stored = stats.count; msg.lastCollected = stats.last; }
-                            myobj.parent.ws.send(JSON.stringify(msg));
+                            for (var xk in (extra || {})) msg[xk] = extra[xk];
+                            try { myobj.parent.ws.send(JSON.stringify(msg)); } catch (e) { }
                         });
                       };
                       if (q.skip == 0) obj.db.getStatsFor(command.nodeid, withStats); else withStats(null);
+                    };
+                    if (recIds != null) {
+                        // exactly these events (an Assistant answer's "open these events in History"), newest first
+                        if (opts.historyEnabled === false || recIds.length == 0 || typeof obj.db.getEventsByIds != 'function') { reply([], 0, { recIds: recIds }); return; }
+                        q.skip = 0;
+                        obj.db.getEventsByIds(command.nodeid, recIds, function (events) {
+                            var list = (Array.isArray(events) ? events : []).filter(function (e) { return e != null && e.nodeid == command.nodeid; });
+                            list.sort(function (a, b) { return (Number(b.tc) - Number(a.tc)) || (String(b._id) < String(a._id) ? -1 : (String(b._id) > String(a._id) ? 1 : 0)); });
+                            reply(list, list.length, { recIds: recIds });
+                        });
+                        return;
+                    }
+                    var page = function(extra) {
+                        obj.db.getEventsFor(command.nodeid, opts, q, function(events, total) { reply(events, total, extra); });
+                    };
+                    if (aroundId == null || typeof obj.db.getEventsByIds != 'function') { page(aroundId != null ? { aroundId: aroundId, aroundMissing: true } : null); return; }
+                    // the page (under the same filters) that holds this event: a cited event that is not loaded yet
+                    obj.db.getEventsByIds(command.nodeid, [aroundId], function (found) {
+                        var ev = (Array.isArray(found) ? found : []).filter(function (e) { return e != null && String(e._id) === aroundId && e.nodeid == command.nodeid; })[0];
+                        var tc = (ev != null) ? Number(ev.tc) : NaN;
+                        if (ev == null || !isFinite(tc)) { q.skip = 0; page({ aroundId: aroundId, aroundMissing: true }); return; }
+                        var newerQ = Object.assign({}, q, { since: Math.max(Number(q.since) || 0, tc + 1), skip: 0, limit: 1 });
+                        obj.db.getEventsFor(command.nodeid, opts, newerQ, function (x, newer) {
+                            q.skip = Math.floor((Number(newer) || 0) / q.limit) * q.limit;
+                            page({ aroundId: aroundId });
+                        });
                     });
                   });
                 };
@@ -2112,19 +2346,38 @@ body.night #pluginEventLog {
             obj._cfgCache = {};   // ingest filters pick up the change with the next batch
             var opts = {...command.opts, ...{}};
             var isDefault = (command.id == '_default');
-            var saved = isDefault
-                ? obj.db.updateDefaultConfig(opts).then(function () {
+            // The config set is sent to agents and to the device tab: the only Assistant field it may hold is the id
+            // of the endpoint its devices use. Only full administrators choose it (the Assistant is theirs to
+            // manage); for anyone else the field is left out, and every backend keeps the stored value (they merge).
+            for (var ak in opts) { if (ak != 'aiEndpointId' && /^ai[A-Z]/.test(ak)) delete opts[ak]; }
+            if (!obj.isFullAdmin(myparent)) delete opts.aiEndpointId;
+            var epCheck = Promise.resolve(true);
+            if (opts.aiEndpointId !== undefined) {
+                if (opts.aiEndpointId === null) opts.aiEndpointId = '';
+                if (typeof opts.aiEndpointId != 'string') epCheck = Promise.resolve(false);
+                else if (opts.aiEndpointId !== '') {
+                    var aiStore = (obj.ai != null) ? obj.ai.store : null;
+                    epCheck = (aiStore == null || typeof aiStore.getEndpoint != 'function') ? Promise.resolve(false)
+                        : Promise.resolve(aiStore.getEndpoint(opts.aiEndpointId)).then(function (ep) { return ep != null; }, function () { return false; });
+                }
+            }
+            var saved = epCheck.then(function (epOk) {
+                if (!epOk) { var ue = new Error('Unknown Assistant endpoint'); ue.unknownEndpoint = true; throw ue; }
+                return isDefault ? obj.db.updateDefaultConfig(opts).then(function () {
                     if (opts.retentionDays != null && typeof obj.db.setRetention == 'function') obj.db.setRetention(opts.retentionDays);
                     return '';
                   })
                 : obj.db.updateConfig(command.id, opts).then(function (d) { return (d != null && d.insertedId) || command.id; });
+            });
             saved
             .then(function (savedId) {
+                obj._cfgCache = {};   // again: a batch that arrived while the save was pending cached the old set
                 return obj.db.getAllConfigSets().then(function (sets) {
                     sendAdmin({ method: 'adminUpdateConfigSets', sets: sets, selected: savedId, saved: true, defaultSet: isDefault, name: opts.name });
                 });
             })
             .catch(function (e) {
+                if (e && e.unknownEndpoint) { sendAdmin({ method: 'adminSaveFailed', error: 'Unknown Assistant endpoint' }); return; }
                 console.log('EVENTLOG: Something went wrong saving the config: ' + ((e && e.message) || e));
                 sendAdmin({ method: 'adminSaveFailed', error: String((e && e.message) || e).substring(0, 200) });
             });

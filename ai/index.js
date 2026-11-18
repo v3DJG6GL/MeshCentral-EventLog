@@ -394,7 +394,8 @@ function create(o) {
         inflight.set(uid, (inflight.get(uid) || 0) + 1);
         try {
             let key = null;
-            try { key = await store.resolveKey(S.ep); } catch (e) { key = null; }
+            // S.ep is the session's copy without the stored key: read the key from the stored endpoint per turn
+            try { const cur = await store.getEndpoint(S.ep.id); key = await store.resolveKey(cur || S.ep); } catch (e) { key = null; }
             const adapter = adapters.get(S.ep.format);
             if (!adapter) { sendS(S, 'onAiError', { reqId: S.reqId, code: 'model', message: 'Unknown API format', retryable: false }); return; }
             const epBase = { id: S.ep.id, baseUrl: S.ep.baseUrl, model: S.ep.model, maxOutputTokens: S.budget.maxOutput, numCtx: Number(S.ep.numCtx) > 0 ? Number(S.ep.numCtx) : null, ollamaNative: S.budget.ollamaNative, quirks: S.ep.quirks || null, format: S.ep.format };
