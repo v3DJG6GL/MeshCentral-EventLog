@@ -149,3 +149,29 @@ test('openai-chat: listModels (vLLM max_model_len) and probe of a non-Ollama ser
     const p3 = await chat.probe(ep(), deps);
     assert.deepStrictEqual([p3.ok, p3.code], [false, 'auth']);
 });
+
+test('openai-chat: listModels reads llama.cpp-style meta.n_ctx / meta.n_ctx_train', async function () {
+    mock.always('/v1/models', { json: { object: 'list', data: [
+        { id: 'strata', object: 'model', meta: { n_ctx: 16384, n_ctx_train: 131072 } },
+        { id: 'llama', object: 'model', owned_by: 'llamacpp', meta: { n_ctx_train: 131072 } },
+        { id: 'loading', object: 'model', meta: null }
+    ] } });
+    const deps = { request: function (o) { return http.request(o); } };
+    const models = await chat.listModels(ep(), deps);
+    assert.deepStrictEqual(models, [{ id: 'strata', ctx: 16384 }, { id: 'llama', ctx: 131072, owner: 'llamacpp' }, { id: 'loading' }]);
+});
+
+test('openai-chat: probe names llama.cpp only when /props carries its build_info', async function () {
+    const deps = { request: function (o) { return http.request(o); } };
+    mock.always('/v1/models', { json: { object: 'list', data: [{ id: 'qwen3:8b', object: 'model' }] } });
+    mock.always('/props', { json: { default_generation_settings: { n_ctx: 8192 }, total_slots: 1 } });
+    mock.script('/v1/chat/completions', { json: { choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }] } });
+    const p = await chat.probe(ep(), deps);
+    assert.deepStrictEqual([p.ok, p.ctx, p.server], [true, 8192, null]);
+    mock.reset();
+    mock.always('/v1/models', { json: { object: 'list', data: [{ id: 'qwen3:8b', object: 'model' }] } });
+    mock.always('/props', { json: { default_generation_settings: { n_ctx: 8192 }, total_slots: 1, build_info: 'b6412-a1b2c3d4' } });
+    mock.script('/v1/chat/completions', { json: { choices: [{ message: { content: 'OK' }, finish_reason: 'stop' }] } });
+    const p2 = await chat.probe(ep(), deps);
+    assert.deepStrictEqual([p2.ok, p2.ctx, p2.server], [true, 8192, 'llama.cpp']);
+});

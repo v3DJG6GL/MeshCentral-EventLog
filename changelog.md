@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Fixed
+- Fetch models now shows the context size reported by llama.cpp-style servers (for example Strata), and Test connection no longer names such servers llama.cpp
 
 ## [0.3.0] - 2026-11-18
 ### Changed

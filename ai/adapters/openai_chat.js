@@ -206,7 +206,8 @@ async function listModels(ep, deps) {
     const data = C.isObj(r.json) && Array.isArray(r.json.data) ? r.json.data : Array.isArray(r.json) ? r.json : [];
     return data.filter(function (m) { return C.isObj(m) && typeof m.id === 'string'; }).map(function (m) {
         const o = { id: m.id };
-        const ctx = C.num(m.max_model_len) || C.num(m.context_length) || C.num(m.max_context_length) || (C.isObj(m.top_provider) && C.num(m.top_provider.context_length));
+        const meta = C.isObj(m.meta) ? m.meta : null; // llama.cpp-style servers: meta.n_ctx (runtime) or meta.n_ctx_train (llama-server)
+        const ctx = C.num(m.max_model_len) || C.num(m.context_length) || C.num(m.max_context_length) || (C.isObj(m.top_provider) && C.num(m.top_provider.context_length)) || (meta && (C.num(meta.n_ctx) || C.num(meta.n_ctx_train)));
         if (ctx) o.ctx = ctx;
         if (m.owned_by) o.owner = String(m.owned_by);
         return o;
@@ -251,7 +252,10 @@ async function probe(ep, deps) {
             const p = await C.getJson(deps, { url: C.ollamaRoot(ep.baseUrl) + '/props', method: 'GET', headers: authHeaders(ep), totalTimeoutMs: 8000 });
             const g = C.isObj(p.json) && C.isObj(p.json.default_generation_settings) ? p.json.default_generation_settings : null;
             const nctx = C.num(g && g.n_ctx) || C.num(p.json && p.json.n_ctx);
-            if (nctx) { out.ctx = out.ctx || nctx; out.server = out.server || 'llama.cpp'; }
+            if (nctx) out.ctx = out.ctx || nctx;
+            // Other servers answer /props in the same shape; only llama-server's build_info ("b<build>-<commit>") names it.
+            const bi = C.isObj(p.json) && typeof p.json.build_info === 'string' ? p.json.build_info : '';
+            if (/^b\d+-[0-9a-f]+/i.test(bi)) out.server = out.server || 'llama.cpp';
         } catch (e) { }
 
         const req = buildRequest(Object.assign({}, ep, { ollamaNative: false, maxOutputTokens: 16 }), { system: '', items: [{ role: 'user', text: 'Reply with OK.' }] }, [PROBE_TOOL], { stream: false, toolChoice: 'auto' });
