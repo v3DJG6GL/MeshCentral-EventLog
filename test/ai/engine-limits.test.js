@@ -220,7 +220,7 @@ test('contextFull from the server in Ask -> one retry in a new segment', async f
     t.close();
 });
 
-test('maxSentKB reached -> tool use stops for the turn', async function () {
+test('an explicit maxSentKB is used as-is (also below the automatic value) -> tool use stops for the turn', async function () {
     mock.script(CHAT,
         { sse: chatSse({ calls: [{ id: 'c1', name: 'get_events', args: { limit: 50 } }] }) },
         { sse: chatSse({ text: 'done' }) });
@@ -228,6 +228,62 @@ test('maxSentKB reached -> tool use stops for the turn', async function () {
     await t.start('ask', { text: 'q' });
     assert.ok(t.last('onAiDone'));
     assert.strictEqual(chatReqs()[1].body.tool_choice, 'none');
+    t.close();
+});
+
+test('turnLimits: tool calls follow the step limit unless set; data per answer scales with the context unless set', function () {
+    const { turnLimits } = require('../../ai/engine.js');
+    const B = function (ctx) { return { ctx: ctx, maxOutput: 1024, input: ctx - 1024 }; };
+    let L = turnLimits({ maxRounds: 15, maxCalls: null, maxSentKB: null }, B(8192), {});
+    assert.deepStrictEqual([L.maxRounds, L.maxCalls, L.perRound, L.maxSentKB, L.maxSentBytes], [15, 45, 4, 400, 400 * 1024]);
+    L = turnLimits({ maxRounds: 50 }, B(262144), {});
+    assert.deepStrictEqual([L.maxCalls, L.maxSentKB], [150, 768]);
+    L = turnLimits({ maxRounds: 2 }, B(200000), {});
+    assert.deepStrictEqual([L.maxCalls, L.maxSentKB], [6, Math.ceil(200000 * 3 / 1024)]);
+    // explicit values win, also below the automatic ones
+    L = turnLimits({ maxRounds: 15, maxCalls: 7, maxSentKB: 64 }, B(262144), {});
+    assert.deepStrictEqual([L.maxCalls, L.maxSentKB], [7, 64]);
+    L = turnLimits({ maxRounds: 2, maxCalls: 100, maxSentKB: 8192 }, B(8192), {});
+    assert.deepStrictEqual([L.maxCalls, L.maxSentKB], [100, 8192]);
+    L = turnLimits({}, null, {});
+    assert.deepStrictEqual([L.maxRounds, L.maxCalls, L.maxSentKB], [15, 45, 400]);
+});
+
+function manyCalls(n) { const c = []; for (let i = 0; i < n; i++) c.push({ id: 'k' + i, name: 'event_facets', args: {} }); return c; }
+
+test('the tool call cap follows the step limit (3 per step): 25 calls in one round no longer end tool use at 10 steps', async function () {
+    mock.script(CHAT, { sse: chatSse({ calls: manyCalls(25) }) }, { sse: chatSse({ text: 'done' }) });
+    const t = F.setup({ mock: mock, settings: { limits: { maxRounds: 10, maxCalls: null } } });
+    await t.start('ask', { text: 'q' });
+    assert.ok(t.last('onAiDone'), methods(t));
+    assert.strictEqual(chatReqs()[1].body.tool_choice, undefined, 'still auto: 25 < 30');
+    t.close();
+});
+
+test('the tool call cap: 7 calls with 2 steps (cap 6) or an explicit cap of 2 end tool use', async function () {
+    mock.script(CHAT, { sse: chatSse({ calls: manyCalls(7) }) }, { sse: chatSse({ text: 'done' }) });
+    let t = F.setup({ mock: mock, settings: { limits: { maxRounds: 2, maxCalls: null } } });
+    await t.start('ask', { text: 'q' });
+    assert.ok(t.last('onAiDone'), methods(t));
+    assert.strictEqual(chatReqs()[1].body.tool_choice, 'none');
+    t.close();
+    mock.reset();
+    mock.script(CHAT, { sse: chatSse({ calls: manyCalls(3) }) }, { sse: chatSse({ text: 'done' }) });
+    t = F.setup({ mock: mock, settings: { limits: { maxRounds: 10, maxCalls: 2 } } });
+    await t.start('ask', { text: 'q' });
+    assert.ok(t.last('onAiDone'), methods(t));
+    assert.strictEqual(chatReqs()[1].body.tool_choice, 'none');
+    t.close();
+});
+
+test('automatic data cap (maxSentKB null) does not end tool use early', async function () {
+    mock.script(CHAT,
+        { sse: chatSse({ calls: [{ id: 'c1', name: 'get_events', args: { limit: 50 } }] }) },
+        { sse: chatSse({ text: 'done' }) });
+    const t = F.setup({ mock: mock, settings: { limits: { maxSentKB: null } }, ep: { contextTokens: 262144 } });
+    await t.start('ask', { text: 'q' });
+    assert.ok(t.last('onAiDone'), methods(t));
+    assert.strictEqual(chatReqs()[1].body.tool_choice, undefined);
     t.close();
 });
 

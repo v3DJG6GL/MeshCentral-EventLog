@@ -7,7 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Changed
+- Assistant: default daily limits are 100 questions and 3,000,000 tokens per user, and up to 15 steps per answer (adjustable up to 50); the per-answer tool call and data caps now scale with the step limit and the model's context. Saved settings that still had the old defaults (40 questions, 300,000 tokens, 8 steps, 400 KB) switch to the new defaults; values you changed are kept.
+- Assistant admin page: *Tool calls per answer* and *Data per answer (KB)* can be set next to *Max steps per answer*; left empty they are automatic (3 tool calls per step; about 3 bytes per context token, at least 400 KB). A set data limit is used as it is, so it can also be lower than the automatic one
+- Assistant admin page: Test connection shows the authentication step as *API key* with "No API key needed: the server accepted the request" when no key is configured
+
 ### Fixed
+- Assistant: an endpoint tested before its first save is now saved with the detected context size (it was assumed to be 8,192 tokens until tested again)
 - Assistant admin page: empty limit fields show the value that applies (default or detected, e.g. 262,144 tokens), and Test connection no longer shows 0 ms for steps answered by the same request
 
 ## [0.3.1] - 2026-11-18

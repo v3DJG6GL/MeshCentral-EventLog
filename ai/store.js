@@ -28,7 +28,10 @@
 //   keySource() -> secrets.source
 // Settings (id 'aiSettings'): getSettings() -> defaults merged with the stored document (cached);
 //   saveSettings(input) -> Promise<settings>: known fields only, numbers clamped, enums checked; fields missing
-//   from input keep their current value. Quotas of 0 mean "no limit".
+//   from input keep their current value. Quotas of 0 mean "no limit". limits.maxCalls and limits.maxSentKB may be
+//   null (or '') for "automatic": 3 x maxRounds tool calls, and about 3 bytes per context token (at least 400 KB).
+//   The stored document also carries sv (SETTINGS_VERSION, server-side only); an older document is migrated once
+//   on load (old defaults -> new defaults) and saved again; a failed save is logged and does not fail the load.
 // Acknowledgements: getAck(userid, epId) -> Promise<bool>, setAck(userid, epId) -> Promise<bool>.
 // Audit: auditAdd(rec) -> Promise<bool> (never rejects; adds time; userid/nodeid copied from user/node strings;
 //   keys with '.' or a leading '$' dropped, steps[*].args stringified; transcript dropped unless
@@ -52,8 +55,8 @@ const MAX_TRANSCRIPT = 256 * 1024;
 
 const DEFAULTS = {
     enabled: true,
-    limits: { maxRounds: 8, maxOutputTokens: 2048, timeoutSec: 120, maxSentKB: 400 },
-    quotas: { perUserQuestions: 40, perUserTokens: 300000 },
+    limits: { maxRounds: 15, maxCalls: null, maxOutputTokens: 2048, timeoutSec: 120, maxSentKB: null },
+    quotas: { perUserQuestions: 100, perUserTokens: 3000000 },
     retentionDays: 90,
     storeTranscripts: false,
     previewPolicy: 'every',
@@ -61,10 +64,29 @@ const DEFAULTS = {
     categories: { deviceSummary: true, network: true, storedEvents: true, meshEvents: true, notes: false, software: false }
 };
 const RANGES = {
-    limits: { maxRounds: [1, 30], maxOutputTokens: [64, 128000], timeoutSec: [10, 900], maxSentKB: [16, 8192] },
+    limits: { maxRounds: [1, 50], maxCalls: [1, 200], maxOutputTokens: [64, 128000], timeoutSec: [10, 900], maxSentKB: [16, 8192] },
     quotas: { perUserQuestions: [0, 100000], perUserTokens: [0, 1000000000] },
     retentionDays: [1, 3650]
 };
+// limits where null means "automatic" (the engine derives the value: maxCalls 3 x maxRounds, maxSentKB from the context)
+const NULLABLE = { limits: { maxCalls: true, maxSentKB: true } };
+
+// Version of the stored settings document (field sv, written by the server only; not part of the settings
+// object). Documents without sv (or older) are migrated once on load: values still equal to an earlier default
+// become the current default, any other value is kept.
+const SETTINGS_VERSION = 2;
+const OLD_DEFAULTS = [
+    { grp: 'quotas', key: 'perUserQuestions', from: 40, to: 100 },
+    { grp: 'quotas', key: 'perUserTokens', from: 300000, to: 3000000 },
+    { grp: 'limits', key: 'maxRounds', from: 8, to: 15 },
+    { grp: 'limits', key: 'maxSentKB', from: 400, to: null }
+];
+// rewrites an unversioned stored document in place; returns true when it needs to be saved again
+function migrateSettings(d) {
+    if (!isObj(d) || (typeof d.sv === 'number' && d.sv >= SETTINGS_VERSION)) return false;
+    for (const m of OLD_DEFAULTS) if (isObj(d[m.grp]) && d[m.grp][m.key] === m.from) d[m.grp][m.key] = m.to;
+    return true;
+}
 
 function clone(o) { return JSON.parse(JSON.stringify(o)); }
 function isObj(x) { return x != null && typeof x === 'object' && !Array.isArray(x); }
@@ -143,7 +165,7 @@ function create(opts) {
     opts = opts || {};
     const db = opts.db, secrets = opts.secrets, netguard = opts.netguard;
     const log = opts.log || function (m) { console.log(m); };
-    let settingsCache = null;
+    let settingsCache = null, settingsLoading = null;
     let chain = Promise.resolve();
 
     function warn(m) { try { log('EVENTLOG AI: ' + m); } catch (e) { } }
@@ -301,7 +323,11 @@ function create(opts) {
         s.retentionDays = clampInt(input.retentionDays, RANGES.retentionDays, s.retentionDays);
         for (const grp of ['limits', 'quotas']) {
             if (!isObj(input[grp])) continue;
-            for (const k of Object.keys(DEFAULTS[grp])) s[grp][k] = clampInt(input[grp][k], RANGES[grp][k], s[grp][k]);
+            for (const k of Object.keys(DEFAULTS[grp])) {
+                const v = input[grp][k];
+                if (NULLABLE[grp] && NULLABLE[grp][k] && (v === null || v === '')) s[grp][k] = null;
+                else s[grp][k] = clampInt(v, RANGES[grp][k], s[grp][k]);
+            }
         }
         for (const grp of ['redact', 'categories']) {
             if (!isObj(input[grp])) continue;
@@ -309,12 +335,26 @@ function create(opts) {
         }
         return s;
     }
+    function putSettings(s) { return db.aiPutDoc('aiSettings', 'aiSettings', Object.assign({}, s, { sv: SETTINGS_VERSION })); }
+    async function loadSettings() {
+        let d = null;
+        try { d = await db.aiGetDoc('aiSettings'); }
+        catch (e) { warn('could not read settings (' + (e && e.message ? String(e.message).slice(0, 120) : 'error') + '); using defaults'); return null; }
+        const migrated = migrateSettings(d);
+        const s = mergeSettings(DEFAULTS, d);
+        if (migrated) {
+            try { await putSettings(s); }
+            catch (e) { warn('could not save the migrated settings (' + (e && e.message ? String(e.message).slice(0, 120) : 'error') + ')'); }
+        }
+        return s;
+    }
     async function getSettings() {
         if (!settingsCache) {
-            let d = null;
-            try { d = await db.aiGetDoc('aiSettings'); }
-            catch (e) { warn('could not read settings (' + (e && e.message ? String(e.message).slice(0, 120) : 'error') + '); using defaults'); return clone(DEFAULTS); }
-            settingsCache = mergeSettings(DEFAULTS, d);
+            // one load at a time, so a migration is written once even when several callers start together
+            if (!settingsLoading) settingsLoading = loadSettings().finally(function () { settingsLoading = null; });
+            const s = await settingsLoading;
+            if (!s) return clone(DEFAULTS);
+            if (!settingsCache) settingsCache = s;
         }
         return clone(settingsCache);
     }
@@ -322,7 +362,7 @@ function create(opts) {
         const cur = await getSettings();
         const s = mergeSettings(cur, input);
         settingsCache = null;
-        await db.aiPutDoc('aiSettings', 'aiSettings', s);
+        await putSettings(s);
         settingsCache = s;
         return clone(s);
     }
@@ -406,4 +446,4 @@ function create(opts) {
     };
 }
 
-module.exports = { create, validateEndpoint, sanitize, DEFAULTS, FORMATS, PRESETS, TOOL_MODES, ID_RE };
+module.exports = { create, validateEndpoint, sanitize, DEFAULTS, SETTINGS_VERSION, FORMATS, PRESETS, TOOL_MODES, ID_RE };

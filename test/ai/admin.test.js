@@ -60,7 +60,7 @@ function setup(opts) {
     const secrets = secretsMod.create({ keyFile: path.join(tmp, 'k' + (++n) + '.key'), fallbackSecret: 'x', log: log, env: { LLM_KEY: 'env-key-value-0000' } });
     const store = storeMod.create({ db: db, secrets: secrets, netguard: netguard, log: log });
     let proxyCalls = 0;
-    const admin = adminMod.create({ store: store, db: db, netguard: netguard, adapters: adapters, llm: llm, http: opts.http || http, getProxyAgent: function () { proxyCalls++; return opts.agent; }, log: log });
+    const admin = adminMod.create({ store: store, db: db, netguard: netguard, adapters: adapters, llm: llm, http: opts.http || http, getProxyAgent: function () { proxyCalls++; return opts.agent; }, log: log, testAfterSave: opts.testAfterSave === true });
     const sent = [];
     const myparent = { user: { _id: 'user/d/admin', siteadmin: 0xFFFFFFFF }, ws: { readyState: 1, send: function (s) { sent.push(JSON.parse(s)); } } };
     let rid = 0;
@@ -146,7 +146,7 @@ test('settings are clamped; errors carry scope settings', async function () {
     const t = setup();
     let r = await t.call({ pluginaction: 'aiAdminSaveSettings', settings: { limits: { maxRounds: 1000 }, previewPolicy: 'once', bogus: true } });
     assert.strictEqual(r.method, 'aiAdminSettingsSaved');
-    assert.strictEqual(r.settings.limits.maxRounds, 30);
+    assert.strictEqual(r.settings.limits.maxRounds, 50);
     assert.strictEqual(r.settings.previewPolicy, 'once');
     assert.ok(!('bogus' in r.settings));
     r = await t.call({ pluginaction: 'aiAdminSaveSettings', settings: 'nope' });
@@ -164,6 +164,8 @@ test('test: openai-chat with tools, stored key, caps and lastTest saved', async 
     assert.deepStrictEqual(r.steps.map(function (s) { return s.name; }), ['resolve', 'connect', 'auth', 'model', 'tools', 'context']);
     assert.ok(r.steps.every(function (s) { return s.ok === true && typeof s.ms === 'number' && typeof s.detail === 'string' && s.detail.length <= 300; }), JSON.stringify(r.steps));
     assert.strictEqual(r.network, 'loopback');
+    assert.strictEqual(step(r, 'auth').detail, 'API key accepted');
+    assert.ok(!('noKey' in step(r, 'auth')));
     assert.strictEqual(r.caps.tools, true);
     assert.strictEqual(r.caps.ctx, 32768);
     assert.strictEqual(r.caps.server, 'vllm');
@@ -179,6 +181,31 @@ test('test: openai-chat with tools, stored key, caps and lastTest saved', async 
     noKeyAnywhere(t);
 });
 
+test('save: a new endpoint is tested in the background (caps and lastTest stored, aiAdminData pushed)', async function () {
+    const t = setup({ testAfterSave: true });
+    mock.always('/v1/models', { json: { data: [{ id: 'm1', owned_by: 'vllm', max_model_len: 65536 }] } });
+    mock.always('/v1/chat/completions', { json: { choices: [{ index: 0, message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 1 } } });
+    const saved = await t.call({ pluginaction: 'aiAdminSaveEndpoint', endpoint: chatEp() });
+    assert.strictEqual(saved.method, 'aiAdminSaved');
+    assert.strictEqual(saved.endpoint.caps, null, 'the save reply does not wait for the test');
+    const t0 = Date.now();
+    let push;
+    while (!(push = t.sent.find(function (m) { return m.method === 'aiAdminData' && m.reqId == null; })) && Date.now() - t0 < 10000) await new Promise(function (r) { setTimeout(r, 5); });
+    assert.ok(push, 'aiAdminData pushed');
+    const pe = push.endpoints.find(function (e) { return e.id === saved.endpoint.id; });
+    assert.strictEqual(pe.caps.ctx, 65536);
+    const ep = await t.store.getEndpoint(saved.endpoint.id);
+    assert.strictEqual(ep.caps.ctx, 65536);
+    assert.strictEqual(ep.caps.tools, true);
+    assert.strictEqual(ep.lastTest.ok, true);
+    // a save that keeps address, model and format keeps the caps and does not test again
+    const n = mock.requests.length;
+    await t.call({ pluginaction: 'aiAdminSaveEndpoint', endpoint: chatEp({ id: saved.endpoint.id, name: 'Renamed' }) });
+    await new Promise(function (r) { setTimeout(r, 50); });
+    assert.strictEqual(mock.requests.length, n);
+    assert.strictEqual((await t.store.getEndpoint(saved.endpoint.id)).caps.ctx, 65536);
+});
+
 test('test: model without tool support -> ok with tools false; draft results are not stored', async function () {
     const t = setup();
     const saved = await t.call({ pluginaction: 'aiAdminSaveEndpoint', endpoint: chatEp() });
@@ -186,6 +213,8 @@ test('test: model without tool support -> ok with tools false; draft results are
     mock.always('/v1/chat/completions', { status: 400, json: { error: { message: 'model m1 does not support tools', type: 'invalid_request_error' } } });
     const r = await t.call({ pluginaction: 'aiAdminTest', draft: Object.assign(chatEp(), { id: saved.endpoint.id, keyAction: 'keep' }) });
     assert.strictEqual(r.ok, true);
+    assert.strictEqual(step(r, 'auth').noKey, true);
+    assert.strictEqual(step(r, 'auth').detail, 'No API key needed: the server accepted the request');
     assert.strictEqual(step(r, 'tools').ok, false);
     assert.match(step(r, 'tools').detail, /summary/);
     assert.strictEqual(step(r, 'context').ok, null);

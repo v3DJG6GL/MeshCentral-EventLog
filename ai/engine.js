@@ -18,7 +18,7 @@
 //     buildDigest(tokens) -> Promise<{ text, refs }>      summary fallback when the endpoint rejects tools
 //     systemPrompt(toolNames) -> string                   rebuilt for the summary fallback
 //     onToolsUnsupported()                                persist caps.tools = false
-//     timeouts { idleMs, totalMs, connectMs }, flushMs (75), maxCallsPerRound (4), maxCalls (24)
+//     timeouts { idleMs, totalMs, connectMs }, flushMs (75), maxCallsPerRound (4), maxCalls (settings.limits.maxCalls, else 3 x maxRounds)
 //   }
 // Transcript items are append-only within a turn (provider-native raw blocks replay verbatim); a failed or
 // cancelled turn is rolled back as a whole so the next question starts from the last good state.
@@ -69,6 +69,19 @@ function transcriptForAudit(t) {
     } catch (e) { return null; }
 }
 function capTokens(input) { return Math.max(400, Math.min(6000, Math.floor(0.2 * input))); }
+// Per-turn caps. Tool calls (single data lookups across all steps): settings.limits.maxCalls, automatic (null)
+// 3 per allowed step; deps.maxCalls overrides both. New data sent to the model in one turn (the question plus tool
+// results, not the history resent each round): settings.limits.maxSentKB, automatic (null) about 3 bytes per
+// context token and at least 400 KB.
+function turnLimits(limits, B, deps) {
+    limits = limits || {}; deps = deps || {};
+    const maxRounds = Number(limits.maxRounds) > 0 ? Math.floor(Number(limits.maxRounds)) : 15;
+    const maxCalls = Number(deps.maxCalls) > 0 ? Number(deps.maxCalls) : (Number(limits.maxCalls) > 0 ? Math.floor(Number(limits.maxCalls)) : 3 * maxRounds);
+    const perRound = Number(deps.maxCallsPerRound) > 0 ? Number(deps.maxCallsPerRound) : 4;
+    const ctxKB = B && Number(B.ctx) > 0 ? Math.ceil(Number(B.ctx) * 3 / 1024) : 0;
+    const maxSentKB = Number(limits.maxSentKB) > 0 ? Number(limits.maxSentKB) : Math.max(400, ctxKB);
+    return { maxRounds: maxRounds, maxCalls: maxCalls, perRound: perRound, maxSentKB: maxSentKB, maxSentBytes: maxSentKB * 1024 };
+}
 
 async function runTurn(S, userText, deps) {
     try { await turn(S, userText, deps); }
@@ -82,11 +95,9 @@ async function turn(S, userText, deps) {
     const log = typeof deps.log === 'function' ? deps.log : function () { };
     const settings = deps.settings || {};
     const limits = settings.limits || {};
-    const maxRounds = Number(limits.maxRounds) > 0 ? Number(limits.maxRounds) : 8;
-    const maxCalls = Number(deps.maxCalls) > 0 ? Number(deps.maxCalls) : 24;
-    const perRound = Number(deps.maxCallsPerRound) > 0 ? Number(deps.maxCallsPerRound) : 4;
-    const maxSent = (Number(limits.maxSentKB) > 0 ? Number(limits.maxSentKB) : 512) * 1024;
     const B = deps.budget || { ctx: 8192, maxOutput: 1024, input: budgetMod.inputBudget(8192, 1024) };
+    const L = turnLimits(limits, B, deps);
+    const maxRounds = L.maxRounds, maxCalls = L.maxCalls, perRound = L.perRound, maxSent = L.maxSentBytes;
     const cap = capTokens(B.input);
     const flushMs = Number(deps.flushMs) > 0 ? Number(deps.flushMs) : 75;
     const tmo = deps.timeouts || {};
@@ -377,4 +388,4 @@ function isCommandText(structured, s) {
     return structured.nextSteps.some(function (st) { return st && st.command && st.command.text === s; });
 }
 
-module.exports = { runTurn, capTokens };
+module.exports = { runTurn, capTokens, turnLimits };

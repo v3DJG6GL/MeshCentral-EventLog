@@ -1,7 +1,8 @@
 'use strict';
 // Server side of the Assistant admin page (full administrators only; the caller checks siteadmin 0xFFFFFFFF).
 //
-// create({ store, db, netguard, adapters, llm, http, getProxyAgent, log }) -> { handle(command, myparent) -> bool }
+// create({ store, db, netguard, adapters, llm, http, getProxyAgent, log, testAfterSave? (default true) })
+//   -> { handle(command, myparent) -> bool }
 //   handle returns false for an action it does not know, true otherwise (the reply is sent asynchronously).
 //   Replies go to myparent.ws as { action:'plugin', plugin:'eventlog', method, reqId?, ... }:
 //   aiAdminGet            -> aiAdminData { endpoints:[public], settings, usedBy:{epId:[set names]}, keySource }
@@ -10,7 +11,10 @@
 //   aiAdminSaveSettings   -> aiAdminSettingsSaved { settings }                  | aiAdminError { scope:'settings' }
 //   aiAdminTest {id|draft}-> aiAdminTestResult { ok, steps:[{name,ok,ms,detail}], network, caps }
 //       steps resolve, connect, auth, model, tools, context; a step that could not run has ok:null.
-//       Only a test of a saved endpoint ({id} without draft) stores caps, lastTest and network.
+//       Only a test of a saved endpoint ({id} without draft) stores caps, lastTest and network. The auth step
+//       has noKey:true when no API key is configured.
+//   A save that leaves the endpoint without caps (new, or address/model/format changed) tests it in the background
+//   the same way (within the MAX_INFLIGHT limit) and then pushes aiAdminData without reqId.
 //   aiAdminModels {id|draft} -> aiAdminModelsResult { ok, models:[{id, ctx?, tools?}], network, error? }
 //       network: 'loopback'|'private'|'public' once the address was checked, else null (as in aiAdminTestResult)
 // A draft needs no name (it is never stored); a draft for aiAdminModels needs no model either.
@@ -34,6 +38,7 @@ function create(o) {
     const store = o.store, db = o.db, netguard = o.netguard, adapters = o.adapters, httpMod = o.http;
     const getProxyAgent = typeof o.getProxyAgent === 'function' ? o.getProxyAgent : function () { return undefined; };
     const log = o.log || function (m) { console.log(m); };
+    const testAfterSave = o.testAfterSave !== false;
     let inflight = 0;
 
     function warn(m) { try { log('EVENTLOG AI: ' + m); } catch (e) { } }
@@ -168,6 +173,7 @@ function create(o) {
         const t0 = Date.now();
         const steps = [];
         const add = function (name, ok, ms, detail) { steps.push({ name: name, ok: ok, ms: ms, detail: detail }); };
+        const authStep = function (ok, detail) { add('auth', ok, 0, detail); if (!key) steps[steps.length - 1].noKey = true; };
         const skip = function (names) { for (const n of names) add(n, null, 0, 'Skipped'); };
         const tgt = await resolveTarget(command);
         const ep = tgt.ep, key = tgt.apiKey;
@@ -223,11 +229,11 @@ function create(o) {
         }
         add('connect', true, probeMs, short('Server answered' + (pr.server ? ' (' + pr.server + ')' : '')));
         if (code === 'auth') {
-            add('auth', false, 0, detail || 'Authentication failed');
+            authStep(false, detail || 'Authentication failed');
             skip(['model', 'tools', 'context']);
             return { ok: false, steps: steps, network: chk.network, caps: null, tgt: tgt, ms: Date.now() - t0 };
         }
-        add('auth', true, 0, key ? 'API key accepted' : 'No API key needed');
+        authStep(true, key ? 'API key accepted' : 'No API key needed: the server accepted the request');
         if (code) {
             add('model', false, 0, detail || 'The model request failed');
             skip(['tools', 'context']);
@@ -249,6 +255,16 @@ function create(o) {
         return { ok: true, steps: steps, network: chk.network, caps: caps, tgt: tgt, ms: Date.now() - t0 };
     }
 
+    // caps, network and lastTest of a test of a saved endpoint
+    async function storeTestResult(r) {
+        try {
+            if (r.caps) await store.setCaps(r.tgt.id, r.caps);
+            if (r.network) await store.setNetwork(r.tgt.id, r.network);
+            const failed = r.steps.find(function (s) { return s.ok === false && s.name !== 'tools'; });
+            await store.setLastTest(r.tgt.id, { ok: r.ok, at: Date.now(), ms: r.ms, detail: failed ? failed.detail : (r.steps.find(function (s) { return s.name === 'model'; }) || {}).detail });
+        } catch (e) { warn('could not store the test result (' + errText(e) + ')'); }
+    }
+
     async function doTest(command, myparent) {
         const reqId = command.reqId;
         let r;
@@ -259,15 +275,24 @@ function create(o) {
             safeSend(myparent, { method: 'aiAdminTestResult', reqId: reqId, ok: false, steps: [{ name: 'resolve', ok: false, ms: 0, detail: msg }], network: null, caps: null });
             return;
         }
-        if (r.tgt.saved) {
-            try {
-                if (r.caps) await store.setCaps(r.tgt.id, r.caps);
-                if (r.network) await store.setNetwork(r.tgt.id, r.network);
-                const failed = r.steps.find(function (s) { return s.ok === false && s.name !== 'tools'; });
-                await store.setLastTest(r.tgt.id, { ok: r.ok, at: Date.now(), ms: r.ms, detail: failed ? failed.detail : (r.steps.find(function (s) { return s.name === 'model'; }) || {}).detail });
-            } catch (e) { warn('could not store the test result (' + errText(e) + ')'); }
-        }
+        if (r.tgt.saved) await storeTestResult(r);
         safeSend(myparent, { method: 'aiAdminTestResult', reqId: reqId, ok: r.ok, steps: r.steps, network: r.network, caps: r.caps });
+    }
+
+    // After a save that left the endpoint without caps (new, or address/model/format changed): test it in the
+    // background like a saved endpoint, so the engine knows the context size, then push fresh aiAdminData.
+    // Never delays the save reply; skipped while MAX_INFLIGHT tests run; errors are only logged.
+    function backgroundTest(id, myparent) {
+        if (inflight >= MAX_INFLIGHT) { warn('endpoint not tested after saving: too many tests are running'); return Promise.resolve(); }
+        inflight++;
+        return (async function () {
+            try {
+                const r = await runTest({ id: id });
+                if (r.tgt.saved) await storeTestResult(r);
+            } catch (e) { warn('endpoint test after saving failed (' + errText(e) + ')'); return; }
+            try { safeSend(myparent, Object.assign({ method: 'aiAdminData' }, await adminData())); }
+            catch (e) { warn('admin data failed (' + errText(e) + ')'); }
+        })().then(function () { inflight--; }, function () { inflight--; });
     }
 
     // ---- models ----
@@ -345,12 +370,16 @@ function create(o) {
         return used;
     }
 
+    async function adminData() {
+        const eps = await store.listEndpoints();
+        const settings = await store.getSettings();
+        const usedBy = await usedByMap();
+        return { endpoints: eps.map(store.publicEndpoint), settings: settings, usedBy: usedBy, keySource: store.keySource() || null };
+    }
+
     async function doGet(command, myparent) {
         try {
-            const eps = await store.listEndpoints();
-            const settings = await store.getSettings();
-            const usedBy = await usedByMap();
-            safeSend(myparent, { method: 'aiAdminData', reqId: command.reqId, endpoints: eps.map(store.publicEndpoint), settings: settings, usedBy: usedBy, keySource: store.keySource() || null });
+            safeSend(myparent, Object.assign({ method: 'aiAdminData', reqId: command.reqId }, await adminData()));
         } catch (e) {
             warn('admin data failed (' + errText(e) + ')');
             safeSend(myparent, { method: 'aiAdminError', reqId: command.reqId, scope: 'data', error: 'The Assistant settings could not be loaded' });
@@ -370,6 +399,7 @@ function create(o) {
             const msg = { method: 'aiAdminSaved', reqId: command.reqId, endpoint: store.publicEndpoint(ep) };
             if (ep.warning) msg.warning = short(ep.warning);
             safeSend(myparent, msg);
+            if (testAfterSave && !isObj(ep.caps) && ep.id) backgroundTest(ep.id, myparent);
         } catch (e) {
             safeSend(myparent, { method: 'aiAdminError', reqId: command.reqId, scope: 'endpoint', error: userError(e, 'Could not save the endpoint') });
         }

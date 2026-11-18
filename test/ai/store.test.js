@@ -260,7 +260,9 @@ test('settings: defaults, clamping, unknown keys dropped, partial update, cache'
     const d = await store.getSettings();
     assert.deepStrictEqual(d, storeMod.DEFAULTS);
     d.limits.maxRounds = 99;                                   // a copy: the cache is not affected
-    assert.strictEqual((await store.getSettings()).limits.maxRounds, 8);
+    assert.strictEqual((await store.getSettings()).limits.maxRounds, 15);
+    assert.deepStrictEqual(storeMod.DEFAULTS.limits, { maxRounds: 15, maxCalls: null, maxOutputTokens: 2048, timeoutSec: 120, maxSentKB: null });
+    assert.deepStrictEqual(storeMod.DEFAULTS.quotas, { perUserQuestions: 100, perUserTokens: 3000000 });
     const s = await store.saveSettings({
         enabled: 'yes', evil: 1, limits: { maxRounds: 99, maxOutputTokens: 1, timeoutSec: '300', maxSentKB: -5, extra: 3 },
         quotas: { perUserQuestions: 12.6, perUserTokens: 'abc' }, retentionDays: 0, storeTranscripts: true,
@@ -268,8 +270,8 @@ test('settings: defaults, clamping, unknown keys dropped, partial update, cache'
     });
     assert.strictEqual(s.enabled, true);
     assert.ok(!('evil' in s));
-    assert.deepStrictEqual(s.limits, { maxRounds: 30, maxOutputTokens: 64, timeoutSec: 300, maxSentKB: 16 });
-    assert.deepStrictEqual(s.quotas, { perUserQuestions: 13, perUserTokens: 300000 });
+    assert.deepStrictEqual(s.limits, { maxRounds: 50, maxCalls: null, maxOutputTokens: 64, timeoutSec: 300, maxSentKB: 16 });
+    assert.deepStrictEqual(s.quotas, { perUserQuestions: 13, perUserTokens: 3000000 });
     assert.strictEqual(s.retentionDays, 1);
     assert.strictEqual(s.storeTranscripts, true);
     assert.strictEqual(s.previewPolicy, 'every');
@@ -283,7 +285,16 @@ test('settings: defaults, clamping, unknown keys dropped, partial update, cache'
     assert.ok(!('evil' in stored));
     const s2 = await store.saveSettings({ previewPolicy: 'never', enabled: false });
     assert.strictEqual(s2.previewPolicy, 'never');
-    assert.strictEqual(s2.limits.maxRounds, 30);              // kept
+    assert.strictEqual(s2.limits.maxRounds, 50);              // kept
+    assert.strictEqual(s2.limits.maxSentKB, 16);              // kept
+    assert.strictEqual((await store.saveSettings({ limits: { maxRounds: 0 } })).limits.maxRounds, 1);
+    // maxCalls / maxSentKB: a number is clamped, null or '' means automatic; other limits ignore null
+    let s4 = await store.saveSettings({ limits: { maxCalls: 500, maxSentKB: 9000 } });
+    assert.deepStrictEqual([s4.limits.maxCalls, s4.limits.maxSentKB], [200, 8192]);
+    s4 = await store.saveSettings({ limits: { maxCalls: 0, maxSentKB: 3 } });
+    assert.deepStrictEqual([s4.limits.maxCalls, s4.limits.maxSentKB], [1, 16]);
+    s4 = await store.saveSettings({ limits: { maxCalls: null, maxSentKB: '', maxRounds: null } });
+    assert.deepStrictEqual([s4.limits.maxCalls, s4.limits.maxSentKB, s4.limits.maxRounds], [null, null, 1]);
     // a fresh store reads the stored document merged with defaults
     db.docs.set('aiSettings', { _id: 'aiSettings', type: 'aiSettings', limits: { maxRounds: 3 }, junk: 1 });
     const fresh = storeMod.create({ db: db, secrets: makeSecrets(), netguard: fakeNetguard(), log: function () { } });
@@ -291,6 +302,69 @@ test('settings: defaults, clamping, unknown keys dropped, partial update, cache'
     assert.strictEqual(s3.limits.maxRounds, 3);
     assert.strictEqual(s3.limits.maxOutputTokens, 2048);
     assert.ok(!('junk' in s3));
+});
+
+test('settings: an unversioned document with the old defaults is migrated once; changed values and sv:2 documents are kept', async function () {
+    function freshStore(db, logs) { return storeMod.create({ db: db, secrets: makeSecrets(), netguard: fakeNetguard(), log: function (m) { if (logs) logs.push(m); } }); }
+    // old defaults -> new defaults, saved once with sv:2 (concurrent first reads share one load)
+    const db = fakeDb();
+    let puts = 0;
+    const put = db.aiPutDoc;
+    db.aiPutDoc = function (id, type, doc) { if (id === 'aiSettings') puts++; return put(id, type, doc); };
+    db.docs.set('aiSettings', { _id: 'aiSettings', type: 'aiSettings', enabled: false,
+        limits: { maxRounds: 8, maxOutputTokens: 2048, timeoutSec: 120, maxSentKB: 400 }, quotas: { perUserQuestions: 40, perUserTokens: 300000 } });
+    const store = freshStore(db);
+    const [s] = await Promise.all([store.getSettings(), store.getSettings()]);
+    assert.deepStrictEqual(s.limits, { maxRounds: 15, maxCalls: null, maxOutputTokens: 2048, timeoutSec: 120, maxSentKB: null });
+    assert.deepStrictEqual(s.quotas, { perUserQuestions: 100, perUserTokens: 3000000 });
+    assert.strictEqual(s.enabled, false);
+    assert.ok(!('sv' in s));
+    assert.strictEqual(puts, 1);
+    let stored = db.docs.get('aiSettings');
+    assert.strictEqual(stored.sv, storeMod.SETTINGS_VERSION);
+    assert.strictEqual(stored.sv, 2);
+    assert.deepStrictEqual([stored.limits.maxRounds, stored.limits.maxSentKB, stored.quotas.perUserQuestions, stored.quotas.perUserTokens], [15, null, 100, 3000000]);
+    await store.getSettings();
+    await freshStore(db).getSettings();                        // now versioned: not saved again
+    assert.strictEqual(puts, 1);
+    // a later save keeps sv:2
+    await store.saveSettings({ limits: { maxRounds: 8 } });
+    stored = db.docs.get('aiSettings');
+    assert.deepStrictEqual([stored.sv, stored.limits.maxRounds], [2, 8]);
+    // ... and 8 is no longer read as an old default
+    assert.strictEqual((await freshStore(db).getSettings()).limits.maxRounds, 8);
+
+    // custom values are kept (values equal to an old default in the same document still move)
+    const db2 = fakeDb();
+    db2.docs.set('aiSettings', { _id: 'aiSettings', type: 'aiSettings',
+        limits: { maxRounds: 10, maxSentKB: 600 }, quotas: { perUserQuestions: 25, perUserTokens: 300000 } });
+    const s2 = await freshStore(db2).getSettings();
+    assert.deepStrictEqual([s2.limits.maxRounds, s2.limits.maxSentKB, s2.quotas.perUserQuestions, s2.quotas.perUserTokens], [10, 600, 25, 3000000]);
+    assert.strictEqual(db2.docs.get('aiSettings').sv, 2);
+
+    // a document with sv:2 is left alone, even when it holds the old default values
+    const db3 = fakeDb();
+    let puts3 = 0;
+    const put3 = db3.aiPutDoc;
+    db3.aiPutDoc = function (id, type, doc) { puts3++; return put3(id, type, doc); };
+    db3.docs.set('aiSettings', { _id: 'aiSettings', type: 'aiSettings', sv: 2,
+        limits: { maxRounds: 8, maxSentKB: 400 }, quotas: { perUserQuestions: 40, perUserTokens: 300000 } });
+    const s3 = await freshStore(db3).getSettings();
+    assert.deepStrictEqual([s3.limits.maxRounds, s3.limits.maxSentKB, s3.quotas.perUserQuestions, s3.quotas.perUserTokens], [8, 400, 40, 300000]);
+    assert.strictEqual(puts3, 0);
+
+    // no stored document: nothing to migrate, nothing written
+    const db4 = fakeDb();
+    assert.deepStrictEqual(await freshStore(db4).getSettings(), storeMod.DEFAULTS);
+    assert.ok(!db4.docs.has('aiSettings'));
+
+    // a failed migration save is logged and does not fail the load
+    const db5 = fakeDb(), logs5 = [];
+    db5.docs.set('aiSettings', { _id: 'aiSettings', type: 'aiSettings', limits: { maxRounds: 8 } });
+    db5.aiPutDoc = async function () { throw new Error('disk full'); };
+    const s5 = await freshStore(db5, logs5).getSettings();
+    assert.strictEqual(s5.limits.maxRounds, 15);
+    assert.ok(logs5.some(function (m) { return /^EVENTLOG AI: could not save the migrated settings \(disk full\)/.test(m); }), logs5.join('\n'));
 });
 
 test('audit: sanitising, transcript policy, usage, sweep', async function () {

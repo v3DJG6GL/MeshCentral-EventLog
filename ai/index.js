@@ -48,8 +48,8 @@ const CATEGORIES = {
 const CAT_IDS = Object.keys(CATEGORIES);
 const DEFAULT_SETTINGS = {
     enabled: false,
-    limits: { maxRounds: 8, maxOutputTokens: 2048, timeoutSec: 120, maxSentKB: 512 },
-    quotas: { perUserQuestions: 0, perUserTokens: 0 },
+    limits: { maxRounds: 15, maxCalls: null, maxOutputTokens: 2048, timeoutSec: 120, maxSentKB: null },
+    quotas: { perUserQuestions: 100, perUserTokens: 3000000 },
     retentionDays: 90, storeTranscripts: false, previewPolicy: 'every',
     redact: { users: true, hosts: true, domains: true, ips: true, macs: true, emails: true, sids: true, paths: true, secrets: true, serials: true },
     categories: { deviceSummary: true, network: false, storedEvents: true, meshEvents: false, notes: false, software: false }

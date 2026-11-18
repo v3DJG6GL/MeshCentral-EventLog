@@ -897,7 +897,8 @@
           li.appendChild(mark);
           var sr = document.createElement('span'); sr.className = 'elSr'; sr.textContent = (s.ok === true) ? 'Passed: ' : (s.ok === false) ? 'Failed: ' : 'Not run: ';
           li.appendChild(sr);
-          li.appendChild(document.createTextNode(EL_AI_STEPS[s.name] || String(s.name || '')));
+          // without a configured key the auth step only says the server accepted the request
+          li.appendChild(document.createTextNode((s.name == 'auth' && s.noKey === true) ? 'API key' : (EL_AI_STEPS[s.name] || String(s.name || ''))));
           if (s.ok == null) { var nr = document.createElement('span'); nr.className = 'elAiSub'; nr.textContent = ' (not run)'; li.appendChild(nr); }
           // a step answered by an earlier step's request reports 0 ms: show a duration only for a step's own request
           else if (Number(s.ms) > 0) { var ms = document.createElement('span'); ms.className = 'elAiSub'; ms.textContent = ' ' + elAiFmtNum(Math.round(s.ms)) + ' ms'; li.appendChild(ms); }
@@ -928,17 +929,30 @@
         var num = function(v, d) { return (v == null || v === '' || !isFinite(Number(v))) ? String(d) : String(v); };
         Q('elAiQuotaQ').value = num(qu.perUserQuestions, 0);
         Q('elAiQuotaT').value = num(qu.perUserTokens, 0);
-        Q('elAiRounds').value = num(lim.maxRounds, 8);
+        Q('elAiRounds').value = num(lim.maxRounds, 15);
+        var opt = function(v) { return (v == null || v === '' || !isFinite(Number(v)) || Number(v) <= 0) ? '' : String(v); };
+        Q('elAiCalls').value = opt(lim.maxCalls);
+        Q('elAiSentKB').value = opt(lim.maxSentKB);
+        elAiCapPlaceholders();
         Q('elAiRetention').value = num(s.retentionDays, 90);
         Q('elAiTranscripts').checked = (s.storeTranscripts === true);
         elAi.settingsDirty = false;
+      }
+      // empty cap fields show what applies (the server derives the same values)
+      function elAiCapPlaceholders() {
+        var r = Number(String(Q('elAiRounds').value).trim());
+        r = (isFinite(r) && r >= 1 && r <= 50 && Math.floor(r) === r) ? r : 15;
+        Q('elAiCalls').placeholder = 'automatic: 3 \u00D7 steps (' + (3 * r) + ')';
+        Q('elAiSentKB').placeholder = 'automatic: \u22483 bytes per context token, at least 400 KB';
       }
       function elAiSaveSettings() {
         var box = Q('elAiSettings'), errs = [];
         elAiClearErrors(box);
         var quQ = elAiReadInt('elAiQuotaQ', 0, 100000, false, errs);
         var quT = elAiReadInt('elAiQuotaT', 0, 1000000000, false, errs);
-        var rounds = elAiReadInt('elAiRounds', 1, 20, false, errs);
+        var rounds = elAiReadInt('elAiRounds', 1, 50, false, errs);
+        var calls = elAiReadInt('elAiCalls', 1, 200, true, errs);
+        var sentKB = elAiReadInt('elAiSentKB', 16, 8192, true, errs);
         var ret = elAiReadInt('elAiRetention', 1, 3650, false, errs);
         if (errs.length) { errs[0].focus(); setStatus('elAiSetStatus', 'err', 'Check the marked fields.'); return false; }
         // start from what the server sent, so fields this page does not show are kept
@@ -950,7 +964,7 @@
         s.previewPolicy = pp ? pp.value : 'every';
         s.enabled = Q('elAiEnabled').checked;
         s.quotas.perUserQuestions = quQ; s.quotas.perUserTokens = quT;
-        s.limits.maxRounds = rounds;
+        s.limits.maxRounds = rounds; s.limits.maxCalls = calls; s.limits.maxSentKB = sentKB;
         s.retentionDays = ret;
         s.storeTranscripts = Q('elAiTranscripts').checked;
         setStatus('elAiSetStatus', 'pending', 'Saving\u2026', 'elAiSetBtn');
@@ -1171,6 +1185,7 @@
         var mark = function() { elAi.settingsDirty = true; };
         Q('elAiSettings').addEventListener('input', mark);
         Q('elAiSettings').addEventListener('change', mark);
+        Q('elAiRounds').addEventListener('input', elAiCapPlaceholders);
         elAiRefresh();
         elAiLoadAudit();
       }
@@ -1527,8 +1542,14 @@
             <div><input type="number" id="elAiQuotaT" min="0" max="1000000000" step="1" aria-describedby="elAiQuotaHelp">
               <small id="elAiQuotaHelp" class="elAiHelp">0 means no limit.</small></div>
             <label for="elAiRounds">Max steps per answer</label>
-            <div><input type="number" id="elAiRounds" min="1" max="20" step="1" aria-describedby="elAiRoundsHelp">
-              <small id="elAiRoundsHelp" class="elAiHelp">How many rounds of tool calls the model may make for one answer (1&ndash;20).</small></div>
+            <div><input type="number" id="elAiRounds" min="1" max="50" step="1" aria-describedby="elAiRoundsHelp">
+              <small id="elAiRoundsHelp" class="elAiHelp">A step is one round trip to the model; in each step it may request up to 4 data lookups (1&ndash;50).</small></div>
+            <label for="elAiCalls">Tool calls per answer</label>
+            <div><input type="number" id="elAiCalls" min="1" max="200" step="1" aria-describedby="elAiCallsHelp">
+              <small id="elAiCallsHelp" class="elAiHelp">The individual data lookups across all steps of one answer (1&ndash;200; empty: automatic).</small></div>
+            <label for="elAiSentKB">Data per answer (KB)</label>
+            <div><input type="number" id="elAiSentKB" min="16" max="8192" step="1" aria-describedby="elAiSentKBHelp">
+              <small id="elAiSentKBHelp" class="elAiHelp">New data sent to the model for one answer: the question and the lookup results (16&ndash;8192; empty: automatic).</small></div>
           </div>
         </section>
 
