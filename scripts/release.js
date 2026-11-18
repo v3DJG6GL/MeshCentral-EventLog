@@ -9,8 +9,8 @@
 //         empty or missing                        -> no release
 //         a breaking marker (**Breaking ..., ### Breaking, BREAKING CHANGE)
 //                                                 -> major, or minor while the major version is 0
-//         ### Added or ### Changed                -> minor
-//         anything else (Fixed, Security, ...)    -> patch
+//         ### Added                               -> minor
+//         anything else (Changed, Fixed, ...)     -> patch
 //       "[skip release]" in the HEAD commit message, or a HEAD that is a "Release v..." commit, also means no
 //       release in auto mode. When HEAD already carries a version tag, the result is {release: false, repair: tag}:
 //       only the GitHub release for that tag may be missing (unless an explicit bump asks for a new version).
@@ -86,7 +86,7 @@ function detectBump(body, current) {
     if (isEmptySection(body)) return null;
     var breaking = /\*\*[ \t]*breaking/i.test(body) || /^###[ \t]+breaking/im.test(body) || /BREAKING[ \t-]CHANGE/i.test(body);
     if (breaking) return (parseVersion(current) || [0])[0] >= 1 ? 'major' : 'minor';
-    if (/^###[ \t]+(added|changed)\b/im.test(body)) return 'minor';
+    if (/^###[ \t]+added\b/im.test(body)) return 'minor';
     return 'patch';
 }
 

@@ -25,7 +25,7 @@ test('versions: parse, compare numerically, newest exact vX.Y.Z tag, bump', func
     assert.throws(function () { R.bumpVersion('0.1.14', 'huge'); });
 });
 
-test('detectBump: empty -> null, Fixed/Security -> patch, Added/Changed -> minor, breaking -> major (minor in 0.x)', function () {
+test('detectBump: empty -> null, Changed/Fixed/Security -> patch, Added -> minor, breaking -> major (minor in 0.x)', function () {
     assert.strictEqual(R.detectBump('', '0.1.0'), null);
     assert.strictEqual(R.detectBump('\n\n', '0.1.0'), null);
     assert.strictEqual(R.detectBump('### Added\n\n### Fixed\n', '0.1.0'), null, 'headings without entries are empty');
@@ -34,7 +34,10 @@ test('detectBump: empty -> null, Fixed/Security -> patch, Added/Changed -> minor
     assert.strictEqual(R.detectBump('### Fixed\n- x\n', '0.1.0'), 'patch');
     assert.strictEqual(R.detectBump('### Security\n- x\n### Deprecated\n- y\n', '1.0.0'), 'patch');
     assert.strictEqual(R.detectBump('### Added\n- x\n', '0.1.0'), 'minor');
-    assert.strictEqual(R.detectBump('### changed\n- x\n### Fixed\n- y\n', '2.3.4'), 'minor');
+    assert.strictEqual(R.detectBump('### Changed\n- x\n', '0.1.0'), 'patch', 'Changed alone is a patch');
+    assert.strictEqual(R.detectBump('### changed\n- x\n### Fixed\n- y\n', '2.3.4'), 'patch');
+    assert.strictEqual(R.detectBump('### Changed\n- x\n### Added\n- y\n', '1.2.3'), 'minor', 'Added wins over Changed');
+    assert.strictEqual(R.detectBump('### added\n- x\n', '2.0.0'), 'minor');
     assert.strictEqual(R.detectBump('### Changed\n- **Breaking: access changed.** More\n', '0.1.14'), 'minor');
     assert.strictEqual(R.detectBump('### Changed\n- **breaking** api\n', '1.4.2'), 'major');
     assert.strictEqual(R.detectBump('### Breaking\n- removed x\n', '3.0.0'), 'major');

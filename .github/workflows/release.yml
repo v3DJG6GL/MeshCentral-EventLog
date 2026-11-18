@@ -11,7 +11,8 @@
 # Two ways in:
 #   - automatic: after the CI workflow succeeded for a push to master. The bump comes from changelog.md's
 #     [Unreleased] section: empty -> no release (docs / chore pushes), "**Breaking" -> major (minor while 0.x),
-#     ### Added / ### Changed -> minor, otherwise patch. "[skip release]" in the head commit message skips.
+#     ### Added -> minor, anything else (### Changed, ### Fixed, ...) -> patch. "[skip release]" in the head
+#     commit message skips.
 #   - manual: Actions -> Release -> Run workflow on master, bump auto | patch | minor | major. An explicit bump
 #     overrides the changelog and [skip release]; it still needs a green CI run for the commit.
 #
