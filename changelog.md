@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+
+## [0.4.0] - 2026-11-18
 ### Added
 - Assistant: the system prompt can be viewed and, after switching on edit mode, changed per part (base instructions, Ask, Explain, Diagnosis) with reset to factory defaults and a full-prompt preview; additional instructions globally and per endpoint
 - Assistant endpoints: optional generation settings (thinking level, temperature, top-p, top-k, seed) with the server's defaults shown; Test connection detects supported thinking levels and lists the server's generation defaults next to the values the Assistant applies
