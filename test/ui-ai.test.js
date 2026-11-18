@@ -990,7 +990,7 @@ test('aiStart and aiSend carry the browser\'s time zone', { skip: SKIP }, functi
     ph.aiAsk('q');
     var s = sentOf(w, 'aiStart')[0];
     assert.strictEqual(s.tz, w.Intl.DateTimeFormat().resolvedOptions().timeZone);
-    assert.strictEqual(s.tzOffsetMin, -new w.Date().getTimezoneOffset());
+    assert.strictEqual(s.tzOffsetMin, 0 - new w.Date().getTimezoneOffset());
     ph.onAiStarted(null, { nodeid: NODE, reqId: s.reqId, convId: 'cvT' });
     ph.onAiDone(null, { nodeid: NODE, convId: 'cvT', turn: 1, text: 'ok', citations: {}, usage: {} });
     ph.aiAsk('again');

@@ -80,7 +80,7 @@ module.exports.attach = function (obj) {
         m.nodeid = nodeid || ((typeof currentNode != 'undefined' && currentNode) ? currentNode._id : null);
         if (pluginaction == 'aiStart' || pluginaction == 'aiSend') {   // answers give times in the technician's zone
             try { var tz = Intl.DateTimeFormat().resolvedOptions().timeZone; if (typeof tz == 'string' && tz) m.tz = tz.slice(0, 64); } catch (e) { }
-            try { m.tzOffsetMin = -new Date().getTimezoneOffset(); } catch (e) { }
+            try { m.tzOffsetMin = 0 - new Date().getTimezoneOffset(); } catch (e) { }
         }
         try { meshserver.send(m); return true; } catch (e) { return false; }
     };
