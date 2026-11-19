@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+
+## [0.6.1] - 2026-11-19
 ### Fixed
 - Assistant: when the step limit is reached, the model is asked to write its answer instead of showing raw tool calls as text; tool calls a server returns as text are understood
 - Assistant: Suggest questions works with thinking models
