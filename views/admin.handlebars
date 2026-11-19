@@ -443,7 +443,7 @@
         settingsDirty: false,
         edit: null,           // endpoint form state { id, hasKey, keyHint, removeKey, caps }
         models: [],           // last Fetch models result [{id, ctx, tools}]
-        audit: { skip: 0, limit: 50, total: 0, since: null, until: null },
+        audit: { skip: 0, limit: 50, total: 0, since: null, until: null, loaded: false },   // loaded: Requests was opened once
         cfgValue: '',         // aiEndpointId of the config set in the editor
         factory: {}, factoryHash: {}, placeholders: {},   // system prompt templates (aiAdminData)
         promptsBuilt: false, promptEdit: false, promptPart: 'base', factoryOpen: {},
@@ -544,6 +544,7 @@
         input.setAttribute('data-desc', input.getAttribute('aria-describedby') || '');
         input.setAttribute('aria-describedby', (id + ' ' + (input.getAttribute('aria-describedby') || '')).trim());
         input.setAttribute('aria-invalid', 'true');
+        elAiReveal(input);
       }
       // number field: empty -> null when optional; otherwise an integer in [min, max] or an inline error (returns undefined)
       function elAiReadInt(id, min, max, optional, errs) {
@@ -1100,6 +1101,7 @@
           elAiStartRender(os);
         });
         elAiRenderPrompts();
+        elAiCollSummary('data'); elAiCollSummary('starters');
         elAi.settingsDirty = false;
       }
 
@@ -1156,6 +1158,7 @@
         Q('elAiStartAdd_' + os).disabled = list.length >= EL_AI_START_MAX;
         Q('elAiStartReset_' + os).disabled = isFac && list.length === fac.length;
         Q('elAiStartCount_' + os).textContent = list.length + ' of ' + EL_AI_START_MAX;
+        elAiCollSummary('starters');
       }
       function elAiStartMove(os, i, d, cls) {
         var l = elAi.starters[os], j = i + d;
@@ -1420,6 +1423,7 @@
         });
         Q('elAiResetAll').disabled = !elAi.promptEdit || !anyCustom;
         elAiRenderNotes('elAiPromptChecks', elAiTplChecks(draft));
+        elAiCollSummary('prompt');
       }
       function elAiRenderPrevEps() {
         var sel = Q('elAiPrevEp'); if (sel == null) return;
@@ -1440,6 +1444,73 @@
           draft: { prompts: elAiPromptDraft(), extraInstructions: Q('elAiExtra').value, endpointExtra: epExtra }
         }, 10000, elAiNoAnswer('elAiPrevStatus', 'elAiPrevBtn', 'the preview did not arrive.'));
         return false;
+      }
+
+      // ---- collapsible sections: closed until opened; the open state is remembered per browser ----
+      // Each header is a button (aria-expanded / aria-controls) whose closed state shows a one-line summary.
+      var EL_AI_COLL = ['data', 'prompt', 'starters', 'requests'];
+      function elAiCollKey(k) { return 'evl_admin_open_' + k; }
+      function elAiCollIsOpen(k) { var b = Q('elAiColl_' + k); return !!b && b.getAttribute('aria-expanded') == 'true'; }
+      function elAiCollSet(k, open, remember) {
+        var b = Q('elAiColl_' + k); if (b == null) return;
+        b.setAttribute('aria-expanded', open ? 'true' : 'false');
+        Q(b.getAttribute('aria-controls')).hidden = !open;
+        b.closest('.elAiColl').classList.toggle('open', !!open);
+        if (remember) { try { window.localStorage.setItem(elAiCollKey(k), open ? '1' : '0'); } catch (e) { } }
+        if (open && k == 'requests' && !elAi.audit.loaded) { elAi.audit.loaded = true; elAiLoadAudit(); }   // the request list loads when first opened
+      }
+      function elAiCollInit() {
+        EL_AI_COLL.forEach(function(k) {
+          var open = false;
+          try { open = (window.localStorage.getItem(elAiCollKey(k)) === '1'); } catch (e) { }
+          Q('elAiColl_' + k).addEventListener('click', function() { elAiCollSet(k, !elAiCollIsOpen(k), true); });
+          elAiCollSet(k, open, false);
+          elAiCollSummary(k);
+        });
+      }
+      // opens the closed section that holds el (a field with an error, something to focus); not remembered
+      function elAiReveal(el) {
+        var body = el && el.closest ? el.closest('[data-coll]') : null;
+        if (body && body.hidden) elAiCollSet(body.getAttribute('data-coll'), true, false);
+      }
+      // the closed header's one-line state: what is set now (unsaved edits included) and whether it is saved
+      function elAiCollSummary(k) {
+        var box = Q('elAiCollSum_' + k); if (box == null) return;
+        var items = [];   // [text, tag class]; class null = plain text
+        var s = elAi.settings;
+        if (k == 'data' && s) {
+          var r = s.redact || {}, c = s.categories || {}, unsaved = false;
+          var nR = EL_AI_REDACT.filter(function(x) { var on = Q('elAiR_' + x[0]).checked; if (on !== (r[x[0]] !== false)) unsaved = true; return on; }).length;
+          var nC = EL_AI_CATS.filter(function(x) { var on = Q('elAiC_' + x[0]).checked; if (on !== (c[x[0]] === true)) unsaved = true; return on; }).length;
+          var pe = document.querySelector('input[name="elAiPreview"]:checked'), pv = pe ? pe.value : 'every';
+          if (pv !== ((s.previewPolicy == 'once' || s.previewPolicy == 'never') ? s.previewPolicy : 'every')) unsaved = true;
+          items.push(['Replacement: ' + nR + ' of ' + EL_AI_REDACT.length + ' types \u00B7 ' + nC + ' of ' + EL_AI_CATS.length + ' data types \u00B7 Preview: ' +
+            ({ every: 'every time', once: 'once per user and endpoint', never: 'off' })[pv], null]);
+          if (unsaved) items.push(['Unsaved changes', 'unsaved']);
+        } else if (k == 'prompt' && elAi.promptsBuilt) {
+          var draft = elAiPromptDraft(), ed = [], uns = false;
+          EL_AI_PARTS.forEach(function(x) { if (draft[x[0]] != null) ed.push(x[0] == 'base' ? 'Base' : x[1]); if (draft[x[0]] !== elAiSavedPart(x[0])) uns = true; });
+          items.push(ed.length ? ['Edited (' + ed.join(', ') + ')', 'edited'] : ['Factory default', '']);
+          if (uns) items.push(['Unsaved changes', 'unsaved']);
+          if (elAi.promptEdit) items.push(['Editing', 'changed']);
+          var nn = elAiTplChecks(draft).length;
+          if (nn) items.push([nn + (nn == 1 ? ' note' : ' notes'), 'changed']);
+        } else if (k == 'starters' && s) {
+          var sst = (s.starters && typeof s.starters == 'object') ? s.starters : {}, txt = [], su = false;
+          EL_AI_OSES.forEach(function(os) {
+            var cur = elAiStartClean(elAi.starters[os]), fac = elAi.startersFactory[os] || [];
+            var saved = Array.isArray(sst[os]) ? elAiStartClean(sst[os]) : fac;
+            if (!elAiStartSame(cur, saved)) su = true;
+            txt.push((os == 'linux' ? 'Linux' : 'Windows') + ': ' + cur.length + (elAiStartSame(cur, fac) ? '' : ' (edited)'));
+          });
+          items.push([txt.join(' \u00B7 '), null]);
+          if (su) items.push(['Unsaved changes', 'unsaved']);
+        }
+        box.textContent = '';
+        items.forEach(function(x) {
+          if (x[1] == null) { var t = document.createElement('span'); t.textContent = x[0]; box.appendChild(t); }
+          else box.appendChild(elAiTag(x[0], x[1]));
+        });
       }
 
       // ---- audit log ----
@@ -1721,8 +1792,9 @@
           elAiStartRender(os);
         });
         Q('elAiHistPurge').addEventListener('click', elAiHistPurge);
+        Q('elAiDataBody').addEventListener('change', function() { elAiCollSummary('data'); });
+        elAiCollInit();   // opens the remembered sections; Requests loads its list when opened
         elAiRefresh();
-        elAiLoadAudit();
       }
     </script>
 </head>
@@ -1931,6 +2003,25 @@
     .elAiLegend dt { margin: 0; }
     .elAiLegend dd { margin: 0; color: var(--evl-muted); }
     .elAiPrevText { min-height: 220px; }
+    /* collapsible sections: the header is a button (chevron, title and, while closed, a one-line summary).
+       Explicit sizes so Bootstrap's legend / button / heading rules (MeshCentral's modern UI) change nothing. */
+    .elAiFs > legend.elAiCollH { float: none; width: auto; max-width: 100%; margin: 0; padding: 0 2px; font-size: inherit; line-height: inherit; font-weight: bold; }
+    #eventLogAdmin button.elAiCollBtn:not(#eventLogAdminNav button) {
+      display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px 8px; max-width: 100%; margin: 0 0 0 -4px; padding: 2px 6px 2px 4px;
+      border: 0; border-radius: 3px; background: none; color: var(--evl-ink); font: inherit; font-weight: bold; line-height: 1.35; text-align: left; text-transform: none; transform: none; cursor: pointer;
+    }
+    #eventLogAdmin button.elAiCollBtn:not(#eventLogAdminNav button):hover { background: var(--evl-hover); }
+    #eventLogAdmin button.elAiCollBtn:not(#eventLogAdminNav button):active { background: var(--evl-sel); transform: none; }
+    #eventLogAdmin button.elAiCollBtn:not(#eventLogAdminNav button):focus-visible { outline: 2px solid var(--evl-acc); outline-offset: 1px; }
+    .elAiChev { flex: none; color: var(--evl-muted); transition: transform .12s ease; }
+    .elAiCollBtn[aria-expanded="true"] .elAiChev { transform: rotate(90deg); }
+    .elAiCollBtn:hover .elAiChev { color: var(--evl-acc); }
+    .elAiCollSum { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px 6px; font-size: 12px; font-weight: normal; color: var(--evl-muted); }
+    .elAiCollSum:empty, .elAiCollBtn[aria-expanded="true"] .elAiCollSum { display: none; }
+    #eventLogAdmin legend.elAiCollH > button.elAiCollBtn:not(#eventLogAdminNav button) { margin: 0; }   /* a negative margin would make the legend too narrow (the summary would wrap) */
+    .elAiFs.elAiColl:not(.open) { padding-bottom: 2px; }
+    .elAiBeh > .elAiCollBody:not([hidden]) { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+    @media (prefers-reduced-motion: reduce) { .elAiChev { transition: none; } }
     @media (max-width: 640px) {
       .elAiLegend dl { grid-template-columns: minmax(0, 1fr); gap: 0; }
       .elAiLegend dd { margin-bottom: 6px; }
@@ -2149,8 +2240,9 @@
         </section>
 
         <div id="elAiSettings">
-        <section class="elAiSec" aria-labelledby="elAiDataH">
-          <h3 id="elAiDataH">Data sent to the model</h3>
+        <section class="elAiSec elAiColl" aria-labelledby="elAiDataT">
+          <h3 id="elAiDataH" class="elAiCollH"><button type="button" class="elAiCollBtn" id="elAiColl_data" aria-expanded="false" aria-controls="elAiDataBody"><svg class="elAiChev" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 3.5l4.5 4.5L6 12.5"/></svg><span id="elAiDataT">Data sent to the model</span><span class="elAiCollSum" id="elAiCollSum_data"></span></button></h3>
+          <div id="elAiDataBody" class="elAiCollBody" data-coll="data" hidden>
           <fieldset class="elAiFs"><legend>Replace before sending</legend>
             <p class="elAiHelp" id="elAiRedactHelp">Always on for endpoints outside your network; for local endpoints it is your choice. Replaced values are restored in the answer. Replacement is best effort.</p>
             <div id="elAiRedact" class="elAiChecks"></div>
@@ -2163,6 +2255,7 @@
             <label class="elAiRadio"><input type="radio" name="elAiPreview" value="once"> Show it once per user and endpoint</label>
             <label class="elAiRadio"><input type="radio" name="elAiPreview" value="never"> Do not show it</label>
           </fieldset>
+          </div>
         </section>
 
         <section class="elAiSec" aria-labelledby="elAiBehH">
@@ -2173,7 +2266,8 @@
             <div class="elAiCount" id="elAiExtraCount"></div>
           </fieldset>
 
-          <fieldset class="elAiFs elAiBeh" id="elAiPromptFs"><legend>System prompt</legend>
+          <fieldset class="elAiFs elAiBeh elAiColl" id="elAiPromptFs" aria-labelledby="elAiPromptT"><legend class="elAiCollH"><button type="button" class="elAiCollBtn" id="elAiColl_prompt" aria-expanded="false" aria-controls="elAiPromptBody"><svg class="elAiChev" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 3.5l4.5 4.5L6 12.5"/></svg><span id="elAiPromptT">System prompt</span><span class="elAiCollSum" id="elAiCollSum_prompt"></span></button></legend>
+            <div id="elAiPromptBody" class="elAiCollBody" data-coll="prompt" hidden>
             <p class="elAiHelp" id="elAiPromptHelp">The built-in instructions the model gets before every question: shared base instructions, then the part for the kind of question. Values in <code>&#123;&#123;&hellip;&#125;&#125;</code> are filled in for each request.</p>
             <div class="elAiBtns">
               <label class="elAiSwitch"><input type="checkbox" role="switch" id="elAiPromptEdit" aria-describedby="elAiPromptWarn"> Edit the system prompt</label>
@@ -2188,9 +2282,11 @@
               <p class="elAiHelp">A line that holds only a placeholder is left out when the placeholder is empty. Unknown placeholders are sent as they are.</p>
               <dl id="elAiPhList"></dl>
             </details>
+            </div>
           </fieldset>
 
-          <fieldset class="elAiFs elAiBeh" id="elAiStartFs"><legend>Starter questions</legend>
+          <fieldset class="elAiFs elAiBeh elAiColl" id="elAiStartFs" aria-labelledby="elAiStartT"><legend class="elAiCollH"><button type="button" class="elAiCollBtn" id="elAiColl_starters" aria-expanded="false" aria-controls="elAiStartBody"><svg class="elAiChev" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 3.5l4.5 4.5L6 12.5"/></svg><span id="elAiStartT">Starter questions</span><span class="elAiCollSum" id="elAiCollSum_starters"></span></button></legend>
+            <div id="elAiStartBody" class="elAiCollBody" data-coll="starters" hidden>
             <p class="elAiHelp" id="elAiStartHelp">The example questions an empty Ask panel offers, one list per device type. Devices whose system is not known get the Windows list. Up to 12 questions of at most 200 characters each; the order here is the order of the buttons.</p>
             <div class="elAiStartCols">
               <section class="elAiStartCol" aria-labelledby="elAiStartH_windows"><h4 id="elAiStartH_windows">Windows devices <span id="elAiStartTag_windows"></span></h4>
@@ -2201,6 +2297,7 @@
                 <ol id="elAiStart_linux" class="elAiStartL"></ol>
                 <div class="elAiBtns"><button type="button" id="elAiStartAdd_linux">Add a question</button><button type="button" id="elAiStartReset_linux">Reset to factory defaults</button><span class="elAiCount" id="elAiStartCount_linux"></span></div>
               </section>
+            </div>
             </div>
             <span id="elAiStartSay" class="elSr" role="status" aria-live="polite"></span>
           </fieldset>
@@ -2279,8 +2376,9 @@
         </div>
         <div class="elAiBtns elAiSaveBar"><button id="elAiSetBtn" class="elPrimary" onclick="return elAiSaveSettings();">Save settings</button> <span id="elAiSetStatus" class="elSaveStatus" role="status" aria-live="polite"></span></div>
 
-        <section class="elAiSec" aria-labelledby="elAiReqH">
-          <h3 id="elAiReqH">Requests</h3>
+        <section class="elAiSec elAiColl" aria-labelledby="elAiReqT">
+          <h3 id="elAiReqH" class="elAiCollH"><button type="button" class="elAiCollBtn" id="elAiColl_requests" aria-expanded="false" aria-controls="elAiReqBody"><svg class="elAiChev" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 3.5l4.5 4.5L6 12.5"/></svg><span id="elAiReqT">Requests</span><span class="elAiCollSum" id="elAiCollSum_requests"></span></button></h3>
+          <div id="elAiReqBody" class="elAiCollBody" data-coll="requests" hidden>
           <div class="elAiFilters">
             <label>From <input type="date" id="elAiAudFrom"></label>
             <label>To <input type="date" id="elAiAudTo"></label>
@@ -2299,6 +2397,7 @@
             <button id="elAiOlder" onclick="return elAiAuditPage(1);" disabled>Older</button>
             <span id="elAiAuditInfo" class="elAiHelp"></span>
             <span id="elAiAuditStatus" class="elSaveStatus" role="status" aria-live="polite"></span>
+          </div>
           </div>
         </section>
       </div>

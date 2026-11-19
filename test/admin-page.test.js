@@ -42,6 +42,8 @@ function page(opts) {
             w.Q = function (x) { return w.document.getElementById(x); };
             w.QS = function (x) { return w.document.getElementById(x).style; };
             w.confirm = function () { return true; };
+            if (opts.noStorage) Object.defineProperty(w, 'localStorage', { get: function () { throw new Error('blocked'); } });
+            else Object.keys(opts.store || {}).forEach(function (k) { w.localStorage.setItem(k, opts.store[k]); });
         }
     });
     var w = dom.window;
@@ -184,6 +186,7 @@ function texts(w, os) { return Array.prototype.map.call(w.document.querySelector
 test('starter questions: factory lists shown, add / remove / reorder (focus follows) / reset, saved as null when back at the factory list', { skip: SKIP }, function () {
     var w = page();
     $(w, 'elAssistant').style.display = 'block';   // the tab is shown (focus only lands on visible elements)
+    $(w, 'elAiColl_starters').click();   // the section is closed until opened
     dataWith(w, { starters: { windows: null, linux: ['Is journald healthy?'] } });
     assert.deepStrictEqual(texts(w, 'windows'), FACT.windows);
     assert.deepStrictEqual(texts(w, 'linux'), ['Is journald healthy?']);
@@ -280,4 +283,116 @@ test('saved results: retention and switch saved with the settings, counts shown,
     dataWith(w2, {}, { historyAvailable: false, historyCounts: null });
     assert.strictEqual($(w2, 'elAiHistCounts').textContent, 'Not available on this server.');
     assert.strictEqual($(w2, 'elAiHistPurge').disabled, true);
+});
+
+var COLL = { data: 'elAiDataBody', prompt: 'elAiPromptBody', starters: 'elAiStartBody', requests: 'elAiReqBody' };
+var FACTORY = { base: 'Base rules. {{nonce}}', ask: 'Ask. <followups>', explain: 'Explain. <explain>', diagnose: 'Diagnose. <diagnosis>' };
+function withPrompts(w, settings) { dataWith(w, settings, { factory: FACTORY, factoryHash: {}, placeholders: { nonce: 'per request' } }); }
+function isOpen(w, k) { return $(w, 'elAiColl_' + k).getAttribute('aria-expanded') == 'true' && !$(w, COLL[k]).hidden; }
+function summary(w, k) { return Array.prototype.map.call($(w, 'elAiCollSum_' + k).children, function (e) { return e.textContent; }); }
+function audits(w) { return w.sent.filter(function (m) { return m.pluginaction == 'aiAdminAudit'; }).length; }
+
+test('collapsible sections: Data sent to the model, System prompt, Starter questions and Requests are closed on first load; Requests loads when opened', { skip: SKIP }, function () {
+    var w = page();
+    withPrompts(w, {});
+    Object.keys(COLL).forEach(function (k) {
+        var b = $(w, 'elAiColl_' + k);
+        assert.strictEqual(b.tagName, 'BUTTON', k);
+        assert.strictEqual(b.getAttribute('aria-expanded'), 'false', k);
+        assert.strictEqual(b.getAttribute('aria-controls'), COLL[k], k);
+        assert.strictEqual($(w, COLL[k]).hidden, true, k);
+        assert.ok(b.querySelector('svg.elAiChev'), k + ' chevron');
+    });
+    assert.strictEqual($(w, 'elAiDataT').textContent, 'Data sent to the model');
+    assert.strictEqual($(w, 'elAiPromptFs').getAttribute('aria-labelledby'), 'elAiPromptT');
+    assert.strictEqual(audits(w), 0, 'no request list asked for while Requests is closed');
+    // closed summaries
+    assert.deepStrictEqual(summary(w, 'data'), ['Replacement: 10 of 10 types · 0 of 6 data types · Preview: every time']);
+    assert.deepStrictEqual(summary(w, 'prompt'), ['Factory default']);
+    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 · Linux: 3']);
+    assert.strictEqual($(w, 'elAiCollSum_requests').textContent, '');
+    // open Requests: the list is asked for once; closing and opening again does not ask again
+    $(w, 'elAiColl_requests').click();
+    assert.ok(isOpen(w, 'requests'));
+    assert.strictEqual(audits(w), 1);
+    var a = w.last('aiAdminAudit');
+    assert.deepStrictEqual([a.skip, a.limit], [0, 50]);
+    w.h.aiAdminAuditRows(null, { reqId: a.reqId, rows: [], total: 0 });
+    assert.match($(w, 'elAiAuditRows').textContent, /No requests logged yet/);
+    $(w, 'elAiColl_requests').click();
+    assert.strictEqual(isOpen(w, 'requests'), false);
+    $(w, 'elAiColl_requests').click();
+    assert.strictEqual(audits(w), 1);
+    // paging and filters behave as before
+    w.elAiAuditPage(1);
+    assert.strictEqual(audits(w), 2);
+});
+
+test('collapsible sections: the open state is remembered per browser; blocked storage leaves them closed', { skip: SKIP }, function () {
+    var w = page();
+    $(w, 'elAiColl_prompt').click();
+    $(w, 'elAiColl_data').click(); $(w, 'elAiColl_data').click();
+    assert.strictEqual(w.localStorage.getItem('evl_admin_open_prompt'), '1');
+    assert.strictEqual(w.localStorage.getItem('evl_admin_open_data'), '0');
+    assert.strictEqual(w.localStorage.getItem('evl_admin_open_requests'), null);
+    var w2 = page({ store: { evl_admin_open_prompt: '1', evl_admin_open_data: '0', evl_admin_open_requests: '1' } });
+    assert.deepStrictEqual(Object.keys(COLL).map(function (k) { return isOpen(w2, k); }), [false, true, false, true]);
+    assert.strictEqual(audits(w2), 1, 'Requests remembered open: the list loads at once');
+    assert.ok($(w2, 'elAiPromptFs').classList.contains('open'));
+    var w3 = page({ noStorage: true });
+    assert.deepStrictEqual(Object.keys(COLL).map(function (k) { return isOpen(w3, k); }), [false, false, false, false]);
+    $(w3, 'elAiColl_starters').click();
+    assert.ok(isOpen(w3, 'starters'), 'still opens without storage');
+});
+
+test('collapsible sections: a field error inside a closed section opens it and focuses the field', { skip: SKIP }, function () {
+    var w = page();
+    $(w, 'elAssistant').style.display = 'block';
+    withPrompts(w, {});
+    $(w, 'elAiAudFrom').value = '2026-05-10'; $(w, 'elAiAudTo').value = '2026-05-01';
+    w.elAiAuditFilter();
+    assert.ok(isOpen(w, 'requests'));
+    assert.ok($(w, 'elAiAudToErr'), 'inline error');
+    assert.strictEqual(w.document.activeElement, $(w, 'elAiAudTo'));
+    assert.strictEqual(w.localStorage.getItem('evl_admin_open_requests'), null, 'opened for the error, not remembered');
+    // Save settings still reads fields inside closed sections and still validates the others
+    $(w, 'elAiR_ips').checked = false; $(w, 'elAiR_ips').dispatchEvent(new w.Event('change', { bubbles: true }));
+    w.elAiStartAdd('linux'); w.elAi.starters.linux[3] = 'Is cron running?'; w.elAiStartState('linux');
+    w.elAiSaveSettings();
+    var s = w.last('aiAdminSaveSettings').settings;
+    assert.strictEqual(s.redact.ips, false);
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(s.starters.linux)), FACT.linux.concat(['Is cron running?']));
+    assert.strictEqual(isOpen(w, 'data'), false);
+    assert.strictEqual(isOpen(w, 'starters'), false);
+});
+
+test('collapsible sections: closed summaries follow edits (edited parts, unsaved changes, notes, counts)', { skip: SKIP }, function () {
+    var w = page();
+    withPrompts(w, { prompts: { ask: 'My ask. <followups>' }, starters: { windows: null, linux: ['Is journald healthy?'] }, categories: { network: true, notes: true }, previewPolicy: 'once' });
+    assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Ask)']);
+    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 · Linux: 1 (edited)']);
+    assert.deepStrictEqual(summary(w, 'data'), ['Replacement: 10 of 10 types · 2 of 6 data types · Preview: once per user and endpoint']);
+    // unsaved prompt edit (the dot in the tabs is inside the closed section; the summary says it)
+    $(w, 'elAiPromptEdit').checked = true; $(w, 'elAiPromptEdit').dispatchEvent(new w.Event('change', { bubbles: true }));
+    $(w, 'elAiTpl_base').value = 'Base rules without the nonce.'; $(w, 'elAiTpl_base').dispatchEvent(new w.Event('input', { bubbles: true }));
+    assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Base, Ask)', 'Unsaved changes', 'Editing', '1 note']);
+    assert.ok($(w, 'elAiCollSum_prompt').querySelector('.elAiTag.unsaved'));
+    $(w, 'elAiTpl_base').value = FACTORY.base; $(w, 'elAiTpl_base').dispatchEvent(new w.Event('input', { bubbles: true }));
+    $(w, 'elAiPromptEdit').checked = false; $(w, 'elAiPromptEdit').dispatchEvent(new w.Event('change', { bubbles: true }));
+    assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Ask)']);
+    // data: a type no longer replaced, another preview policy
+    $(w, 'elAiR_macs').checked = false; $(w, 'elAiR_macs').dispatchEvent(new w.Event('change', { bubbles: true }));
+    w.document.querySelector('input[name="elAiPreview"][value="never"]').checked = true;
+    w.document.querySelector('input[name="elAiPreview"][value="never"]').dispatchEvent(new w.Event('change', { bubbles: true }));
+    assert.deepStrictEqual(summary(w, 'data'), ['Replacement: 9 of 10 types · 2 of 6 data types · Preview: off', 'Unsaved changes']);
+    // starters: back to the factory list is unsaved until saved
+    w.elAiStartReset('linux');
+    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 · Linux: 3', 'Unsaved changes']);
+    // saved: the summaries show the saved state
+    w.elAiSaveSettings();
+    var sv = w.last('aiAdminSaveSettings');
+    w.h.aiAdminSettingsSaved(null, { reqId: sv.reqId, settings: sv.settings });
+    assert.deepStrictEqual(summary(w, 'data'), ['Replacement: 9 of 10 types · 2 of 6 data types · Preview: off']);
+    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 · Linux: 3']);
+    assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Ask)']);
 });

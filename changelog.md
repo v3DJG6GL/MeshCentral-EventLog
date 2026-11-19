@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Changed
+- Admin page: the Requests, Data sent to the model, System prompt and Starter questions sections are collapsed until opened (the request list loads when opened)
 
 ## [0.5.1] - 2026-11-18
 ### Fixed
