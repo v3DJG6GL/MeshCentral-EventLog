@@ -1,7 +1,9 @@
 'use strict';
 // The admin page (views/admin.handlebars) in jsdom: the endpoint form's generation settings (server defaults as
-// placeholders, levels the server does not take disabled, Anthropic / Responses limits), and the offer to use the
-// first saved endpoint for the Default config set. Runs when jsdom can be found (EVL_JSDOM or a resolvable jsdom).
+// placeholders, levels the server does not take disabled, Anthropic / Responses limits), the offer to use the first
+// saved endpoint for the Default config set, and the layout: side navigation (remembered page, scrollspy), the parts
+// that start collapsed, the data boundary strip, the save bar (areas, Discard, Save per area), batched assignments
+// and the config set editor's payload. Runs when jsdom can be found (EVL_JSDOM or a resolvable jsdom).
 var test = require('node:test');
 var assert = require('node:assert');
 var fs = require('node:fs');
@@ -30,13 +32,13 @@ function page(opts) {
     opts = opts || {};
     var html = fs.readFileSync(path.join(__dirname, '..', 'views', 'admin.handlebars'), 'utf8')
         .replace('{{{configSets}}}', JSON.stringify(opts.sets || [{ _id: 'd1', default: true, name: 'Default' }]))
-        .replace('{{{configAssignments}}}', '[]')
-        .replace('{{{aiAdmin}}}', JSON.stringify({ full: true, available: true }));
+        .replace('{{{configAssignments}}}', JSON.stringify(opts.assignments || []))
+        .replace('{{{aiAdmin}}}', JSON.stringify(opts.ai || { full: true, available: true }));
     var dom = new JSDOM_MOD.JSDOM(html, {
         runScripts: 'dangerously', pretendToBeVisual: true, url: 'https://mesh.example/pluginadmin.ashx?pin=eventlog',
         beforeParse: function (w) {
             w.sent = [];
-            w.meshes = {}; w.nodes = [];
+            w.meshes = opts.meshes || {}; w.nodes = opts.nodes || [];
             w.pluginHandler = { eventlog: {} };
             w.meshserver = { send: function (m) { w.sent.push(JSON.parse(JSON.stringify(m))); } };
             w.Q = function (x) { return w.document.getElementById(x); };
@@ -139,7 +141,7 @@ test('first endpoint: offer to use it for the Default config set; "Used by" hint
     w.data([saved], {});
     assert.strictEqual($(w, 'elAiOffer').hidden, false);
     assert.strictEqual($(w, 'elAiOfferT').textContent, 'Use “gpu-01” for the Default config set? Devices that use the Default set can then use the Assistant.');
-    assert.strictEqual(w.document.querySelector('#elAiEpRows .elAiUnused').textContent, 'Not used by any config set yet — assign it in Config Sets.');
+    assert.strictEqual(w.document.querySelector('#elAiEpRows .elAiUnused').textContent, 'Not used by any config set yet — assign it in Config sets.');
     // Use it for Default: the config-set save path, Default set, only the endpoint id
     w.elAiOfferUse();
     var cfg = w.last('adminSaveConfig');
@@ -148,7 +150,8 @@ test('first endpoint: offer to use it for the Default config set; "Used by" hint
     w.h.adminUpdateConfigSets(null, { sets: [{ _id: 'd1', default: true, name: 'Default', aiEndpointId: EP.id }], selected: '', saved: true, defaultSet: true });
     assert.strictEqual($(w, 'elAiOffer').hidden, true);
     assert.match($(w, 'elAiEpStatus').textContent, /The Default config set now uses “gpu-01”/);
-    assert.strictEqual($(w, 'elSaveStatus').textContent, '', 'the Config Sets tab status is not touched');
+    assert.strictEqual($(w, 'elSaveStatus').textContent, '', 'the config set status is not touched');
+    assert.strictEqual(w.elDirty().config, false, 'the editor shows the Default set with the new endpoint, not an unsaved change');
     assert.ok(w.sent.filter(function (m) { return m.pluginaction == 'aiAdminGet'; }).length >= 3, 'usedBy refreshed');
     w.data([saved], { [EP.id]: ['Default'] });
     assert.strictEqual(w.document.querySelector('#elAiEpRows .elAiUnused'), null);
@@ -185,8 +188,8 @@ function texts(w, os) { return Array.prototype.map.call(w.document.querySelector
 
 test('starter questions: factory lists shown, add / remove / reorder (focus follows) / reset, saved as null when back at the factory list', { skip: SKIP }, function () {
     var w = page();
-    $(w, 'elAssistant').style.display = 'block';   // the tab is shown (focus only lands on visible elements)
-    $(w, 'elAiColl_starters').click();   // the section is closed until opened
+    w.elGoPage('assistant');   // the page is shown (focus only lands on visible elements)
+    $(w, 'elAiColl_starters').click();   // the part is closed until opened
     dataWith(w, { starters: { windows: null, linux: ['Is journald healthy?'] } });
     assert.deepStrictEqual(texts(w, 'windows'), FACT.windows);
     assert.deepStrictEqual(texts(w, 'linux'), ['Is journald healthy?']);
@@ -285,114 +288,434 @@ test('saved results: retention and switch saved with the settings, counts shown,
     assert.strictEqual($(w2, 'elAiHistPurge').disabled, true);
 });
 
-var COLL = { data: 'elAiDataBody', prompt: 'elAiPromptBody', starters: 'elAiStartBody', requests: 'elAiReqBody' };
+
 var FACTORY = { base: 'Base rules. {{nonce}}', ask: 'Ask. <followups>', explain: 'Explain. <explain>', diagnose: 'Diagnose. <diagnosis>' };
-function withPrompts(w, settings) { dataWith(w, settings, { factory: FACTORY, factoryHash: {}, placeholders: { nonce: 'per request' } }); }
+function withPrompts(w, settings, extra) { dataWith(w, settings, Object.assign({ factory: FACTORY, factoryHash: {}, placeholders: { nonce: 'per request' } }, extra || {})); }
+var COLL = { prompt: 'elAiPromptBody', starters: 'elAiStartBody', preview: 'elAiPrevBody', adv: 'elAiAdvBody' };
 function isOpen(w, k) { return $(w, 'elAiColl_' + k).getAttribute('aria-expanded') == 'true' && !$(w, COLL[k]).hidden; }
 function summary(w, k) { return Array.prototype.map.call($(w, 'elAiCollSum_' + k).children, function (e) { return e.textContent; }); }
 function audits(w) { return w.sent.filter(function (m) { return m.pluginaction == 'aiAdminAudit'; }).length; }
+function shown(w) { return ['elAssignment', 'elConfigSets', 'elAssistant', 'elRequests'].filter(function (id) { return !$(w, id).hidden; }); }
+function fire(w, el, type) { el.dispatchEvent(new w.Event(type || 'change', { bubbles: true })); }
+function setVal(w, id, v) { $(w, id).value = v; fire(w, $(w, id), 'input'); fire(w, $(w, id), 'change'); }
+function setCheck(w, id, on) { $(w, id).checked = on; fire(w, $(w, id), 'change'); }
+function bar(w) { return $(w, 'elSaveBar').hidden ? null : $(w, 'elBarList').textContent; }
+function stripLines(w) { return Array.prototype.map.call($(w, 'elAiStripText').children, function (p) { return (p.className ? p.className + ': ' : '') + p.textContent; }); }
+var CLOUD = Object.assign({}, EP, { id: 'aiEndpoint:cloud0000001', name: 'strata', baseUrl: 'https://llm.example.com/v1', network: 'public', caps: null });
+var LOCAL = Object.assign({}, EP, { id: 'aiEndpoint:local0000001', name: 'ollama-gpu01', baseUrl: 'http://10.20.4.11:11434/v1', network: 'private', caps: null });
 
-test('collapsible sections: Data sent to the model, System prompt, Starter questions and Requests are closed on first load; Requests loads when opened', { skip: SKIP }, function () {
+test('side navigation: pages instead of tabs, aria-current, the last page remembered per browser, "Go to" select', { skip: SKIP }, function () {
     var w = page();
-    withPrompts(w, {});
-    Object.keys(COLL).forEach(function (k) {
-        var b = $(w, 'elAiColl_' + k);
-        assert.strictEqual(b.tagName, 'BUTTON', k);
-        assert.strictEqual(b.getAttribute('aria-expanded'), 'false', k);
-        assert.strictEqual(b.getAttribute('aria-controls'), COLL[k], k);
-        assert.strictEqual($(w, COLL[k]).hidden, true, k);
-        assert.ok(b.querySelector('svg.elAiChev'), k + ' chevron');
-    });
-    assert.strictEqual($(w, 'elAiDataT').textContent, 'Data sent to the model');
-    assert.strictEqual($(w, 'elAiPromptFs').getAttribute('aria-labelledby'), 'elAiPromptT');
-    assert.strictEqual(audits(w), 0, 'no request list asked for while Requests is closed');
-    // closed summaries
-    assert.deepStrictEqual(summary(w, 'data'), ['Replacement: 10 of 10 types · 0 of 6 data types · Preview: every time']);
-    assert.deepStrictEqual(summary(w, 'prompt'), ['Factory default']);
-    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 · Linux: 3']);
-    assert.strictEqual($(w, 'elAiCollSum_requests').textContent, '');
-    // open Requests: the list is asked for once; closing and opening again does not ask again
-    $(w, 'elAiColl_requests').click();
-    assert.ok(isOpen(w, 'requests'));
+    assert.deepStrictEqual(shown(w), ['elAssignment'], 'Assignment first');
+    assert.strictEqual(w.document.querySelector('#elRail a[data-page="assignment"]').getAttribute('aria-current'), 'page');
+    assert.strictEqual(w.document.getElementById('eventLogAdminNav'), null, 'no top tabs');
+    w.document.querySelector('#elRail a[data-page="configsets"]').click();
+    assert.deepStrictEqual(shown(w), ['elConfigSets']);
+    assert.strictEqual(w.document.querySelector('#elRail a[data-page="configsets"]').getAttribute('aria-current'), 'page');
+    assert.strictEqual(w.document.querySelector('#elRail a[data-page="assignment"]').hasAttribute('aria-current'), false);
+    assert.strictEqual(w.localStorage.getItem('evl_admin_page'), 'configsets');
+    assert.strictEqual(w.document.activeElement.tagName, 'H1', 'focus moves to the page heading');
+    // an Assistant section link opens the Assistant page
+    w.document.querySelector('#elRail a[data-sec="elSecAccess"]').click();
+    assert.deepStrictEqual(shown(w), ['elAssistant']);
+    assert.strictEqual(w.document.querySelector('#elRail a[data-page="assistant"]:not([data-sec])').getAttribute('aria-current'), 'page');
+    assert.strictEqual(w.document.activeElement.id, 'elAiAccessH');
+    // Requests is its own page and loads its list when first opened (not before)
+    assert.strictEqual(audits(w), 0);
+    w.document.querySelector('#elRail a[data-page="requests"]').click();
+    assert.deepStrictEqual(shown(w), ['elRequests']);
     assert.strictEqual(audits(w), 1);
-    var a = w.last('aiAdminAudit');
-    assert.deepStrictEqual([a.skip, a.limit], [0, 50]);
-    w.h.aiAdminAuditRows(null, { reqId: a.reqId, rows: [], total: 0 });
-    assert.match($(w, 'elAiAuditRows').textContent, /No requests logged yet/);
-    $(w, 'elAiColl_requests').click();
-    assert.strictEqual(isOpen(w, 'requests'), false);
-    $(w, 'elAiColl_requests').click();
-    assert.strictEqual(audits(w), 1);
-    // paging and filters behave as before
-    w.elAiAuditPage(1);
-    assert.strictEqual(audits(w), 2);
+    w.elGoPage('assignment'); w.elGoPage('requests');
+    assert.strictEqual(audits(w), 1, 'loaded once');
+    // narrow width: the "Go to" select does the same
+    $(w, 'elNavSel').value = 'configsets'; fire(w, $(w, 'elNavSel'));
+    assert.deepStrictEqual(shown(w), ['elConfigSets']);
+    // remembered: a new page opens the last one (Requests loads at once)
+    var w2 = page({ store: { evl_admin_page: 'requests' } });
+    assert.deepStrictEqual(shown(w2), ['elRequests']);
+    assert.strictEqual(audits(w2), 1);
+    var w3 = page({ noStorage: true });
+    assert.deepStrictEqual(shown(w3), ['elAssignment'], 'blocked storage: Assignment');
+    w3.elGoPage('configsets');
+    assert.deepStrictEqual(shown(w3), ['elConfigSets']);
 });
 
-test('collapsible sections: the open state is remembered per browser; blocked storage leaves them closed', { skip: SKIP }, function () {
+test('scrollspy: the rail marks the Assistant section at the top of the window', { skip: SKIP }, function () {
     var w = page();
+    w.elGoPage('assistant');
+    var tops = { elSecEndpoints: -600, elSecData: -200, elSecBehaviour: 40, elSecAccess: 500, elSecSaved: 900 };
+    Object.keys(tops).forEach(function (id) { $(w, id).getBoundingClientRect = function () { return { top: tops[id], bottom: tops[id] + 300, left: 0, right: 0, width: 0, height: 300 }; }; });
+    w.elSpy();
+    var cur = w.document.querySelectorAll('#elRail a.spy');
+    assert.strictEqual(cur.length, 1);
+    assert.strictEqual(cur[0].getAttribute('data-sec'), 'elSecBehaviour');
+    assert.strictEqual(cur[0].getAttribute('aria-current'), 'location');
+    assert.strictEqual($(w, 'elNavSel').value, 'assistant|elSecBehaviour');
+    tops = { elSecEndpoints: 120, elSecData: 700, elSecBehaviour: 1400, elSecAccess: 2000, elSecSaved: 2600 };
+    w.elSpy();
+    assert.strictEqual(w.document.querySelector('#elRail a.spy').getAttribute('data-sec'), 'elSecEndpoints', 'at the top: the first section');
+    w.elGoPage('configsets');
+    assert.strictEqual(w.document.querySelectorAll('#elRail a.spy, #elRail a[aria-current="location"]').length, 0, 'no section marked on other pages');
+});
+
+test('collapsed by default: only System prompt, Starter questions, Full prompt preview and the endpoint\'s Advanced options', { skip: SKIP }, function () {
+    var w = page();
+    withPrompts(w, {});
+    var colls = Array.prototype.map.call(w.document.querySelectorAll('button[aria-controls][aria-expanded].coll-btn'), function (b) { return b.id; });
+    assert.deepStrictEqual(colls.sort(), ['elAiColl_adv', 'elAiColl_preview', 'elAiColl_prompt', 'elAiColl_starters']);
+    Object.keys(COLL).forEach(function (k) {
+        assert.strictEqual(isOpen(w, k), false, k);
+        assert.ok($(w, 'elAiColl_' + k).querySelector('svg.elAiChev'), k + ' chevron');
+    });
+    // Data sent to the model, Access and Saved results are plain cards (not collapsible); Requests is a page
+    ['elAiDataBody', 'elAiQuotaQ', 'elAiHistDays'].forEach(function (id) { assert.strictEqual($(w, id).closest('[data-coll]'), null, id); });
+    ['elAiColl_data', 'elAiColl_requests', 'elAiCollSum_data'].forEach(function (id) { assert.strictEqual($(w, id), null, id); });
+    // summaries while closed
+    assert.deepStrictEqual(summary(w, 'prompt'), ['Factory default in all four parts.', 'Editing is off.']);
+    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 3 questions.']);
+    assert.match($(w, 'elAiCollSum_preview').textContent, /including unsaved changes/);
+    // remembered per browser; blocked storage leaves them closed
     $(w, 'elAiColl_prompt').click();
-    $(w, 'elAiColl_data').click(); $(w, 'elAiColl_data').click();
+    assert.ok(isOpen(w, 'prompt'));
     assert.strictEqual(w.localStorage.getItem('evl_admin_open_prompt'), '1');
-    assert.strictEqual(w.localStorage.getItem('evl_admin_open_data'), '0');
-    assert.strictEqual(w.localStorage.getItem('evl_admin_open_requests'), null);
-    var w2 = page({ store: { evl_admin_open_prompt: '1', evl_admin_open_data: '0', evl_admin_open_requests: '1' } });
-    assert.deepStrictEqual(Object.keys(COLL).map(function (k) { return isOpen(w2, k); }), [false, true, false, true]);
-    assert.strictEqual(audits(w2), 1, 'Requests remembered open: the list loads at once');
-    assert.ok($(w2, 'elAiPromptFs').classList.contains('open'));
+    var w2 = page({ store: { evl_admin_open_prompt: '1', evl_admin_open_adv: '1' } });
+    assert.deepStrictEqual(Object.keys(COLL).map(function (k) { return isOpen(w2, k); }), [true, false, false, true]);
     var w3 = page({ noStorage: true });
     assert.deepStrictEqual(Object.keys(COLL).map(function (k) { return isOpen(w3, k); }), [false, false, false, false]);
     $(w3, 'elAiColl_starters').click();
     assert.ok(isOpen(w3, 'starters'), 'still opens without storage');
 });
 
-test('collapsible sections: a field error inside a closed section opens it and focuses the field', { skip: SKIP }, function () {
+test('endpoint editor: Advanced options holds the rarely changed fields, shows a live summary and opens for a field error', { skip: SKIP }, function () {
     var w = page();
-    $(w, 'elAssistant').style.display = 'block';
-    withPrompts(w, {});
-    $(w, 'elAiAudFrom').value = '2026-05-10'; $(w, 'elAiAudTo').value = '2026-05-01';
-    w.elAiAuditFilter();
-    assert.ok(isOpen(w, 'requests'));
-    assert.ok($(w, 'elAiAudToErr'), 'inline error');
-    assert.strictEqual(w.document.activeElement, $(w, 'elAiAudTo'));
-    assert.strictEqual(w.localStorage.getItem('evl_admin_open_requests'), null, 'opened for the error, not remembered');
-    // Save settings still reads fields inside closed sections and still validates the others
-    $(w, 'elAiR_ips').checked = false; $(w, 'elAiR_ips').dispatchEvent(new w.Event('change', { bubbles: true }));
-    w.elAiStartAdd('linux'); w.elAi.starters.linux[3] = 'Is cron running?'; w.elAiStartState('linux');
-    w.elAiSaveSettings();
-    var s = w.last('aiAdminSaveSettings').settings;
-    assert.strictEqual(s.redact.ips, false);
-    assert.deepStrictEqual(JSON.parse(JSON.stringify(s.starters.linux)), FACT.linux.concat(['Is cron running?']));
-    assert.strictEqual(isOpen(w, 'data'), false);
-    assert.strictEqual(isOpen(w, 'starters'), false);
+    w.elGoPage('assistant');
+    w.data([EP]);
+    w.elAiOpenForm(w.elAi.endpoints[0]);
+    ['elAiMaxOut', 'elAiTimeout', 'elAiCtx', 'elAiThinking', 'elAiTemp', 'elAiEpExtra', 'elAiLinkLocal'].forEach(function (id) { assert.strictEqual($(w, id).closest('[data-coll]').id, 'elAiAdvBody', id); });
+    w.document.querySelectorAll('input[name="elAiToolMode"]').forEach(function (r) { assert.strictEqual(r.closest('[data-coll]').id, 'elAiAdvBody'); });
+    assert.strictEqual(isOpen(w, 'adv'), false);
+    assert.strictEqual($(w, 'elAiCollSum_adv').textContent, 'The model reads data automatically. Limits use the defaults. Generation uses the server’s values. Link-local addresses are blocked.');
+    setVal(w, 'elAiTimeout', '300');
+    w.document.querySelector('input[name="elAiToolMode"][value="summary"]').checked = true; fire(w, w.document.querySelector('input[name="elAiToolMode"][value="summary"]'));
+    setVal(w, 'elAiEpExtra', '/no_think');
+    assert.strictEqual($(w, 'elAiCollSum_adv').textContent, 'The model reads a summary only. Limits: timeout 300 s. Generation uses the server’s values. Model-specific instructions set. Link-local addresses are blocked.');
+    // an error in a closed part opens it and focuses the field; opened for the error, not remembered
+    $(w, 'elAiTopP').value = '7';
+    w.elAiSaveEndpoint();
+    assert.ok(isOpen(w, 'adv'));
+    assert.ok($(w, 'elAiTopPErr'));
+    assert.strictEqual(w.document.activeElement, $(w, 'elAiTopP'));
+    assert.strictEqual(w.localStorage.getItem('evl_admin_open_adv'), null);
+    assert.strictEqual(bar(w), null, 'the endpoint editor is saved on its own, not with the bar');
 });
 
-test('collapsible sections: closed summaries follow edits (edited parts, unsaved changes, notes, counts)', { skip: SKIP }, function () {
+test('data boundary strip: a cloud endpoint in use (values always replaced, preview warning), only local, none', { skip: SKIP }, function () {
     var w = page();
-    withPrompts(w, { prompts: { ask: 'My ask. <followups>' }, starters: { windows: null, linux: ['Is journald healthy?'] }, categories: { network: true, notes: true }, previewPolicy: 'once' });
-    assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Ask)']);
-    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 · Linux: 1 (edited)']);
-    assert.deepStrictEqual(summary(w, 'data'), ['Replacement: 10 of 10 types · 2 of 6 data types · Preview: once per user and endpoint']);
-    // unsaved prompt edit (the dot in the tabs is inside the closed section; the summary says it)
-    $(w, 'elAiPromptEdit').checked = true; $(w, 'elAiPromptEdit').dispatchEvent(new w.Event('change', { bubbles: true }));
-    $(w, 'elAiTpl_base').value = 'Base rules without the nonce.'; $(w, 'elAiTpl_base').dispatchEvent(new w.Event('input', { bubbles: true }));
+    w.elGoPage('assistant');
+    withPrompts(w, { enabled: true, redact: { ips: false, serials: false }, categories: { storedEvents: true, deviceSummary: true }, previewPolicy: 'every' },
+        { endpoints: [CLOUD, LOCAL], usedBy: { [CLOUD.id]: ['Default'] } });
+    assert.strictEqual($(w, 'elAiStripFlow').getAttribute('aria-hidden'), 'true');
+    assert.strictEqual($(w, 'elAiStripText').getAttribute('aria-live'), 'polite');
+    assert.deepStrictEqual(Array.prototype.map.call(w.document.querySelectorAll('#elAiStripFlow .db-node'), function (n) { return n.className + ' | ' + n.textContent; }), [
+        'db-node | Devicesagents send events', 'db-node | MeshCentral serverreplaces values first',
+        'db-node local idle | ollama-gpu01Local, not used', 'db-node cloud | strataCloud, used by Default']);
+    assert.ok(w.document.querySelector('#elAiStripFlow .db-zone .db-locals'), 'local endpoints are drawn inside the network');
+    assert.strictEqual(w.document.querySelector('#elAiStripFlow .db-cross').className, 'db-cross');
+    assert.deepStrictEqual(stripLines(w), [
+        'Leaves your network to strata (Cloud): stored events and device summary.',
+        'Replaced first (10 of 10): user names, computer names, domain names, IP addresses, MAC addresses, email addresses, Windows SIDs, paths with user names, secrets in messages, serial numbers.',
+        'quiet: Always replaced for cloud endpoints, also IP addresses and serial numbers, which are not ticked below.',
+        'Preview: every time.']);
+    assert.strictEqual(w.document.querySelectorAll('#elAiStripText .db-warn').length, 0, 'no warning: the server replaces everything for a cloud endpoint');
+    // live: another data type, then no preview
+    setCheck(w, 'elAiC_network', true);
+    assert.match(stripLines(w)[0], /stored events, device summary and network interfaces\.$/);
+    w.document.querySelector('input[name="elAiPreview"][value="never"]').checked = true; fire(w, w.document.querySelector('input[name="elAiPreview"][value="never"]'));
+    assert.deepStrictEqual(stripLines(w).slice(-2), ['Preview: never.', 'db-warn: Nobody sees a preview before data goes to strata.']);
+    setCheck(w, 'elAiEnabled', false);
+    assert.strictEqual(stripLines(w)[0], 'quiet: The Assistant is turned off under Access, so nothing is sent now. Once it is on:');
+
+    // only a local endpoint in use: nothing leaves; the ticks decide; no warning even without a preview
+    var w2 = page();
+    withPrompts(w2, { enabled: true, redact: { serials: false }, categories: { storedEvents: true }, previewPolicy: 'never' }, { endpoints: [CLOUD, LOCAL], usedBy: { [LOCAL.id]: ['Default', 'Servers'] } });
+    assert.deepStrictEqual(stripLines(w2), [
+        'Nothing leaves your network. Default and Servers use ollama-gpu01 on your network. It may read stored events.',
+        'Replaced first (9 of 10): user names, computer names, domain names, IP addresses, MAC addresses, email addresses, Windows SIDs, paths with user names, secrets in messages.',
+        'quiet: Sent as they are: serial numbers. Replacing values is your choice for endpoints on your network.']);
+    assert.strictEqual(w2.document.querySelector('#elAiStripFlow .db-cross').className, 'db-cross idle');
+    assert.strictEqual(w2.document.querySelectorAll('#elAiStripText .db-warn').length, 0);
+
+    // no config set uses an endpoint
+    var w3 = page();
+    withPrompts(w3, { enabled: true }, { endpoints: [LOCAL], usedBy: {} });
+    assert.deepStrictEqual(stripLines(w3), ['Nothing is sent. No config set uses an endpoint yet. Choose one under Config sets, Assistant endpoint.']);
+    assert.strictEqual(w3.document.querySelector('#elAiStripFlow .db-cross'), null, 'no endpoint outside: no arrow across the boundary');
+});
+
+test('save bar: appears for changes, names the areas, marks the rail; Discard restores; Save sends each area once and reports', { skip: SKIP }, function () {
+    var w = page({ sets: [{ _id: 'd1', default: true, name: 'Default', liveLogs: 'Application,System', liveNum: 100, liveEntryTypes: [1, 2, 3] }] });
+    withPrompts(w, { enabled: true, quotas: { perUserQuestions: 100, perUserTokens: 0 } });
+    assert.strictEqual(bar(w), null, 'hidden while nothing changed');
+    setCheck(w, 'elAiR_ips', false);
+    setVal(w, 'elAiQuotaQ', '50');
+    assert.strictEqual(bar(w), 'Data sent to the model, Access');
+    assert.strictEqual(w.document.querySelector('#elRail a[data-area="data"] .dot').hidden, false);
+    assert.strictEqual(w.document.querySelector('#elRail a[data-area="access"] .dot').hidden, false);
+    assert.strictEqual(w.document.querySelector('#elRail a[data-area="beh"] .dot').hidden, true);
+    assert.match(w.document.querySelector('#elRail a[data-area="data"]').textContent, /\(unsaved changes\)/);
+    // back to the loaded value: no longer a change
+    setVal(w, 'elAiQuotaQ', '100');
+    assert.strictEqual(bar(w), 'Data sent to the model');
+    // Discard restores the last loaded values
+    setVal(w, 'elAiQuotaQ', '50');
+    setVal(w, 'elname', 'Main');
+    assert.strictEqual(bar(w), 'Config set Main, Data sent to the model, Access');
+    $(w, 'elBarDiscard').click();
+    assert.strictEqual(bar(w), null);
+    assert.strictEqual($(w, 'elAiR_ips').checked, true);
+    assert.strictEqual($(w, 'elAiQuotaQ').value, '100');
+    assert.strictEqual($(w, 'elname').value, 'Default');
+    assert.strictEqual(w.sent.filter(function (m) { return /^(aiAdminSaveSettings|adminSaveConfig)$/.test(m.pluginaction); }).length, 0, 'Discard sends nothing');
+    // Save: one settings save for the Assistant areas, one config save
+    setCheck(w, 'elAiTranscripts', true);
+    setVal(w, 'elAiExtra', 'Answer in German.');
+    setVal(w, 'elliveLogs', 'Application');
+    assert.strictEqual(bar(w), 'Config set Default, Assistant behaviour, Requests');
+    $(w, 'elBarSave').click();
+    var st = w.sent.filter(function (m) { return m.pluginaction == 'aiAdminSaveSettings'; }), cf = w.sent.filter(function (m) { return m.pluginaction == 'adminSaveConfig'; });
+    assert.strictEqual(st.length, 1); assert.strictEqual(cf.length, 1);
+    assert.strictEqual(st[0].settings.storeTranscripts, true);
+    assert.strictEqual(st[0].settings.extraInstructions, 'Answer in German.');
+    assert.strictEqual(cf[0].id, '_default'); assert.strictEqual(cf[0].opts.liveLogs, 'Application');
+    assert.strictEqual(w.last('adminAssignConfig'), undefined, 'no assignment changes: nothing sent');
+    assert.strictEqual($(w, 'elBarSave').disabled, true, 'Save waits for the answers');
+    assert.match($(w, 'elAiSetStatus').textContent, /Saving/);
+    // the config answer arrives first: that area is saved, the settings are still pending
+    w.h.adminUpdateConfigSets(null, { sets: [Object.assign({ _id: 'd1', default: true }, cf[0].opts)], selected: '', saved: true, defaultSet: true, name: 'Default' });
+    assert.strictEqual(bar(w), 'Assistant behaviour, Requests');
+    assert.strictEqual($(w, 'elSaveStatus').textContent, '');
+    // a refused settings save keeps the bar with the reason
+    w.h.aiAdminError(null, { reqId: st[0].reqId, error: 'Settings are locked' });
+    assert.strictEqual(bar(w), 'Assistant behaviour, Requests');
+    assert.match($(w, 'elAiSetStatus').textContent, /Assistant settings not saved: Settings are locked/);
+    assert.strictEqual($(w, 'elBarSave').disabled, false);
+    $(w, 'elBarSave').click();
+    var st2 = w.last('aiAdminSaveSettings');
+    w.h.aiAdminSettingsSaved(null, { reqId: st2.reqId, settings: st2.settings });
+    assert.strictEqual(bar(w), null, 'everything saved: the bar goes away');
+    assert.match($(w, 'elSavedNote').textContent, /Saved Assistant behaviour, Requests/);
+    assert.strictEqual($(w, 'elAiExtra').value, 'Answer in German.');
+});
+
+test('save bar: an invalid field keeps the bar, shows its page and focuses it; nothing is sent', { skip: SKIP }, function () {
+    var w = page();
+    withPrompts(w, { enabled: true, history: { enabled: true, retentionDays: 30 } });
+    setVal(w, 'elAiHistDays', '0');
+    setVal(w, 'elliveLogs', 'System');
+    w.elGoPage('configsets');
+    var n = w.sent.length;
+    $(w, 'elBarSave').click();
+    assert.strictEqual(w.sent.length, n, 'nothing sent, the config set included');
+    assert.deepStrictEqual(shown(w), ['elAssistant'], 'the page with the field is shown');
+    assert.strictEqual(w.document.activeElement, $(w, 'elAiHistDays'));
+    assert.ok($(w, 'elAiHistDaysErr'), 'inline error');
+    assert.strictEqual(bar(w), 'Config set Default, Saved results');
+    assert.match($(w, 'elAiSetStatus').textContent, /Check the marked fields/);
+    setVal(w, 'elAiHistDays', '14');
+    $(w, 'elBarSave').click();
+    assert.strictEqual(w.last('aiAdminSaveSettings').settings.history.retentionDays, 14);
+    assert.strictEqual($(w, 'elAiHistDaysErr'), null);
+});
+
+var SETS = [
+    { _id: 'd1', default: true, name: 'Default', liveLogs: 'Application,System', liveNum: 100, liveEntryTypes: [1, 2, 3], liveCategories: ['Application'], liveCategoriesMode: 'exclude', liveSources: 'plasmashell, kwin*', liveSourcesMode: 'exclude',
+      historyEnabled: true, historyLogs: 'Application,System,Security', historyEntryTypes: ['1', '2'], historyCategories: 'kernel,Auth', historyCategoriesMode: 'include', historySources: '', historySourcesMode: 'include', retentionDays: 45,
+      aiEndpointId: '', alerts: [{ id: 'r1', enabled: true, name: 'Disk errors', levels: [1, 2], logs: 'System', sources: 'disk, Ntfs', ids: '7, 55', text: '', threshold: 3, windowMin: 10, cooldownMin: 60 }] },
+    { _id: 's2', name: 'Servers', liveLogs: 'System', liveNum: 50, liveEntryTypes: [2], historyEnabled: false, historyLogs: 'System', historyEntryTypes: [], retentionDays: 30, alerts: [] }
+];
+
+test('config sets: the side-by-side editor saves exactly the stored format; chips are checkboxes; alert rules have a summary and an editor', { skip: SKIP }, function () {
+    var w = page({ sets: SETS });
+    w.elGoPage('configsets');
+    // chips are labelled checkboxes in a group
+    var live = $(w, 'elliveEntryTypes');
+    assert.strictEqual(live.getAttribute('role'), 'group');
+    assert.deepStrictEqual(Array.prototype.map.call(live.querySelectorAll('input[type=checkbox]'), function (i) { return i.parentNode.textContent + ':' + i.checked; }),
+        ['LogAlways:false', 'Critical:true', 'Error:true', 'Warning:true', 'Info:false', 'Verbose:false']);
+    assert.deepStrictEqual(Array.prototype.map.call($(w, 'elhistoryCategories').querySelectorAll('input:checked'), function (i) { return i.value; }), ['Kernel', 'Auth'], 'a stored string list, any case');
+    // the alert rule: one summary line, the fields behind Edit
+    var rule = w.document.querySelector('#elalertRules .elAlertRule');
+    assert.strictEqual(rule.querySelector('.elaTitle').textContent, 'Disk errors');
+    assert.strictEqual(rule.querySelector('.elaSum').textContent, 'Critical or Error, in System, from disk, Ntfs, IDs 7, 55. Fires at 3 within 10 min, then waits 60 min.');
+    assert.strictEqual(rule.querySelector('.rule-b').hidden, true);
+    rule.querySelector('.elaEdit').click();
+    assert.strictEqual(rule.querySelector('.rule-b').hidden, false);
+    assert.strictEqual(rule.querySelector('.elaEdit').getAttribute('aria-expanded'), 'true');
+    // unchanged: Save sends what the old form sent for the same values
+    assert.strictEqual(bar(w), null);
+    w.saveConfig();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(w.last('adminSaveConfig'))), { action: 'plugin', plugin: 'eventlog', pluginaction: 'adminSaveConfig', id: '_default', opts: {
+        name: 'Default', liveLogs: 'Application,System', liveNum: '100', liveEntryTypes: ['1', '2', '3'], liveCategories: ['Application'], liveCategoriesMode: 'exclude',
+        liveSources: 'plasmashell, kwin*', liveSourcesMode: 'exclude', historyEnabled: true, historyLogs: 'Application,System,Security', historyEntryTypes: ['1', '2'],
+        historyCategories: ['Kernel', 'Auth'], historyCategoriesMode: 'include', historySources: '', historySourcesMode: 'include', retentionDays: 45,
+        alerts: [{ id: 'r1', enabled: true, name: 'Disk errors', levels: [1, 2], logs: 'System', sources: 'disk, Ntfs', ids: '7, 55', text: '', threshold: 3, windowMin: 10, cooldownMin: 60 }],
+        aiEndpointId: '' } });
+    w.h.adminUpdateConfigSets(null, { sets: SETS, selected: '', saved: true, defaultSet: true, name: 'Default' });
+    // edits through the chips and the rule editor
+    var ver = live.querySelector('input[value="5"]'); ver.checked = true; fire(w, ver);
+    var err = rule.querySelector('.elaLevels input[value="2"]'); err.checked = false; fire(w, err);
+    assert.strictEqual(rule.querySelector('.elaSum').textContent.indexOf('Critical, in System'), 0, 'the summary follows the editor');
+    assert.strictEqual(bar(w), 'Config set Default');
+    $(w, 'elBarSave').click();
+    var o = w.last('adminSaveConfig').opts;
+    assert.deepStrictEqual([o.liveEntryTypes, o.alerts[0].levels], [['1', '2', '3', '5'], [1]]);
+    // a new rule opens with its editor
+    $(w, 'elaAddBtn').click();
+    var rules = w.document.querySelectorAll('#elalertRules .elAlertRule');
+    assert.strictEqual(rules.length, 2);
+    assert.strictEqual(rules[1].querySelector('.rule-b').hidden, false);
+    assert.strictEqual(w.document.activeElement, rules[1].querySelector('.elaName'));
+});
+
+test('config sets: switching with unsaved changes is held back in the save bar; Discard and switch; Delete asks first', { skip: SKIP }, function () {
+    var w = page({ sets: SETS });
+    w.elGoPage('configsets');
+    setVal(w, 'elhistoryLogs', 'System');
+    $(w, 'elconfigSet').value = 's2'; fire(w, $(w, 'elconfigSet'));
+    assert.strictEqual($(w, 'elconfigSet').value, '', 'still the Default set');
+    assert.strictEqual($(w, 'elname').value, 'Default');
+    assert.strictEqual($(w, 'elBarWarn').hidden, false);
+    assert.match($(w, 'elBarWarnT').textContent, /Config set “Default” has unsaved changes\. Save or discard them before you switch to another set\./);
+    $(w, 'elBarSwitch').click();
+    assert.strictEqual($(w, 'elconfigSet').value, 's2');
+    assert.strictEqual($(w, 'elname').value, 'Servers');
+    assert.strictEqual($(w, 'elhistoryEnabled').checked, false);
+    assert.strictEqual($(w, 'elhistorySources').value, '', 'a field the set does not have shows the default, not the previous set');
+    assert.strictEqual(bar(w), null);
+    assert.strictEqual($(w, 'elCfgDelBtn').disabled, false);
+    // Default cannot be deleted
+    w.elCfgSwitch('');
+    assert.strictEqual($(w, 'elCfgDelBtn').disabled, true);
+    // a new set is an unsaved change until saved
+    $(w, 'elCfgNew').click();
+    assert.strictEqual($(w, 'elconfigSet').value, '_new');
+    assert.strictEqual(bar(w), 'Config set New Config');
+    $(w, 'elBarDiscard').click();
+    assert.strictEqual($(w, 'elconfigSet').value, '');
+    assert.strictEqual(w.document.querySelector('#elconfigSet option[value="_new"]'), null);
+    // delete: confirmed first
+    w.elCfgSwitch('s2');
+    var asked = null; w.confirm = function (m) { asked = m; return false; };
+    $(w, 'elCfgDelBtn').click();
+    assert.match(asked, /Delete the config set “Servers”\?/);
+    assert.strictEqual(w.last('adminDeleteConfig'), undefined);
+    w.confirm = function () { return true; };
+    $(w, 'elCfgDelBtn').click();
+    assert.strictEqual(w.last('adminDeleteConfig').id, 's2');
+});
+
+var MESHES = { 'mesh//g1': { _id: 'mesh//g1', name: 'Office Zurich', mtype: 2 }, 'mesh//g2': { _id: 'mesh//g2', name: 'Lab', mtype: 2 } };
+var NODES = [{ _id: 'node//a', name: 'FIN-LT-0142', meshid: 'mesh//g1', mtype: 2 }, { _id: 'node//b', name: 'LAB-UBU-03', meshid: 'mesh//g2', mtype: 2 }, { _id: 'node//c', name: 'HR-LT-0031', meshid: 'mesh//g2', mtype: 2 }];
+function rowOf(w, name) { return Array.prototype.filter.call(w.document.querySelectorAll('#elAssignment tr.eldataRow'), function (r) { return r.children[1].textContent === name; })[0]; }
+function setCell(r) { return r.lastChild.firstChild; }
+
+test('assignment: inherited values muted, own sets bold; selections batched into the save bar and sent per set on Save; filter', { skip: SKIP }, function () {
+    var w = page({ sets: SETS, meshes: MESHES, nodes: NODES, assignments: [{ asset: 'mesh//g2', configId: 's2' }, { asset: 'node//c', configId: 'default' }] });
+    assert.deepStrictEqual([setCell(rowOf(w, 'Office Zurich')).className, setCell(rowOf(w, 'Office Zurich')).textContent], ['inh', 'Default (inherited)']);
+    assert.deepStrictEqual([setCell(rowOf(w, 'Lab')).className, setCell(rowOf(w, 'Lab')).textContent], ['expl', 'Servers']);
+    assert.deepStrictEqual([setCell(rowOf(w, 'LAB-UBU-03')).className, setCell(rowOf(w, 'LAB-UBU-03')).textContent], ['inh', 'Servers (from group)']);
+    assert.deepStrictEqual([setCell(rowOf(w, 'HR-LT-0031')).className, setCell(rowOf(w, 'HR-LT-0031')).textContent], ['expl', 'Default']);
+    assert.strictEqual($(w, 'elAsAssign').disabled, true);
+    // select two rows, assign Servers: pending, highlighted, nothing sent yet
+    var a = rowOf(w, 'FIN-LT-0142').querySelector('input'), g = rowOf(w, 'Office Zurich').querySelector('input');
+    a.checked = true; fire(w, a); g.checked = true; fire(w, g);
+    assert.strictEqual($(w, 'elAsCount').textContent, '2 selected');
+    $(w, 'elassignSet').value = 's2';
+    $(w, 'elAsAssign').click();
+    assert.strictEqual(w.last('adminAssignConfig'), undefined);
+    assert.ok(rowOf(w, 'FIN-LT-0142').classList.contains('chg'));
+    assert.strictEqual(rowOf(w, 'FIN-LT-0142').querySelector('.chgtag').textContent, 'Changed');
+    assert.strictEqual(setCell(rowOf(w, 'Office Zurich')).textContent, 'Servers');
+    assert.strictEqual(bar(w), '2 assignments changed');
+    assert.strictEqual(w.document.querySelector('#elRail a[data-area="assign"] .dot').hidden, false);
+    // clear the HR device's own set: back to its group's set
+    var c = rowOf(w, 'HR-LT-0031').querySelector('input'); c.checked = true; fire(w, c);
+    $(w, 'elAsClear').click();
+    assert.strictEqual(setCell(rowOf(w, 'HR-LT-0031')).textContent, 'Servers (from group)');
+    assert.strictEqual(bar(w), '3 assignments changed');
+    // filter
+    setVal(w, 'elAsFilter', 'lab');
+    assert.deepStrictEqual(Array.prototype.filter.call(w.document.querySelectorAll('#elAssignment tr.eldataRow'), function (r) { return !r.hidden; }).map(function (r) { return r.children[1].textContent; }), ['Lab', 'HR-LT-0031', 'LAB-UBU-03']);
+    $(w, 'elAsDevicesAll').checked = true; fire(w, $(w, 'elAsDevicesAll'));
+    assert.strictEqual($(w, 'elAsCount').textContent, '2 selected', 'select all: only the rows shown');
+    $(w, 'elAsDevicesAll').checked = false; fire(w, $(w, 'elAsDevicesAll'));
+    assert.strictEqual($(w, 'elAsCount').textContent, 'Select rows to change them');
+    setVal(w, 'elAsFilter', '');
+    // Save: one message per target set, with the existing action
+    $(w, 'elBarSave').click();
+    var msgs = w.sent.filter(function (m) { return m.pluginaction == 'adminAssignConfig'; }).map(function (m) { return m.configId + ':' + m.selection.slice().sort().join(','); }).sort();
+    assert.deepStrictEqual(msgs, ['_clear:node//c', 's2:mesh//g1,node//a']);
+    w.h.setsAssigned(null, { data: [{ asset: 'mesh//g2', configId: 's2' }, { asset: 'mesh//g1', configId: 's2' }, { asset: 'node//a', configId: 's2' }, { asset: 'node//c', configId: 'default' }] });
+    assert.strictEqual(bar(w), '1 assignment changed', 'one answer of two: what the server has is no longer pending');
+    assert.strictEqual($(w, 'elBarSave').disabled, true, 'still waiting');
+    w.h.setsAssigned(null, { data: [{ asset: 'mesh//g2', configId: 's2' }, { asset: 'mesh//g1', configId: 's2' }, { asset: 'node//a', configId: 's2' }] });
+    assert.strictEqual(bar(w), null);
+    assert.strictEqual(rowOf(w, 'FIN-LT-0142').classList.contains('chg'), false);
+    assert.deepStrictEqual([setCell(rowOf(w, 'FIN-LT-0142')).className, setCell(rowOf(w, 'FIN-LT-0142')).textContent], ['expl', 'Servers']);
+    assert.match($(w, 'elSavedNote').textContent, /Saved 3 assignments/);
+    // Discard drops pending assignments
+    var b = rowOf(w, 'LAB-UBU-03').querySelector('input'); b.checked = true; fire(w, b);
+    $(w, 'elAsAssign').click();
+    assert.strictEqual(bar(w), '1 assignment changed');
+    $(w, 'elBarDiscard').click();
+    assert.strictEqual(bar(w), null);
+    assert.strictEqual(setCell(rowOf(w, 'LAB-UBU-03')).textContent, 'Servers (from group)');
+});
+
+test('administrators who are not full administrators: no Assistant in the navigation, the config set keeps its stored endpoint', { skip: SKIP }, function () {
+    var w = page({ ai: { full: false, available: true }, sets: SETS, store: { evl_admin_page: 'assistant' } });
+    assert.deepStrictEqual(shown(w), ['elAssignment'], 'a remembered Assistant page falls back to Assignment');
+    assert.strictEqual($(w, 'elRailAi').hidden, true);
+    assert.strictEqual($(w, 'elNavSelAi').disabled, true);
+    w.elGoPage('requests');
+    assert.deepStrictEqual(shown(w), ['elAssignment']);
+    assert.strictEqual(w.sent.filter(function (m) { return /^aiAdmin/.test(m.pluginaction); }).length, 0, 'no Assistant requests');
+    w.elGoPage('configsets');
+    assert.strictEqual($(w, 'elaiEndpointId').hidden, true);
+    assert.match($(w, 'elaiEndpointRo').textContent, /Only full administrators can change it/);
+    setVal(w, 'elliveLogs', 'System');
+    assert.strictEqual(bar(w), 'Config set Default');
+    $(w, 'elBarSave').click();
+    assert.strictEqual('aiEndpointId' in w.last('adminSaveConfig').opts, false);
+    // full administrator on a server without the Assistant: only its notice
+    var w2 = page({ ai: { full: true, available: false } });
+    w2.elGoPage('assistant');
+    assert.deepStrictEqual(shown(w2), ['elAssistant']);
+    assert.strictEqual($(w2, 'elAiNotice').textContent, 'The Assistant is not available on this server.');
+    assert.strictEqual($(w2, 'elRailAiSubs').hidden, true);
+    assert.strictEqual($(w2, 'elaiEndpointRow').hidden, true);
+});
+
+test('collapsible parts: summaries follow edits (edited parts, unsaved changes, notes, counts)', { skip: SKIP }, function () {
+    var w = page();
+    withPrompts(w, { prompts: { ask: 'My ask. <followups>' }, starters: { windows: null, linux: ['Is journald healthy?'] } });
+    assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Ask)', 'Editing is off.']);
+    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 1 question (edited).']);
+    $(w, 'elAiPromptEdit').checked = true; fire(w, $(w, 'elAiPromptEdit'));
+    $(w, 'elAiTpl_base').value = 'Base rules without the nonce.'; fire(w, $(w, 'elAiTpl_base'), 'input');
     assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Base, Ask)', 'Unsaved changes', 'Editing', '1 note']);
     assert.ok($(w, 'elAiCollSum_prompt').querySelector('.elAiTag.unsaved'));
-    $(w, 'elAiTpl_base').value = FACTORY.base; $(w, 'elAiTpl_base').dispatchEvent(new w.Event('input', { bubbles: true }));
-    $(w, 'elAiPromptEdit').checked = false; $(w, 'elAiPromptEdit').dispatchEvent(new w.Event('change', { bubbles: true }));
-    assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Ask)']);
-    // data: a type no longer replaced, another preview policy
-    $(w, 'elAiR_macs').checked = false; $(w, 'elAiR_macs').dispatchEvent(new w.Event('change', { bubbles: true }));
-    w.document.querySelector('input[name="elAiPreview"][value="never"]').checked = true;
-    w.document.querySelector('input[name="elAiPreview"][value="never"]').dispatchEvent(new w.Event('change', { bubbles: true }));
-    assert.deepStrictEqual(summary(w, 'data'), ['Replacement: 9 of 10 types · 2 of 6 data types · Preview: off', 'Unsaved changes']);
-    // starters: back to the factory list is unsaved until saved
+    assert.strictEqual(bar(w), 'Assistant behaviour');
+    $(w, 'elAiTpl_base').value = FACTORY.base; fire(w, $(w, 'elAiTpl_base'), 'input');
+    $(w, 'elAiPromptEdit').checked = false; fire(w, $(w, 'elAiPromptEdit'));
+    assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Ask)', 'Editing is off.']);
+    assert.strictEqual(bar(w), null);
     w.elAiStartReset('linux');
-    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 · Linux: 3', 'Unsaved changes']);
-    // saved: the summaries show the saved state
+    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 3 questions.', 'Unsaved changes']);
+    assert.strictEqual(bar(w), 'Assistant behaviour');
     w.elAiSaveSettings();
     var sv = w.last('aiAdminSaveSettings');
     w.h.aiAdminSettingsSaved(null, { reqId: sv.reqId, settings: sv.settings });
-    assert.deepStrictEqual(summary(w, 'data'), ['Replacement: 9 of 10 types · 2 of 6 data types · Preview: off']);
-    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 · Linux: 3']);
-    assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Ask)']);
+    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 3 questions.']);
+    assert.strictEqual(bar(w), null);
 });

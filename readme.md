@@ -28,7 +28,9 @@ As a proof of concept, several methods were employed to become familiar with the
 #### Plugin Admin
 You can now create configuration sets and assign them to nodes or meshes. Need to collect events from a new log file other than Application/System? Just add it and assign!
 
-Each set filters what is collected (History) and shown (Live), each with an Include/Exclude switch:
+The admin page (*My Server → Plugins → Event Log*) has a side navigation with four pages: **Assignment** (which set each device group and device uses, with a filter; values a device inherits from its group or from Default are shown in grey), **Config sets**, **Assistant** (full administrators only) and **Requests**. Below a width of about 760 px the navigation becomes a *Go to* list. Changes to assignments, config sets and the Assistant settings are collected in a bar at the bottom that names what changed, with *Discard* and *Save settings*; endpoints are saved on their own.
+
+Each set filters what is collected (Stored history) and shown (Live view); the page shows both side by side. Each filter has an Include/Exclude switch:
 - **Logs** — Windows event logs (`Application,System,Security`)
 - **Categories (Linux)** — journald categories: System, Application, Kernel, Auth, Cron, Daemon, Audit. *Application* is program output and is usually the noisy one on desktops
 - **Sources** — source / provider names, comma-delimited, `*` wildcards (e.g. exclude `plasmashell, kwin*`). Works on both OSes
@@ -40,7 +42,7 @@ Each set filters what is collected (History) and shown (Live), each with an Incl
 
 Retention (days) and the 100,000-events-per-device cap are server-wide.
 
-The **Assistant** tab of the admin page (full administrators only) manages the model endpoints, what data may be sent to a model, daily limits and the Assistant's audit log; see [Assistant](#assistant).
+The **Assistant** page of the admin page (full administrators only) manages the model endpoints, what data may be sent to a model and daily limits; the **Requests** page holds the Assistant's audit log. See [Assistant](#assistant).
 
 #### Endpoint - Plugin tab
 When viewing a remote endpoint, a new "Event Log" tab appears under the Plugins tab. It follows MeshCentral's light and night themes and uses the full width of the window.
@@ -97,7 +99,7 @@ The plugin registers three permissions with MeshCentral's plugin permission fram
 - A user with neither Live nor History sees a notice with a "Check again" link. Permission changes take effect on the next device refresh, without reloading the page.
 - On a MeshCentral without the plugin permission framework, only full administrators can use the tab. When the framework is present, the startup log shows `EVENTLOG: plugin permissions registered ...`.
 - The permission keys (`deviceLiveTab`, `deviceHistoryTab`, `deviceAssistant`) are the same as in the Tech-Werkz fork, so permissions granted there keep working.
-- The Assistant tab of the admin page (endpoints, API keys, data policy, audit log) is for **full administrators** only.
+- The Assistant and Requests pages of the admin page (endpoints, API keys, data policy, audit log) are for **full administrators** only.
 
 ## Assistant
 
@@ -137,11 +139,11 @@ Supported API formats:
 
 ### Setup
 
-1. Admin page (*My Server → Plugins → Event Log*) → **Assistant** tab → **Add endpoint**: choose the server type (Ollama, vLLM, LM Studio, llama.cpp, LocalAI, *Other OpenAI-compatible server*, *OpenAI Responses API* or *Anthropic Messages API*), the address, an API key if the server needs one, and the model (*Fetch models* lists what the server offers).
-   Optionally, under **Generation**, set the thinking level (off, low, medium, high) and temperature, top-p, top-k or seed. Left empty, the server's own default applies (shown in the field once the server reported it); only filled-in values are sent. The Anthropic Messages API takes none of them, the OpenAI Responses API no top-k or seed.
+1. Admin page (*My Server → Plugins → Event Log*) → **Assistant** → **Endpoints** → **Add endpoint**: choose the server type (Ollama, vLLM, LM Studio, llama.cpp, LocalAI, *Other OpenAI-compatible server*, *OpenAI Responses API* or *Anthropic Messages API*), the address, an API key if the server needs one, and the model (*Fetch models* lists what the server offers).
+   Optionally, under **Advanced options** → **Generation**, set the thinking level (off, low, medium, high) and temperature, top-p, top-k or seed. Left empty, the server's own default applies (shown in the field once the server reported it); only filled-in values are sent. The Anthropic Messages API takes none of them, the OpenAI Responses API no top-k or seed.
 2. **Test connection** (address, connection, API key, model, tool calls, context size, which thinking levels the server accepts, the server's generation defaults next to what the Assistant applies, and whether the server accepts the endpoint's own settings), then **Save endpoint**. When no config set uses an endpoint yet, the page offers to use the new one for the *Default* config set.
-3. Check **Data sent to the model** (what may be read, what is replaced, the preview policy), optionally **Assistant behaviour** (see below), the daily limits under **Access** and how long **Saved results** are kept, then **Save settings**.
-4. **Config Sets** tab → edit a set → **Assistant endpoint**: pick the endpoint. Devices using that set can now use the Assistant (the default is *None*).
+3. Check **Data sent to the model** (what may be read, what is replaced, the preview policy; a summary at the top shows what leaves your network, to which endpoint, and what is replaced first), optionally **Assistant behaviour** (see below), the daily limits under **Access** and how long **Saved results** are kept, then **Save settings** in the bar at the bottom.
+4. **Config sets** → pick a set → **Assistant endpoint**: pick the endpoint. Devices using that set can now use the Assistant (the default is *None*).
 5. Grant **Event Log: Assistant** (*My Server → Plugins → Event Log → Permissions*) to the users or groups who should use it. They also need MeshCentral's **Details** right on the device.
 
 ### What data is sent
@@ -164,13 +166,13 @@ Each category is offered to the model only when it is on. Every field is picked 
 
 ### Assistant behaviour
 
-Under **Assistant behaviour** on the Assistant tab, *Additional instructions* are added after the built-in instructions for every question (your environment, language, tone, preferred tools), and an endpoint's *Model-specific instructions* are added for that endpoint only (for example a switch a model needs). The built-in instructions (the system prompt) can be read there part by part: *Base instructions* shared by all questions, and the parts for *Ask*, *Explain* and *Diagnosis*. After switching on *Edit the system prompt*, each part can be changed and reset to its factory default; a part changed by an administrator shows who changed it and when, and a note appears when a plugin update changed the factory text since then. Values such as `{{device}}`, `{{nonce}}` or `{{tools}}` are filled in for each request (the page lists them). *Show the full prompt* shows what the model receives for a question type and a Windows or Linux device, including unsaved changes, with notes when a change removes the untrusted-data rule (`{{nonce}}`) or an output block that the Diagnosis, Explain or follow-up views read. Changes are saved with *Save settings* and logged in the audit log. Extra instructions cannot switch off the read-only tools or the device binding, which are enforced by the server.
+Under **Assistant behaviour** on the Assistant page, *Additional instructions* are added after the built-in instructions for every question (your environment, language, tone, preferred tools), and an endpoint's *Model-specific instructions* are added for that endpoint only (for example a switch a model needs). The built-in instructions (the system prompt) can be read there part by part: *Base instructions* shared by all questions, and the parts for *Ask*, *Explain* and *Diagnosis*. After switching on *Edit the system prompt*, each part can be changed and reset to its factory default; a part changed by an administrator shows who changed it and when, and a note appears when a plugin update changed the factory text since then. Values such as `{{device}}`, `{{nonce}}` or `{{tools}}` are filled in for each request (the page lists them). *Show the full prompt* shows what the model receives for a question type and a Windows or Linux device, including unsaved changes, with notes when a change removes the untrusted-data rule (`{{nonce}}`) or an output block that the Diagnosis, Explain or follow-up views read. Changes are saved with *Save settings* and logged in the audit log. Extra instructions cannot switch off the read-only tools or the device binding, which are enforced by the server.
 
 **Starter questions:** under *Assistant behaviour*, *Starter questions* holds the example questions of an empty Ask panel, one list for Windows devices and one for Linux devices (devices whose system is not known get the Windows list). Questions can be added (up to 12, at most 200 characters each), removed, moved up or down, and each list can be reset to the factory questions.
 
 ### Saved results
 
-The Assistant tab's **Saved results** section turns saving on or off and sets how long items are kept (*Keep chats, diagnoses and explanations for N days*, 1–3650, default 30, counted from the last change; older items are deleted automatically together with the audit log sweep). It shows how many chats, diagnoses and explanations are stored, and *Delete all saved results* deletes them for all users after a confirmation (logged in the audit log). Per user and device at most 50 chats (diagnoses count as chats; the oldest go first) and 200 explanations are kept, and one item is at most 512 KB (the oldest messages lose their cited events first).
+The Assistant page's **Saved results** section turns saving on or off and sets how long items are kept (*Keep chats, diagnoses and explanations for N days*, 1–3650, default 30, counted from the last change; older items are deleted automatically together with the audit log sweep). It shows how many chats, diagnoses and explanations are stored, and *Delete all saved results* deletes them for all users after a confirmation (logged in the audit log). Per user and device at most 50 chats (diagnoses count as chats; the oldest go first) and 200 explanations are kept, and one item is at most 512 KB (the oldest messages lose their cited events first).
 
 Saved are the questions and the answers as the user saw them, with the cited events and the steps taken (including what the model wrote between its lookups); never the data sent to the model (no tool results, no system prompt). They are saved by the server when an answer is complete, never by the browser. Because they hold what the user saw, **saved results contain device data in clear text** (event messages, computer and user names, addresses) in the plugin's database; with saving turned off nothing new is saved and nothing saved is shown.
 
@@ -183,7 +185,7 @@ Saved are the questions and the answers as the user saw them, with the cited eve
 - **Requests always go from the MeshCentral server**, never from the browser. Public `https://` endpoints use the proxy set by `HTTPS_PROXY` / `HTTP_PROXY` (as MeshCentral itself does). Redirects are not followed, and the address checked when connecting is the one used. Link-local and cloud metadata addresses (169.254.x.x, fe80::) are blocked unless *Allow link-local addresses* is turned on for the endpoint.
 - **Limits:** questions and tokens per user per day (default 100 questions and 3,000,000 tokens; 0 = no limit), steps per answer (default 15, up to 50; a step is one round trip to the model, which may ask for up to 4 data lookups in it), tool calls per answer (automatic: 3 per step, or 1–200), data per answer (automatic: about 3 bytes per token of the model's context and at least 400 KB, or 16–8192 KB), maximum answer length and a timeout per request. A conversation ends after 30 minutes without questions.
 - **Saved results** are read and deleted only by the user who created them, only on the device they belong to: the server checks the user and the device for every request, whatever id the browser sends.
-- **Audit log:** every answer is logged with who asked, about which device, which endpoint and model, how much was sent and how many values were replaced. Full administrators can page through it and export it as CSV on the Assistant tab. Entries are kept for 90 days by default. *Also store full questions and answers* (off by default) keeps transcripts as they were sent to the model, with personal values replaced; anyone who can read the database can read them.
+- **Audit log:** every answer is logged with who asked, about which device, which endpoint and model, how much was sent and how many values were replaced. Full administrators can page through it and export it as CSV on the Requests page (loaded when the page is opened). Entries are kept for 90 days by default. *Also store full questions and answers* (off by default) keeps transcripts as they were sent to the model, with personal values replaced; anyone who can read the database can read them.
 
 ## Storage
 
