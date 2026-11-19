@@ -220,6 +220,36 @@ test('templates: Linux devices get the systemd journal wording and field notes',
     assert.strictEqual(P.values({}).logKind, 'event log events');
 });
 
+test('templates: macOS devices get the unified log wording, field notes, zsh/bash commands and no warning level', function () {
+    const ctx = { nonce: 'ab', deviceName: 'mac1', os: 'macos', tools: P.TOOL_NAMES, now: 0 };
+    const t = P.system('ask', ctx);
+    assert.match(t, /device: "mac1" \(macOS\)\.\nYou help a technician understand its unified log entries and crash reports and device data\./);
+    const v = P.values(ctx);
+    assert.strictEqual(v.os, ' (macOS)');
+    assert.match(v.osNotes, /^On this macOS device, the events come from the unified log \(log show\) and from crash reports/);
+    assert.match(v.osNotes, /Fault = crit, Error = err, Default and Info = info, Debug = verbose\); macOS has no warning level\./);
+    assert.match(v.osNotes, /"log" is the plugin's category \(System, Application, Kernel, Auth, Install, Crash\)/);
+    assert.match(v.osNotes, /"subsystem" and "os_category" are the os_log subsystem and category/);
+    assert.match(v.osNotes, /"msg_type" is the raw message type and "id" is the process id, not an event id\./);
+    assert.match(v.osNotes, /msg_type "Panic" is a kernel panic/);
+    assert.match(v.osNotes, /zsh\/bash commands in ```bash blocks, such as log show --last 1h/);
+    assert.match(v.osNotes, /Console\.app/);
+    assert.match(t, /use lookup_event_id only with a ref for macOS messages\.\n\nTrust rules:/);
+    assert.doesNotMatch(t, /journal|Linux/);
+    const noTools = P.system('ask', Object.assign({}, ctx, { tools: [] }));
+    assert.match(noTools, /Console\.app for browsing logs and crash reports\.\n\nTrust rules:/);
+    assert.doesNotMatch(noTools, /lookup_event_id/);
+    // everything else is the Windows prompt (the factory parts are shared)
+    const win = P.system('ask', Object.assign({}, ctx, { os: 'windows' }));
+    const strip = function (s) { return s.split('\n').filter(function (l) { return !/^You (are|help)|^On this macOS device/.test(l); }).join('\n'); };
+    assert.strictEqual(strip(t), strip(win));
+    // Android or anything else: no OS name and no notes
+    assert.deepStrictEqual([P.values({ os: 'android' }).os, P.values({ os: 'android' }).osNotes, P.values({ os: 'android' }).logKind], ['', '', 'event log events']);
+    // suggested commands default to bash on macOS
+    assert.strictEqual(P.validateDiagnosis({ nextSteps: [{ text: 'a', command: 'log show --last 1h' }] }, { os: 'macos' }).nextSteps[0].command.shell, 'bash');
+    assert.strictEqual(P.validateDiagnosis({ nextSteps: [{ text: 'a', command: { shell: 'zsh', text: 'sw_vers' } }] }, { os: 'macos' }).nextSteps[0].command.shell, 'bash');
+});
+
 test('templates: placeholders are filled literally, unknown ones kept, empty placeholder lines dropped', function () {
     const v = { device: 'A$&B', window: '', tools: 'T1\nT2', nonce: 'ff' };
     assert.strictEqual(P.fill('x {{device}} {{ nonce }} {{nope}} {{ device}}', v), 'x A$&B ff {{nope}} A$&B');

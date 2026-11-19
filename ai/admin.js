@@ -14,7 +14,7 @@
 //       prompts.edited is set here (never taken from the page): { at, by: user name, factoryHash } for every part
 //       saved with own text, dropped for parts back at the factory default. A save that changes prompt parts or
 //       extra instructions writes an audit record { kind:'settings', counted:false, userid, username, changed }.
-//   aiAdminPreviewPrompt {mode, os:'windows'|'linux', draft:{prompts?, extraInstructions?, endpointExtra?}}
+//   aiAdminPreviewPrompt {mode, os:'windows'|'linux'|'macos', draft:{prompts?, extraInstructions?, endpointExtra?}}
 //                         -> aiAdminPromptPreview { text, warnings, tokens } (sample device, window, nonce, all tools;
 //                            missing draft fields use the saved settings)
 //   aiAdminTest {id|draft}-> aiAdminTestResult { ok, steps:[{name,ok,ms,detail,lines?}], network, caps }
@@ -36,7 +36,7 @@
 // A draft needs no name (it is never stored); a draft for aiAdminModels needs no model either.
 //   aiAdminHistoryStats   -> aiAdminHistoryStats { counts:{chat, diagnosis, explain, total} } | aiAdminError { scope:'history' }
 //   aiAdminHistoryPurge   -> aiAdminHistoryPurged { removed, counts }   deletes every user's saved results (audited)
-//   aiAdminData also carries startersFactory {windows, linux}, historyAvailable and historyCounts (null if unknown).
+//   aiAdminData also carries startersFactory {windows, linux, macos}, historyAvailable and historyCounts (null if unknown).
 //   aiAdminAudit {since, until, filterUserid, filterNodeid, skip, limit, withTranscript} -> aiAdminAuditRows { rows, total }
 //       (filterUserid, not userid: MeshCentral overwrites command.userid with the caller's id on every plugin command)
 // A draft carries the unsaved form fields plus keyAction/key; keyAction 'keep' with an id uses the stored key.
@@ -48,7 +48,7 @@
 const prompts = require('./prompts.js');
 const budget = require('./budget.js');
 const C = require('./adapters/common.js');
-const { STARTERS } = require('./store.js');
+const { STARTERS, STARTER_OS } = require('./store.js');
 
 const OVERALL_MS = 30000;
 const LEVEL_WORD = { off: 'off', low: 'low', medium: 'medium', high: 'high' };
@@ -540,7 +540,7 @@ function create(o) {
             endpoints: eps.map(store.publicEndpoint), settings: settings, usedBy: usedBy, keySource: store.keySource() || null,
             prompts: settings.prompts || null, factory: Object.assign({}, prompts.FACTORY), factoryHash: Object.assign({}, prompts.FACTORY_HASH),
             placeholders: Object.assign({}, prompts.PLACEHOLDERS),
-            startersFactory: { windows: STARTERS.windows.slice(), linux: STARTERS.linux.slice() },
+            startersFactory: STARTER_OS.reduce(function (o, os) { o[os] = STARTERS[os].slice(); return o; }, {}),
             historyAvailable: !!history, historyCounts: await historyCounts()
         };
     }
@@ -642,7 +642,7 @@ function create(o) {
             if (typeof d.extraInstructions === 'string') input.extraInstructions = d.extraInstructions;
             const eff = store.mergeSettings(cur, input);
             const mode = ['ask', 'explain', 'diagnose'].indexOf(command.mode) >= 0 ? command.mode : 'ask';
-            const os = command.os === 'linux' ? 'linux' : 'windows';
+            const os = command.os === 'linux' || command.os === 'macos' ? command.os : 'windows';
             const t = Date.now();
             const ctx = {
                 nonce: SAMPLE_NONCE, deviceName: 'SAMPLE-PC', os: os, tools: prompts.TOOL_NAMES.slice(), redacted: true, now: t,

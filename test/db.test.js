@@ -199,6 +199,28 @@ backends.forEach(function (be) {
             assert.strictEqual((await q({ until: null })).length, 10);
         });
 
+        test('Linux and macOS fields are stored and come back in History', async function () {
+            var M = 'node/d/nMac';
+            await db.addEventsFor(M, [
+                ev(0, { LogName: 'Install', ProviderName: 'softwareupdated', Id: '412', Level: 4, MsgType: 'Default', Subsystem: 'com.apple.SoftwareUpdate', OsCategory: 'scan', ProcessPath: '/System/Library/PrivateFrameworks/SoftwareUpdate.framework/softwareupdated' }),
+                ev(1, { LogName: 'Crash', ProviderName: 'Safari', Id: '', Level: 2, MsgType: 'Crash', Subsystem: '', OsCategory: '', ProcessPath: '/Library/Logs/DiagnosticReports/Safari-2026-11-19-101500.ips' }),
+                ev(2, { LogName: 'Kernel', ProviderName: 'kernel', Id: '0', Level: 3, Priority: 4, Unit: 'kernel', Transport: 'kernel' })
+            ]);
+            var r = await cbp(function (cb) { db.getEventsFor(M, {}, {}, cb); });
+            assert.strictEqual(r[1], 3);
+            var byLog = {}; r[0].forEach(function (e) { byLog[e.LogName] = e; });
+            assert.strictEqual(byLog.Install.Subsystem, 'com.apple.SoftwareUpdate');
+            assert.strictEqual(byLog.Install.OsCategory, 'scan');
+            assert.strictEqual(byLog.Install.ProcessPath, '/System/Library/PrivateFrameworks/SoftwareUpdate.framework/softwareupdated');
+            assert.strictEqual(byLog.Install.MsgType, 'Default');
+            assert.strictEqual(byLog.Crash.MsgType, 'Crash');
+            assert.strictEqual(byLog.Crash.ProcessPath, '/Library/Logs/DiagnosticReports/Safari-2026-11-19-101500.ips');
+            assert.ok(!byLog.Crash.Subsystem, 'empty fields are not required to be kept');
+            assert.strictEqual(byLog.Kernel.Unit, 'kernel');
+            assert.strictEqual(Number(byLog.Kernel.Priority), 4);
+            assert.strictEqual(byLog.Kernel.Transport, 'kernel');
+        });
+
         test('getFacetsFor (history sidebar) is unchanged', async function () {
             var f = await cbp(function (cb) { db.getFacetsFor(A, null, cb); });
             assert.deepStrictEqual(f[0], { level: { 1: 1, 2: 4, 3: 3, 4: 2 }, log: { System: 5, Application: 3, Security: 2 }, source: { Disk: 4, App: 3, Auth: 2, Kernel: 1 } });

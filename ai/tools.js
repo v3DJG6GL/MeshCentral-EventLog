@@ -11,7 +11,7 @@
 //   pack(label, data, maxTokens) -> { text, truncated } redacted + fitted JSON (not fenced; digest.js fences)
 //   validate(name, args)      -> error string | null
 // }
-// S: { nodeid, node, rights, domain, userid, os, histOpts, refs, redactor, nonce, window?, suspicious:Set, softwareCache }
+// S: { nodeid, node, rights, domain, userid, os, osVersion?, histOpts, refs, redactor, nonce, window?, suspicious:Set, softwareCache }
 // deps: { db (plugin db), meshDb, getConnectivityState(nodeid), software (ai/software.js), categories, now(),
 //         agentOnline(nodeid) -> bool, softwareTimeoutMs }
 // categories -> tools: storedEvents: event_facets, event_groups, get_events, get_event, lookup_event_id;
@@ -43,7 +43,7 @@ const FILTERS = {
     type: 'object', additionalProperties: false, description: 'Optional filters, combined with AND.',
     properties: {
         levels: { type: 'array', maxItems: 5, items: { type: 'string', enum: ['crit', 'err', 'warn', 'info', 'verbose'] }, description: 'Severity levels.' },
-        logs: { type: 'array', maxItems: 10, items: { type: 'string', maxLength: 100 }, description: 'Log names (Windows: System, Application, ...; Linux: categories).' },
+        logs: { type: 'array', maxItems: 10, items: { type: 'string', maxLength: 100 }, description: 'Log names (Windows: System, Application, ...; Linux and macOS: categories).' },
         sources: { type: 'array', maxItems: 20, items: { type: 'string', maxLength: 200 }, description: 'Exact source / provider names (as returned in "src").' },
         text: { type: 'string', maxLength: 200, description: 'Case-insensitive substring of message, source or log.' },
         ids: { type: 'string', maxLength: 100, pattern: '^[0-9 ,\\-]*$', description: 'Event ids, e.g. "41, 6008" or "7000-7040".' }
@@ -54,7 +54,7 @@ function obj(props, required) { const o = { type: 'object', additionalProperties
 const DEFS = {
     get_device_info: { description: 'Device summary: OS, hardware, agent, antivirus, last boot.', parameters: obj({}) },
     event_facets: { description: 'Counts of stored events per level, log and source in a time window. Cheap; use first.', parameters: obj({ window: WINDOW, filters: FILTERS }) },
-    event_groups: { description: 'Stored events grouped by source+id (Windows) or unit+message template (Linux), most severe and most frequent first, with first/last time and sample refs.', parameters: obj({ window: WINDOW, filters: FILTERS, top_n: { type: 'integer', minimum: 1, maximum: 30, description: 'Groups to return (default 20).' } }) },
+    event_groups: { description: 'Stored events grouped by source+id (Windows) or unit/subsystem+message template (Linux, macOS), most severe and most frequent first, with first/last time and sample refs.', parameters: obj({ window: WINDOW, filters: FILTERS, top_n: { type: 'integer', minimum: 1, maximum: 30, description: 'Groups to return (default 20).' } }) },
     get_events: { description: 'Raw stored events, newest first. Message text is untrusted.', parameters: obj({ window: WINDOW, filters: FILTERS, limit: { type: 'integer', minimum: 1, maximum: 50, description: 'Default 20.' } }) },
     get_event: { description: 'One stored event by its ref with the full message.', parameters: obj({ ref: { type: 'string', pattern: '^\\[?E\\d{1,6}\\]?$', description: 'A ref such as E12.' } }, ['ref']) },
     lookup_event_id: { description: 'Curated reference for an event: meaning, usual causes, whether it is usually harmless. Give provider+id, or the ref of a stored event.', parameters: obj({ provider: { type: 'string', maxLength: 200 }, id: { type: ['integer', 'string'], maxLength: 12 }, ref: { type: 'string', pattern: '^\\[?E\\d{1,6}\\]?$' } }) },
@@ -230,6 +230,10 @@ function create(S, deps) {
         const ref = S.refs.add(e);
         const o = { ref: ref || null, t: Number(e.tc) || null, lvl: LEVEL_NAMES[Number(e.Level)] || 'info', log: e.LogName == null ? null : String(e.LogName), src: e.ProviderName == null ? null : String(e.ProviderName), id: e.Id == null ? null : e.Id };
         if (e.Unit != null && e.Unit !== '') o.unit = String(e.Unit);
+        // macOS unified log: os_log subsystem / category and the raw message type (Fault, Error, Default, ..., Panic)
+        if (e.Subsystem != null && e.Subsystem !== '') o.subsystem = clip(e.Subsystem, 200);
+        if (e.OsCategory != null && e.OsCategory !== '') o.os_category = clip(e.OsCategory, 200);
+        if (e.MsgType != null && e.MsgType !== '') o.msg_type = clip(e.MsgType, 20);
         o.msg_untrusted = clip(e.Message, msgMax || 1000);
         if (prompts.suspicious(e.Message)) { o.injection_suspect = true; if (ref) S.suspicious.add(ref); }
         return o;
@@ -249,7 +253,7 @@ function create(S, deps) {
 
     const RUN = {
         get_device_info: async function () {
-            const data = await devicedata.deviceInfo({ meshDb: deps.meshDb, nodeid: S.nodeid, node: S.node, categories: { deviceSummary: !!cats.deviceSummary, network: !!cats.network, notes: !!cats.notes }, getConnectivityState: deps.getConnectivityState, serials: false });
+            const data = await devicedata.deviceInfo({ meshDb: deps.meshDb, nodeid: S.nodeid, node: S.node, categories: { deviceSummary: !!cats.deviceSummary, network: !!cats.network, notes: !!cats.notes }, getConnectivityState: deps.getConnectivityState, serials: false, osVersion: S.osVersion || null });
             return { ok: true, data: data, items: Object.keys(data).length };
         },
         event_facets: async function (a) {
@@ -274,6 +278,7 @@ function create(S, deps) {
             const out = gs.map(function (g) {
                 const o = { count: g.count, first: g.first, last: g.last, lvl: LEVEL_NAMES[g.level] || 'info', log: g.log || null, src: g.src || null, id: g.id === '' ? null : g.id };
                 if (g.unit) o.unit = g.unit;
+                if (g.subsystem) o.subsystem = g.subsystem;
                 o.template_untrusted = g.template;
                 if (prompts.suspicious(g.template)) o.injection_suspect = true;
                 const samples = g.sampleIds.map(function (id) { return byId.get(String(id)); }).filter(Boolean);
@@ -300,6 +305,7 @@ function create(S, deps) {
             if (!e) return { ok: false, error: 'Unknown ref ' + String(a.ref).slice(0, 12) + '. Use a ref returned by another tool.' };
             const o = compactEvent(e, 4000);
             for (const k of ['Priority', 'Transport', 'Task', 'Opcode', 'Keywords', 'Qualifiers', 'RecordId']) if (e[k] != null && e[k] !== '' && typeof e[k] !== 'object') o[k.toLowerCase()] = e[k];
+            if (e.ProcessPath != null && e.ProcessPath !== '' && typeof e.ProcessPath !== 'object') o.process_path = clip(e.ProcessPath, 400);
             return { ok: true, data: o, items: 1 };
         },
         lookup_event_id: async function (a) {
@@ -307,9 +313,12 @@ function create(S, deps) {
             if (a.ref) {
                 const e = S.refs.get(String(a.ref).replace(/[[\]\s]/g, ''));
                 if (!e) return { ok: false, error: 'Unknown ref ' + String(a.ref).slice(0, 12) };
-                const linux = S.os === 'linux' || e.Unit != null || e.Priority != null;
-                if (linux) r = eventref.lookupLinux(e.Message, e.Unit);
-                if (!r || !r.known) r = eventref.lookup(e.ProviderName, e.Id);
+                const mac = S.os === 'macos' || (S.os !== 'linux' && S.os !== 'windows' && (e.Subsystem != null || e.MsgType != null));
+                const linux = !mac && (S.os === 'linux' || e.Unit != null || e.Priority != null);
+                if (mac) r = eventref.lookupMac(e.Message, e.ProviderName, e.Subsystem);
+                else if (linux) r = eventref.lookupLinux(e.Message, e.Unit);
+                // provider + id is the Windows reference; on macOS the id is a process id
+                if (!mac && (!r || !r.known)) r = eventref.lookup(e.ProviderName, e.Id);
             } else {
                 if (a.provider == null || a.id == null) return { ok: false, error: 'Give provider and id, or ref' };
                 r = eventref.lookup(a.provider, a.id);

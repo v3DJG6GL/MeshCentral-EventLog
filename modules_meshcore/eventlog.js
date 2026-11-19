@@ -182,14 +182,21 @@ var runPwshTest = function(func) {
 //  duktape is ES5-only here: no arrow functions, let, template
 //  literals, spread, Object.assign or Array.prototype.includes.
 // ------------------------------------------------------------------
-var PLAT = (process.platform == 'win32') ? 'win32' : ((process.platform == 'linux') ? 'linux' : null);
+var PLAT = (process.platform == 'win32') ? 'win32' : ((process.platform == 'linux') ? 'linux' : ((process.platform == 'darwin') ? 'darwin' : null));
 var linuxCaps = null;      // { journalctl, jver, persistent, audit, dmesgJson, files: [] }
 var linuxTmpDir = null;
+
+// the agent's own directory (macOS: /usr/local/mesh_services/<name>/), or null
+var agentDir = function() {
+    try { var ep = String(process.execPath || ''); var i = ep.lastIndexOf('/'); if (i > 0) return ep.substring(0, i); } catch (e) { }
+    return null;
+};
 
 var pickTmpDir = function() {
     if (linuxTmpDir != null) return linuxTmpDir;
     var fs = require('fs');
     var cands = ['/usr/local/mesh', '/var/tmp', '/tmp'];
+    if (PLAT == 'darwin') { cands = ['/usr/local/mesh_services']; var ad = agentDir(); if (ad != null) cands.push(ad); cands.push('/var/tmp'); cands.push('/tmp'); }
     for (var i = 0; i < cands.length; i++) {
         try { if (fs.existsSync(cands[i])) { linuxTmpDir = cands[i]; return linuxTmpDir; } } catch (e) { }
     }
@@ -422,6 +429,478 @@ var capturePeriodicLinux = function() {
     } catch (e) { dbg('Periodic linux runner error: ' + e); }
 };
 
+// ------------------------------------------------------------------
+//  macOS (unified log + crash reports) support. ES5 only, see above.
+//  History: `log show --style ndjson` from a cursor "<µs>:<n>|c<sec>"
+//  (last event time in µs since epoch, events with exactly that time
+//  already delivered, crash report mtime cursor), committed when the
+//  server acknowledges the batch (setLVDOC echoes it).
+// ------------------------------------------------------------------
+var macCaps = null;            // { log, ndjson, osver, crashDir }
+var macHistRunning = 0;        // start time (ms) of the history run in flight, 0 = none
+var macHistRunId = 0;          // id of the newest history run
+var MAC_RUN_STALE_MS = 5 * 60 * 1000;
+var MAC_BATCH_MAX = 2000;      // events per history batch
+var MAC_HEAD_LINES = 2100;     // ndjson lines read per history run
+var MAC_CRASH_MAX = 20;        // crash reports per run
+var MAC_CRASH_DIR = '/Library/Logs/DiagnosticReports';
+var MAC_AUTH_SUBS = ['com.apple.securityd', 'com.apple.Authorization', 'com.apple.opendirectoryd', 'com.apple.TCC', 'com.apple.LocalAuthentication'];
+var MAC_AUTH_SUB_PREFIX = ['com.apple.loginwindow', 'com.apple.authkit'];
+var MAC_AUTH_PROCS = ['sshd', 'sudo', 'su', 'authd', 'securityd', 'opendirectoryd', 'loginwindow', 'screensharingd', 'sshd-session'];
+var MAC_INSTALL_PROCS = ['installd', 'system_installd', 'softwareupdated', 'softwareupdate', 'mdmclient', 'storedownloadd', 'appstoreagent', 'package_script_service'];
+var MAC_INSTALL_SUB_PREFIX = ['com.apple.SoftwareUpdate', 'com.apple.install'];
+var MAC_SYSTEM_PATH_PREFIX = ['/System/', '/usr/', '/bin/', '/sbin/', '/Library/Apple/', '/private/var/db/'];
+
+var probeMacCaps = function(cb) {
+    if (macCaps != null) { cb(macCaps); return; }
+    var script = 'test -x /usr/bin/log && echo L=1 || echo L=0\n' +
+        'echo V=`sw_vers -productVersion 2>/dev/null`\n' +
+        // exit status tells whether this macOS knows --style ndjson (an unknown style is a usage error)
+        'test -x /usr/bin/log && /usr/bin/log show --style ndjson --last 1m --predicate \'eventType == logEvent AND messageType == fault\' >/dev/null 2>&1 && echo J=1 || echo J=0\n' +
+        'test -r ' + MAC_CRASH_DIR + ' && test -x ' + MAC_CRASH_DIR + ' && echo C=1 || echo C=0';
+    shRun(script, function (o) {
+        var caps = { log: false, ndjson: false, osver: '', crashDir: false };
+        var lines = String(o.stdout).split('\n');
+        for (var i = 0; i < lines.length; i++) {
+            var ln = lines[i].replace(/\r/g, '').replace(/^\s+|\s+$/g, '');
+            if (ln == 'L=1') caps.log = true;
+            else if (ln == 'J=1') caps.ndjson = true;
+            else if (ln == 'C=1') caps.crashDir = true;
+            else if (ln.substring(0, 2) == 'V=') caps.osver = ln.substring(2).replace(/[^0-9.]/g, '');
+        }
+        if (!caps.log) caps.ndjson = false;
+        macCaps = caps;
+        dbg('mac caps: ' + JSON.stringify(caps));
+        cb(caps);
+    });
+};
+
+// days since 1970-01-01 for a proleptic Gregorian date (no Date.parse: duktape's is not reliable for these formats)
+var macDaysFromCivil = function(y, m, d) {
+    y -= (m <= 2) ? 1 : 0;
+    var era = Math.floor(y / 400);
+    var yoe = y - era * 400;
+    var doy = Math.floor((153 * ((m + 9) % 12) + 2) / 5) + d - 1;
+    var doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy;
+    return era * 146097 + doe - 719468;
+};
+
+// "2026-11-19 10:00:00.123456+0100" (unified log), "2026-11-19 10:00:00.00 +0100" (.ips header),
+// "...Z", "+01:00" -> { us, ms } since epoch (UTC); null when unparsable. Without a zone: local time.
+var parseMacTime = function(s) {
+    var m = /^\s*(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?\s*(?:(Z)|([+-])(\d{2}):?(\d{2}))?\s*$/.exec(String(s == null ? '' : s));
+    if (m == null) return null;
+    var frac = Number(((m[7] || '') + '000000').substring(0, 6));
+    var sec;
+    if (m[8] || m[9]) {
+        sec = macDaysFromCivil(Number(m[1]), Number(m[2]), Number(m[3])) * 86400 + Number(m[4]) * 3600 + Number(m[5]) * 60 + Number(m[6]);
+        if (m[9]) sec -= ((m[9] == '-') ? -1 : 1) * (Number(m[10]) * 3600 + Number(m[11]) * 60);
+    } else {
+        sec = Math.floor(new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6])).getTime() / 1000);
+    }
+    if (isNaN(sec)) return null;
+    var us = sec * 1000000 + frac;
+    return { us: us, ms: Math.floor(us / 1000) };
+};
+
+// a --start argument in the endpoint's local time ("YYYY-MM-DD HH:MM:SS", the plain form `log` documents).
+// When a DST change lies within the hour before, start an hour earlier: the repeated local hour is
+// ambiguous, and events before the cursor are skipped by the parser anyway.
+var macStartArg = function(sec) {
+    sec = Math.floor(Number(sec));
+    if (new Date((sec - 3600) * 1000).getTimezoneOffset() != new Date(sec * 1000).getTimezoneOffset()) sec -= 3600;
+    var d = new Date(sec * 1000);
+    var p2 = function (n) { return (n < 10 ? '0' : '') + n; };
+    return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds());
+};
+
+// the config's level list (0-5) -> what to collect on macOS. There is no Warning (3) on macOS.
+// { all, types: [messageType tokens], info (--info), debug (--debug), levels: {1:true,...}, crash, panic }
+var macLevelSel = function(levels) {
+    var sel = { all: false, types: [], info: false, debug: false, levels: {}, crash: false, panic: false };
+    var setAll = function () { sel.all = true; sel.types = []; sel.info = true; sel.debug = true; sel.levels = { 1: true, 2: true, 4: true, 5: true }; sel.crash = true; sel.panic = true; return sel; };
+    if (levels == null || levels.length == 0) return setAll();
+    var add = function (t) { for (var k = 0; k < sel.types.length; k++) { if (sel.types[k] == t) return; } sel.types.push(t); };
+    for (var i = 0; i < levels.length; i++) {
+        var n = Number(levels[i]);
+        if (n == 0) return setAll();
+        if (n == 1) { add('fault'); sel.levels[1] = true; sel.panic = true; }
+        else if (n == 2) { add('error'); sel.levels[2] = true; sel.crash = true; }
+        else if (n == 4) { add('default'); add('info'); sel.levels[4] = true; sel.info = true; }
+        else if (n == 5) { add('debug'); sel.levels[5] = true; sel.info = true; sel.debug = true; }
+    }
+    return sel;
+};
+var macLevelOf = function(mt) {
+    mt = String(mt || '').toLowerCase();
+    if (mt == 'fault') return 1;
+    if (mt == 'error') return 2;
+    if (mt == 'debug') return 5;
+    return 4; // default, info
+};
+var macMsgType = function(mt) {
+    mt = String(mt || 'Default');
+    return mt.charAt(0).toUpperCase() + mt.substring(1).toLowerCase();
+};
+
+// NSPredicate for `log show`, built from fixed tokens only; `extra` is one of the fixed MAC_PRED_* strings or
+// a clause made by macSelPredicate (values through shSanitize, which removes every quote)
+var macPredicate = function(sel, extra) {
+    var p = 'eventType == logEvent';
+    if (!sel.all) {
+        var t = [];
+        for (var i = 0; i < sel.types.length; i++) t.push('messageType == ' + sel.types[i]);
+        p += ' AND (' + t.join(' OR ') + ')';
+    }
+    if (extra) p += ' AND (' + extra + ')';
+    return p;
+};
+var macOrList = function(key, op, vals) {
+    var t = [];
+    for (var i = 0; i < vals.length; i++) t.push(key + ' ' + op + ' "' + vals[i] + '"');
+    return t.join(' OR ');
+};
+var MAC_PRED_KERNEL = 'processImagePath == "/kernel" OR process == "kernel"';
+var MAC_PRED_AUTH = macOrList('subsystem', '==', MAC_AUTH_SUBS) + ' OR ' + macOrList('subsystem', 'BEGINSWITH[c]', MAC_AUTH_SUB_PREFIX) + ' OR ' + macOrList('process', '==', MAC_AUTH_PROCS);
+var MAC_PRED_INSTALL = macOrList('process', '==', MAC_INSTALL_PROCS) + ' OR ' + macOrList('subsystem', 'BEGINSWITH[c]', MAC_INSTALL_SUB_PREFIX);
+
+// live selector -> { extra, catFilter, unified, crash, boot }
+var macSelPredicate = function(lsel) {
+    lsel = String(lsel == null ? '' : lsel);
+    if (lsel == 'kernel') return { extra: MAC_PRED_KERNEL, catFilter: 'Kernel', unified: true, crash: false };
+    if (lsel == 'auth') return { extra: MAC_PRED_AUTH, catFilter: 'Auth', unified: true, crash: false };
+    if (lsel == 'install') return { extra: MAC_PRED_INSTALL, catFilter: 'Install', unified: true, crash: false };
+    if (lsel == 'crash') return { extra: null, catFilter: 'Crash', unified: false, crash: true };
+    if (lsel == 'boot') return { extra: null, catFilter: null, unified: true, crash: false, boot: true };
+    if (lsel.substring(0, 10) == 'subsystem:' && shSanitize(lsel.substring(10)) != '') return { extra: 'subsystem == "' + shSanitize(lsel.substring(10)) + '"', catFilter: null, unified: true, crash: false };
+    if (lsel.substring(0, 8) == 'process:' && shSanitize(lsel.substring(8)) != '') return { extra: 'process == "' + shSanitize(lsel.substring(8)) + '"', catFilter: null, unified: true, crash: false };
+    return { extra: null, catFilter: null, unified: true, crash: true };
+};
+
+var macBasename = function(p) { p = String(p == null ? '' : p); var i = p.lastIndexOf('/'); return (i >= 0) ? p.substring(i + 1) : p; };
+var macInList = function(v, list) { v = String(v).toLowerCase(); for (var i = 0; i < list.length; i++) { if (String(list[i]).toLowerCase() == v) return true; } return false; };
+var macHasPrefix = function(v, list, ci) {
+    v = String(v); if (ci) v = v.toLowerCase();
+    for (var i = 0; i < list.length; i++) { var p = ci ? String(list[i]).toLowerCase() : String(list[i]); if (v.substring(0, p.length) == p) return true; }
+    return false;
+};
+
+// category (LogName) of a unified-log event: { process, path, subsystem }
+var macCategory = function(e) {
+    var proc = String(e.process || ''), path = String(e.path || ''), sub = String(e.subsystem || '');
+    if (proc == 'kernel' || path == '/kernel') return 'Kernel';
+    if (macInList(sub, MAC_AUTH_SUBS) || macHasPrefix(sub, MAC_AUTH_SUB_PREFIX, true) || macInList(proc, MAC_AUTH_PROCS)) return 'Auth';
+    if (macInList(proc, MAC_INSTALL_PROCS) || macHasPrefix(sub, MAC_INSTALL_SUB_PREFIX, true)) return 'Install';
+    if (sub.substring(0, 10) == 'com.apple.' || macHasPrefix(path, MAC_SYSTEM_PATH_PREFIX, false)) return 'System';
+    return 'Application';
+};
+
+var macCleanText = function(s) { return String(s == null ? '' : s).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ''); };
+
+// level / category / source rules shared by unified-log and crash events
+var macEventAllowed = function(ev, params) {
+    if (!params.sel.levels[ev.Level]) return false;
+    if (params.catFilter != null && ev.LogName != params.catFilter) return false;
+    if (!evlAllowed(params.catRules, ev.LogName)) return false;   // config set: Categories
+    if (!evlAllowed(params.srcRules, ev.ProviderName)) return false; // config set: Sources
+    return true;
+};
+
+// cursor "<µs>:<n>|c<sec>" -> { us, n, crash } (null parts when absent)
+var macParseCursor = function(s) {
+    var r = { us: null, n: 0, crash: null };
+    var m = /^(\d+):(\d+)(?:\|c(\d+))?$/.exec(String(s == null ? '' : s));
+    if (m == null) return r;
+    if (Number(m[1]) > 0) { r.us = Number(m[1]); r.n = Number(m[2]); }
+    if (m[3] != null && Number(m[3]) > 0) r.crash = Number(m[3]);
+    return r;
+};
+var macFormatCursor = function(c) {
+    return String(c.us != null ? c.us : 0) + ':' + String(c.us != null ? (c.n || 0) : 0) + '|c' + String(c.crash != null ? c.crash : 0);
+};
+
+// parse `log show --style ndjson` output. Non-JSON lines (a truncated tail, banners) and non-event objects
+// (the final summary) are skipped. History (params.cursor): events up to the cursor are skipped, the
+// returned last/tie describe the last examined event. Returns { events, lastUs, tie, examined, truncated, rc }
+var parseMacNdjson = function(txt, params) {
+    var out = { events: [], lastUs: null, tie: 0, examined: 0, truncated: false, rc: null };
+    var cur = params.cursor || null, skipUs = (cur != null && cur.us != null) ? cur.us : null, skipN = (skipUs != null) ? (cur.n || 0) : 0;
+    var minUs = (params.minUs != null) ? params.minUs : null, seenAtSkip = 0;
+    out.lastUs = skipUs; out.tie = skipN;
+    var lines = String(txt).split('\n');
+    for (var li = 0; li < lines.length; li++) {
+        var ln = lines[li];
+        if (ln.length < 2 || ln.charAt(0) != '{') continue;
+        var j = null;
+        try { j = JSON.parse(ln); } catch (e) { continue; }
+        if (j == null || typeof j != 'object') continue;
+        if (j.evlrc != null) { out.rc = Number(j.evlrc); continue; } // exit status of `log show`, appended by the script
+        if (j.eventType != null && j.eventType != 'logEvent') continue;
+        var t = parseMacTime(j.timestamp);
+        if (t == null) continue;
+        if (minUs != null && t.us < minUs) continue;
+        if (skipUs != null) {
+            if (t.us < skipUs) continue;
+            if (t.us == skipUs && seenAtSkip < skipN) { seenAtSkip++; continue; } // already delivered (same-µs ties)
+        }
+        if (!params.live && out.events.length >= MAC_BATCH_MAX) { out.truncated = true; break; }
+        if (out.lastUs != null && t.us == out.lastUs) out.tie++; else { out.lastUs = t.us; out.tie = 1; }
+        out.examined++;
+        var path = String(j.processImagePath || ''), proc = macBasename(path), sub = String(j.subsystem || '');
+        var ev = {
+            LogName: macCategory({ process: proc, path: path, subsystem: sub }),
+            Level: macLevelOf(j.messageType),
+            MsgType: macMsgType(j.messageType),
+            TimeCreated: '/Date(' + t.ms + ')/',
+            ProviderName: proc,
+            Subsystem: sub,
+            OsCategory: String(j.category || ''),
+            ProcessPath: path,
+            Id: (j.processID != null && j.processID !== '') ? String(j.processID) : '',
+            Message: macCleanText(j.eventMessage)
+        };
+        if (!macEventAllowed(ev, params)) continue;
+        if (params.live) ev._us = t.us;
+        out.events.push(ev);
+    }
+    return out;
+};
+
+// app/process name from a report file name: "Safari-2026-11-19-100000.ips", "Safari_2019-01-01-100000_host.crash"
+var macCrashName = function(name) {
+    var n = String(name).replace(/\.(ips|crash|panic|diag)$/i, '');
+    n = n.replace(/[-_]\d{4}-\d{2}-\d{2}[-_]\d{6}.*$/, '');
+    return n;
+};
+
+// one crash report -> event. name: file name, mtimeSec, content: first <= 4 KB
+var macCrashEvent = function(name, mtimeSec, content) {
+    var ext = (/\.([A-Za-z]+)$/.exec(name) || ['', ''])[1].toLowerCase();
+    var hdr = null, t = null, prov = '';
+    if (ext == 'ips') {
+        var nl = content.indexOf('\n');
+        try { hdr = JSON.parse(nl >= 0 ? content.substring(0, nl) : content); } catch (e) { hdr = null; }
+        if (hdr == null || typeof hdr != 'object') hdr = null;
+    }
+    if (hdr != null) {
+        prov = String(hdr.app_name || hdr.name || hdr.procName || '');
+        if (hdr.timestamp != null) t = parseMacTime(hdr.timestamp);
+    } else {
+        var pm = /^Process:\s+([^\[\r\n]+?)\s*(\[|$)/m.exec(content); if (pm) prov = pm[1];
+        var dm = /^Date\/Time:\s+([^\r\n]+)$/m.exec(content); if (dm) t = parseMacTime(dm[1]);
+    }
+    var panic = /panic/i.test(name) || (hdr != null && String(hdr.bug_type) == '210');
+    if (prov == '') prov = panic ? 'kernel' : macCrashName(name);
+    var ms = (t != null) ? t.ms : Number(mtimeSec) * 1000;
+    return {
+        LogName: 'Crash',
+        Level: panic ? 1 : 2,
+        MsgType: panic ? 'Panic' : 'Crash',
+        TimeCreated: '/Date(' + ms + ')/',
+        ProviderName: prov,
+        Subsystem: '', OsCategory: '',
+        ProcessPath: MAC_CRASH_DIR + '/' + name,
+        Id: '',
+        Message: macCleanText(content)
+    };
+};
+
+// sh fragment listing crash reports newer than sinceSec (oldest first for history, newest first for live),
+// at most `max`, each followed by its first 4 KB between delimiter lines
+var macCrashScript = function(sinceSec, max, newestFirst, token) {
+    return 'cd ' + MAC_CRASH_DIR + ' 2>/dev/null && for f in *.ips *.crash *.panic *.diag; do test -f "$f" && stat -f \'%m %N\' "$f"; done 2>/dev/null' +
+        ' | awk -v c=' + Math.floor(Number(sinceSec) || 0) + ' \'$1 > c\'' +
+        ' | sort -k1,1n' + (newestFirst ? 'r' : '') + ' -k2 | head -n ' + Math.floor(max) +
+        ' | while read -r m f; do echo "' + token + ' $m $f"; head -c 4096 "$f"; echo; echo "' + token + '-END"; done';
+};
+// -> [{ mtime, name, content }]
+var parseMacCrashOutput = function(txt, token) {
+    var res = [], cur = null, lines = String(txt).split('\n');
+    for (var i = 0; i < lines.length; i++) {
+        var ln = lines[i].replace(/\r$/, '');
+        if (cur == null) {
+            if (ln.substring(0, token.length + 1) == token + ' ') {
+                var m = /^(\d+) (.+)$/.exec(ln.substring(token.length + 1));
+                if (m) cur = { mtime: Number(m[1]), name: m[2], lines: [] };
+            }
+        } else if (ln == token + '-END') {
+            if (cur.lines.length > 0 && cur.lines[cur.lines.length - 1] == '') cur.lines.pop(); // the `echo` after head
+            res.push({ mtime: cur.mtime, name: cur.name, content: cur.lines.join('\n') });
+            cur = null;
+        } else cur.lines.push(ln);
+    }
+    return res;
+};
+
+// the `log show` pipeline. History: chronological, head-bounded; live: the newest lines via tail.
+// The exit status of `log show` is appended as {"evlrc":N} so a failed run is not taken as "no events".
+var macLogCmd = function(p, fileName) {
+    var cmd = '( nice -n 10 /usr/bin/log show --style ndjson';
+    if (p.sel.info) cmd += ' --info';
+    if (p.sel.debug) cmd += ' --debug';
+    if (p.startSec != null) cmd += ' --start "' + macStartArg(p.startSec) + '"';
+    else cmd += ' --last ' + p.last;
+    cmd += " --predicate '" + macPredicate(p.sel, p.extra) + "'";
+    cmd += '; echo "{\\"evlrc\\":$?}" )';
+    if (p.live) cmd += ' | tail -n ' + (Math.floor(Number(p.num) || 100) + 50);
+    else cmd += ' | head -n ' + MAC_HEAD_LINES;
+    cmd += ' | head -c 8388608 > ' + fileName;
+    return cmd;
+};
+
+// one collection run: unified log (into a tmp file) and/or crash reports (stdout), in one sh script.
+// params: { live, num, sel, cursor, lvdocMs, sinceSec, extra, catFilter, catRules, srcRules, unified, crash, boot, maxAgeHours }
+// func({ events, cursor (history: string or null), truncated, error })
+var runMacCollector = function(func, passedParams) {
+    var params = { live: false, num: 200, sel: macLevelSel(null), cursor: null, lvdocMs: null, sinceSec: null, extra: null, catFilter: null,
+                   catRules: null, srcRules: null, unified: true, crash: true, boot: false, maxAgeHours: 24 };
+    for (var pk in passedParams) { if (passedParams[pk] !== undefined && passedParams[pk] !== null) params[pk] = passedParams[pk]; }
+    var cur = params.cursor || { us: null, n: 0, crash: null };
+    var runStartMs = new Date().getTime(), nowSec = Math.floor(runStartMs / 1000);
+    var sel = params.sel;
+    var doUnified = params.unified && (sel.all || sel.types.length > 0);
+    var doCrash = params.crash && (sel.crash || sel.panic);
+    var fileName = null, token = 'EVLCRASH' + Math.random().toString(32).replace('0.', '');
+    var lp = { live: params.live, num: params.num, sel: sel, extra: params.extra, startSec: null, last: null };
+    var pc = { cursor: null, minUs: null, live: params.live, sel: sel, catFilter: params.catFilter, catRules: params.catRules, srcRules: params.srcRules };
+    var crashSince, crashMax;
+    if (params.live) {
+        var winSec = (sel.info || sel.debug) ? 600 : 3600;   // default/info/debug are chatty: a shorter window keeps `log show` quick
+        if (params.sinceSec != null) {
+            lp.startSec = Math.max(Number(params.sinceSec), nowSec - winSec);
+            pc.minUs = Number(params.sinceSec) * 1000000;
+        } else lp.last = params.boot ? 'boot' : ((winSec / 60) + 'm');
+        crashSince = (params.sinceSec != null) ? Number(params.sinceSec) - 1 : ((params.catFilter == 'Crash') ? 0 : nowSec - winSec);
+        crashMax = Math.min(MAC_CRASH_MAX, Math.floor(Number(params.num) || 100));
+    } else {
+        if (cur.us != null) { lp.startSec = Math.floor(cur.us / 1000000); pc.cursor = cur; }
+        else if (params.lvdocMs != null) { lp.startSec = Math.floor(Number(params.lvdocMs) / 1000); pc.cursor = { us: (Number(params.lvdocMs) + 1) * 1000, n: 0 }; }
+        else lp.last = (Number(params.maxAgeHours) || 24) + 'h';   // bound the first-run backfill
+        crashSince = (cur.crash != null) ? cur.crash : (nowSec - (Number(params.maxAgeHours) || 24) * 3600);
+        crashMax = MAC_CRASH_MAX + 1;   // one extra to see whether the 20th report shares its mtime with the next
+    }
+    var script = '';
+    if (doUnified) {
+        fileName = pickTmpDir() + '/evlmout' + Math.random().toString(32).replace('0.', '') + '.txt';
+        pushTmpFile(fileName);
+        script += macLogCmd(lp, fileName) + '\n';
+    }
+    if (doCrash) script += macCrashScript(crashSince, crashMax, params.live, token) + '\n';
+    if (script == '') { func({ events: [], cursor: null, truncated: false }); return; }
+    dbg('Running mac collector: ' + script);
+    shRun(script, function (o) {
+        try {
+            var res = { events: [], cursor: null, truncated: false, error: null };
+            var next = { us: cur.us, n: cur.n, crash: cur.crash }, advanced = false;
+            if (doUnified) {
+                var txt = '';
+                try { txt = require('fs').readFileSync(fileName).toString(); } catch (fe) { }
+                popTmpFile(fileName);
+                var u = parseMacNdjson(txt, pc);
+                if (u.rc != null && u.rc != 0) { res.error = 'log'; dbg('log show failed (' + u.rc + '): ' + String(o.stderr || '').substring(0, 300)); }
+                res.truncated = u.truncated;
+                if (!params.live) {
+                    if (u.examined > 0) { next.us = u.lastUs; next.n = u.tie; advanced = true; }
+                    // `log show` completed (its status line is present, so nothing was cut off): nothing before the
+                    // run start is left, start the next run there instead of at an old last event. 10 s earlier: entries
+                    // logd had not persisted yet when `log show` read the store are picked up by the next run
+                    var safeUs = (runStartMs - 10000) * 1000;
+                    if (!u.truncated && u.rc === 0 && (next.us == null || next.us < safeUs)) { next.us = safeUs; next.n = 0; advanced = true; }
+                }
+                res.events = u.events;
+            }
+            if (doCrash) {
+                var reps = parseMacCrashOutput(o.stdout, token);
+                if (!params.live && reps.length > MAC_CRASH_MAX) {
+                    // keep the cursor exact: drop the reports sharing the mtime of the first one not taken
+                    var cut = reps[MAC_CRASH_MAX].mtime, keep = [];
+                    for (var ri = 0; ri < MAC_CRASH_MAX; ri++) { if (reps[ri].mtime < cut) keep.push(reps[ri]); }
+                    reps = (keep.length > 0) ? keep : reps.slice(0, MAC_CRASH_MAX);
+                    res.truncated = true;
+                } else if (!params.live) {
+                    var csafe = nowSec - 1;   // every report written before the run started was listed
+                    if (next.crash == null || next.crash < csafe) { next.crash = csafe; advanced = true; }
+                }
+                for (var ci = 0; ci < reps.length; ci++) {
+                    if (!params.live && (next.crash == null || reps[ci].mtime > next.crash)) { next.crash = reps[ci].mtime; advanced = true; }
+                    var cev = macCrashEvent(reps[ci].name, reps[ci].mtime, reps[ci].content);
+                    if (!macEventAllowed(cev, pc)) continue;
+                    if (params.live) {
+                        cev._us = Number(String(cev.TimeCreated).replace(/[^0-9]/g, '')) * 1000;
+                        if (pc.minUs != null && cev._us < pc.minUs) continue;   // already shown (its own time is before the file's mtime)
+                    }
+                    res.events.push(cev);
+                }
+            }
+            if (params.live) {
+                // newest first, at most num
+                res.events.sort(function (a, b) { return b._us - a._us; });
+                if (res.events.length > params.num) res.events = res.events.slice(0, params.num);
+                for (var ei = 0; ei < res.events.length; ei++) delete res.events[ei]._us;
+            } else if (advanced) res.cursor = macFormatCursor(next);
+            func(res);
+        } catch (e) { dbg('mac run error: ' + e); try { if (fileName != null) popTmpFile(fileName); } catch (e2) { } func({ events: [], cursor: null, truncated: false, error: 'exception' }); }
+    });
+};
+
+// commit a cursor; never move it backwards (a late acknowledgement of an older batch)
+var macCommitCursor = function(s) {
+    var n = macParseCursor(s), c = macParseCursor(db.Get('pluginEventLog_mcursor'));
+    if (n.us == null && n.crash == null) return;
+    if (c.us != null && (n.us == null || n.us < c.us || (n.us == c.us && n.n < c.n))) { n.us = c.us; n.n = c.n; }
+    if (c.crash != null && (n.crash == null || n.crash < c.crash)) n.crash = c.crash;
+    db.Put('pluginEventLog_mcursor', macFormatCursor(n));
+};
+
+// periodic history batch finished: push to the server; the cursor is committed when the server acks (setLVDOC)
+var macGatherCallback = function(res) {
+    try {
+        if (res.cursor == null) return;   // nothing examined (or the run failed): keep the position
+        if (res.events.length == 0) { macCommitCursor(res.cursor); return; } // nothing to send: advance locally
+        mesh = require('MeshAgent');
+        var cfg = getEventLogConfig();
+        mesh.SendCommand({
+            "action": "plugin", "plugin": "eventlog", "pluginaction": "gatherlogs",
+            "uid": (cfg.uid != null) ? cfg.uid : null,
+            "os": "macos", "cursor": res.cursor, "caps": macCaps,
+            "data": JSON.stringify(res.events)
+        });
+        // The server does not acknowledge a batch older than one it already acknowledged (it stores it, though).
+        // That happens when a crash report's own time lies before already delivered log events: commit locally
+        // then, or the same batch would be re-sent every minute.
+        var bmax = 0;
+        for (var i = 0; i < res.events.length; i++) { var tm = Number(String(res.events[i].TimeCreated).replace(/[^0-9]/g, '')); if (tm > bmax) bmax = tm; }
+        var acked = Number(db.Get('pluginEventLog_mack'));
+        if (!isNaN(acked) && acked > 0 && bmax < acked) macCommitCursor(res.cursor);
+    } catch (e) { dbg('macGatherCallback error: ' + e); }
+};
+
+var capturePeriodicMac = function() {
+    try {
+        dbg('Periodic mac runner starting');
+        var cfg = getEventLogConfig();
+        if (cfg.historyEnabled !== true) return;
+        // `log show` can run for tens of seconds: never start a second history run while one is in flight
+        var now = new Date().getTime();
+        if (macHistRunning != 0 && (now - macHistRunning) < MAC_RUN_STALE_MS) { dbg('mac history run still in flight, skipped'); return; }
+        macHistRunning = now;
+        var runId = ++macHistRunId;
+        var done = function () { if (macHistRunId == runId) macHistRunning = 0; }; // a stale run finishing late must not clear a newer run's flag
+        probeMacCaps(function (caps) {
+            try {
+                var unified = (caps.log && caps.ndjson);
+                if (!unified && !caps.crashDir) { done(); dbg('log show not usable and no crash reports; periodic collection disabled'); return; }
+                var lv = db.Get('pluginEventLog_lvdoc_mac');
+                lv = (lv == '' || lv == null || isNaN(Number(lv))) ? null : Number(lv);
+                runMacCollector(function (res) { done(); macGatherCallback(res); }, {
+                    cursor: macParseCursor(db.Get('pluginEventLog_mcursor')), lvdocMs: lv, sel: macLevelSel(cfg.historyEntryTypes),
+                    unified: unified, crash: caps.crashDir,
+                    catRules: evlRules(cfg.historyCategories, cfg.historyCategoriesMode), srcRules: evlRules(cfg.historySources, cfg.historySourcesMode) });
+            } catch (e) { done(); dbg('Periodic mac runner error: ' + e); }
+        });
+    } catch (e) { macHistRunning = 0; dbg('Periodic mac runner error: ' + e); }
+};
+
 var gatherlogsCallback = function(output) {
     mesh = require('MeshAgent');
     var db = require('SimpleDataStore').Shared();
@@ -435,6 +914,7 @@ var gatherlogsCallback = function(output) {
 
 var capturePeriodicEventLog = function() {
     if (PLAT == 'linux') { capturePeriodicLinux(); return; }
+    if (PLAT == 'darwin') { capturePeriodicMac(); return; }
     if (process.platform != 'win32') {
       dbg('Periodic runner not running (unsupported platform)');
       return false;
@@ -472,7 +952,7 @@ function consoleaction(args, rights, sessionid, parent) {
             if (isWsconnection) {
                 parent.write(new Buffer(JSON.stringify({ctrlChannel: "102938", type: "close"})));
             }
-            return "Eventlog is only available on Windows and Linux endpoints.";
+            return "Eventlog is only available on Windows, Linux and macOS endpoints.";
         }
         
         var fnname = args['_'][1];
@@ -482,10 +962,12 @@ function consoleaction(args, rights, sessionid, parent) {
           case 'serviceCheck': {
               // null function- simply can be called to load the plugin and make sure the timer is running
               if (PLAT == 'linux' && linuxCaps == null) { try { probeLinuxCaps(function () { }); } catch (e) { } }
+              if (PLAT == 'darwin' && macCaps == null) { try { probeMacCaps(function () { }); } catch (e) { } }
               break;
           }
           case 'getlog': {
               if (PLAT == 'linux') return "On Linux endpoints, use the Event Log tab on the device page.";
+              if (PLAT == 'darwin') return "On macOS endpoints, use the Event Log tab on the device page.";
               var ret = {};
 
               var data, fromLog = 'Application', num = 10, entryType = 'Error,Warning', convertToJson = true;
@@ -514,6 +996,7 @@ function consoleaction(args, rights, sessionid, parent) {
           }
           case 'sendlog': {
             if (PLAT == 'linux') return "On Linux endpoints, use the Event Log tab on the device page.";
+            if (PLAT == 'darwin') return "On macOS endpoints, use the Event Log tab on the device page.";
             var ret = {};
             
             var data, fromLog = 'Application', num = 10, entryType = 'Error,Warning';
@@ -568,6 +1051,30 @@ function consoleaction(args, rights, sessionid, parent) {
                 });
                 break;
             }
+            if (PLAT == 'darwin') {
+                var mcWs = isWsconnection, mcCon = wscon; // capture: the callback runs after consoleaction returned
+                var mcSince = (args.since != null && !isNaN(Number(args.since))) ? (Number(args.since) + 1) : null;
+                var mcSel = macSelPredicate(args.lsel);
+                probeMacCaps(function (caps) {
+                    var reply = function (events) {
+                        if (!mcWs || mcCon == null) return;
+                        try { mcCon.write(new Buffer(JSON.stringify({ uid: cfg.uid, os: 'macos', caps: caps, data: events }))); } catch (e) { dbg('live reply error ' + e); }
+                    };
+                    var unified = (caps.log && caps.ndjson);
+                    if (!unified && !(mcSel.catFilter == 'Crash' && caps.crashDir)) {
+                        reply([{ LogName: 'System', Level: 2, MsgType: 'Error', TimeCreated: '/Date(' + new Date().getTime() + ')/', ProviderName: 'eventlog-plugin',
+                                 Subsystem: '', OsCategory: '', ProcessPath: '', Id: '',
+                                 Message: !caps.log ? 'The macOS log tool (/usr/bin/log) was not found on this endpoint, so the unified log cannot be read.'
+                                                    : ('The log tool on this endpoint (macOS ' + (caps.osver || 'unknown version') + ') does not support "log show --style ndjson", which the plugin needs to read the unified log. A newer macOS is required.') }]);
+                        return;
+                    }
+                    var p = { live: true, num: num, sel: macLevelSel(entryTypes), sinceSec: mcSince, extra: mcSel.extra, catFilter: mcSel.catFilter, boot: (mcSel.boot === true),
+                              unified: (mcSel.unified && unified), crash: (mcSel.crash && caps.crashDir),
+                              catRules: evlRules(cfg.liveCategories, cfg.liveCategoriesMode), srcRules: evlRules(cfg.liveSources, cfg.liveSourcesMode) };
+                    try { runMacCollector(function (res) { reply(res.events); }, p); } catch (e) { dbg('getlivelogs mac error ' + e); }
+                });
+                break;
+            }
             var sinceTime = null;
             if (args.since != null && !isNaN(Number(args.since))) {
                 // args.since is UTC seconds; the collector builds its StartTime from local 1970-01-01, so shift by the local offset
@@ -594,6 +1101,16 @@ function consoleaction(args, rights, sessionid, parent) {
         case 'setLVDOC': { // set last verified date of collection (e.g. last successful log collection) from the server
             try {
                 var db = require('SimpleDataStore').Shared();
+                if (PLAT == 'darwin') {
+                    // macOS: the server acknowledged this batch - commit its cursor (unified log + crash reports)
+                    var mav = Number(args.value), mprev = Number(db.Get('pluginEventLog_mack'));
+                    if (!isNaN(mav) && mav > 0 && (isNaN(mprev) || mav > mprev)) {
+                        db.Put('pluginEventLog_mack', String(mav));        // newest acknowledged event time (ms)
+                        db.Put('pluginEventLog_lvdoc_mac', String(mav));   // fallback start when there is no cursor
+                    }
+                    if (args.cursor != null && args.cursor != '') { macCommitCursor(String(args.cursor)); dbg('mac cursor committed'); }
+                    break;
+                }
                 if (args.cursor != null && args.cursor != '') {
                     // linux: the server acknowledged this batch - commit the journal cursor (at-least-once delivery)
                     db.Put('pluginEventLog_jcursor', String(args.cursor));
@@ -629,6 +1146,16 @@ function consoleaction(args, rights, sessionid, parent) {
           break;
         }
         case 'setConfigBlob': {
+            if (PLAT == 'darwin') {
+                macCaps = null; // config changed: re-probe capabilities
+                try { probeMacCaps(function () { }); } catch (e) { }
+                try {
+                    var mcdb = require('SimpleDataStore').Shared();
+                    mcdb.Put('pluginEventLog_cfg', args.cfg);
+                    dbg('setting config (macos) ' + args.cfg);
+                } catch (e) { dbg('setconfigBlob (macos) ' + e); }
+                break;
+            }
             if (PLAT == 'linux') {
                 linuxCaps = null; // config changed: re-probe capabilities
                 try { probeLinuxCaps(function () { }); } catch (e) { }

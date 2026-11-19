@@ -8,10 +8,13 @@
  *   plus the alias table in the JSON (e.g. "DNS Client Events" -> DNS-Client, "W32Time" -> Time-Service).
  * lookupLinux(message, unit) -> { known:true, key, title, meaning, causes, checks, benign, benignNote? } | null
  *   First matching message pattern (journald / kernel messages).
+ * lookupMac(message, process, subsystem) -> { known:true, key, title, meaning, causes, checks, benign, benignNote? } | null
+ *   First matching message pattern (macOS unified log entries and crash reports); the text searched is
+ *   "<process> <subsystem>: <message>".
  */
 
 let DATA;
-try { DATA = require('./eventref.json'); } catch (e) { DATA = { aliases: {}, windows: [], linux: [] }; }
+try { DATA = require('./eventref.json'); } catch (e) { DATA = { aliases: {}, windows: [], linux: [], macos: [] }; }
 
 function normProvider(p) {
     if (p == null) return '';
@@ -30,10 +33,15 @@ for (const e of (Array.isArray(DATA.windows) ? DATA.windows : [])) {
     }
 }
 
-const LINUX = [];
-for (const e of (Array.isArray(DATA.linux) ? DATA.linux : [])) {
-    try { LINUX.push({ re: new RegExp(e.pattern, e.flags || ''), e: e }); } catch (err) { /* skip bad pattern */ }
+function compile(list) {
+    const out = [];
+    for (const e of (Array.isArray(list) ? list : [])) {
+        try { out.push({ re: new RegExp(e.pattern, e.flags || ''), e: e }); } catch (err) { /* skip bad pattern */ }
+    }
+    return out;
 }
+const LINUX = compile(DATA.linux);
+const MAC = compile(DATA.macos);
 
 function copyCommon(e) {
     const o = { title: String(e.title || ''), meaning: String(e.meaning || ''), causes: (e.causes || []).slice(), checks: (e.checks || []).slice(), benign: !!e.benign };
@@ -52,6 +60,14 @@ function lookup(provider, id) {
     } catch (err) { return { known: false }; }
 }
 
+function firstMatch(table, text) {
+    for (const x of table) {
+        x.re.lastIndex = 0;
+        if (x.re.test(text)) return Object.assign({ known: true, key: x.e.key }, copyCommon(x.e));
+    }
+    return null;
+}
+
 function lookupLinux(message, unit) {
     try {
         let m = message == null ? '' : String(message);
@@ -59,14 +75,21 @@ function lookupLinux(message, unit) {
         const u = unit == null ? '' : String(unit);
         const text = u && !m.includes(u) ? u + ': ' + m : m;
         if (!text) return null;
-        for (const x of LINUX) {
-            x.re.lastIndex = 0;
-            if (x.re.test(text)) return Object.assign({ known: true, key: x.e.key }, copyCommon(x.e));
-        }
-        return null;
+        return firstMatch(LINUX, text);
     } catch (err) { return null; }
 }
 
-function list() { return { windows: DATA.windows || [], linux: DATA.linux || [] }; }
+function lookupMac(message, proc, subsystem) {
+    try {
+        let m = message == null ? '' : String(message);
+        if (m.length > 8192) m = m.slice(0, 8192);
+        const head = [proc, subsystem].map(function (v) { return v == null ? '' : String(v).slice(0, 200); }).filter(Boolean).join(' ');
+        const text = head ? head + ': ' + m : m;
+        if (!m && !head) return null;
+        return firstMatch(MAC, text);
+    } catch (err) { return null; }
+}
 
-module.exports = { lookup, lookupLinux, normProvider, list };
+function list() { return { windows: DATA.windows || [], linux: DATA.linux || [], macos: DATA.macos || [] }; }
+
+module.exports = { lookup, lookupLinux, lookupMac, normProvider, list };

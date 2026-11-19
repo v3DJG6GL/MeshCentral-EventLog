@@ -243,6 +243,13 @@ test('system prompt: preview renders the draft with sample values and returns wa
     assert.ok(r.text.endsWith(P.FACTORY.explain + '\n\nAdditional instructions from the administrator:\nSaved extra'));
     r = await t.call({ pluginaction: 'aiAdminPreviewPrompt', mode: 'nope', os: 'mac', draft: 'x' });
     assert.deepStrictEqual([r.mode, r.os], ['ask', 'windows']);
+    // a macOS device: its name, the unified-log wording and notes; Android is no preview device (no event logs)
+    r = await t.call({ pluginaction: 'aiAdminPreviewPrompt', mode: 'ask', os: 'macos', draft: { prompts: {} } });
+    assert.strictEqual(r.os, 'macos');
+    assert.match(r.text, /^You are a read-only troubleshooting assistant for ONE MeshCentral device: "SAMPLE-PC" \(macOS\)\.\nYou help a technician understand its unified log entries and crash reports and device data\./);
+    assert.match(r.text, /On this macOS device, /);
+    r = await t.call({ pluginaction: 'aiAdminPreviewPrompt', mode: 'ask', os: 'android', draft: { prompts: {} } });
+    assert.strictEqual(r.os, 'windows');
     r = await t.call({ pluginaction: 'aiAdminPreviewPrompt', mode: 'diagnose', draft: { prompts: {} } });
     assert.match(r.text, /Time window of interest: \d{4}-.* to \d{4}-/);
     // the preview never saves
@@ -752,7 +759,7 @@ test('saved results: counts in aiAdminData, stats, purge of all users (audited),
     let r = await t.call({ pluginaction: 'aiAdminGet' });
     assert.deepStrictEqual([r.historyAvailable, r.historyCounts], [true, { chat: 2, diagnosis: 0, explain: 1, total: 3 }]);
     assert.deepStrictEqual(r.startersFactory, storeMod.STARTERS);
-    assert.deepStrictEqual([r.settings.history, r.settings.starters], [{ enabled: true, retentionDays: 30 }, { windows: null, linux: null }]);
+    assert.deepStrictEqual([r.settings.history, r.settings.starters], [{ enabled: true, retentionDays: 30 }, { windows: null, linux: null, macos: null }]);
     r = await t.call({ pluginaction: 'aiAdminHistoryStats' });
     assert.strictEqual(r.counts.total, 3);
     r = await t.call({ pluginaction: 'aiAdminHistoryPurge' });
@@ -761,7 +768,9 @@ test('saved results: counts in aiAdminData, stats, purge of all users (audited),
     assert.deepStrictEqual([a.changed, a.removed, a.userid, a.counted], [['history.purge'], 3, 'user/d/admin', false]);
     // settings round trip: history and starters
     r = await t.call({ pluginaction: 'aiAdminSaveSettings', settings: { history: { enabled: false, retentionDays: 12 }, starters: { windows: ['Is BitLocker on?'], linux: storeMod.STARTERS.linux } } });
-    assert.deepStrictEqual([r.settings.history, r.settings.starters], [{ enabled: false, retentionDays: 12 }, { windows: ['Is BitLocker on?'], linux: null }]);
+    assert.deepStrictEqual([r.settings.history, r.settings.starters], [{ enabled: false, retentionDays: 12 }, { windows: ['Is BitLocker on?'], linux: null, macos: null }]);
+    r = await t.call({ pluginaction: 'aiAdminSaveSettings', settings: { starters: { macos: ['Is FileVault on?', 7] } } });   // only macOS sent: the others keep theirs
+    assert.deepStrictEqual(r.settings.starters, { windows: ['Is BitLocker on?'], linux: null, macos: ['Is FileVault on?'] });
     const u = setup();
     r = await u.call({ pluginaction: 'aiAdminGet' });
     assert.deepStrictEqual([r.historyAvailable, r.historyCounts], [false, null]);

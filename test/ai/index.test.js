@@ -448,3 +448,77 @@ test('system prompt: the browser\'s time zone is checked and named; bad values a
         t.close();
     }
 });
+
+test('guessOs: Android agent ids first, then the collector\'s report, then the agent id, then the OS description', function () {
+    const g = aiIndex.guessOs;
+    const node = function (id, osdesc) { return { agent: id == null ? undefined : { id: id }, osdesc: osdesc }; };
+    assert.strictEqual(g(node(4, 'Microsoft Windows 11 Pro'), { os: 'macos' }), 'macos', 'the collector\'s report wins over the agent id');
+    assert.strictEqual(g(node(6), { os: 'linux' }), 'linux');
+    for (const id of [11, 16, 29, 10005]) assert.strictEqual(g(node(id), null), 'macos', 'macOS agent ' + id);
+    for (const id of [12, 14]) {
+        assert.strictEqual(g(node(id), null), 'android', 'Android agent ' + id);
+        assert.strictEqual(g(node(id), { os: 'linux' }), 'android', 'an Android agent id wins over a report');
+    }
+    assert.strictEqual(g(node(null, 'macOS Sonoma 14.5'), null), 'macos');
+    assert.strictEqual(g(node(null, 'Mac OS X 10.15.7'), null), 'macos');
+    assert.strictEqual(g(node(null, 'MacOS 13'), null), 'macos');
+    assert.strictEqual(g(node(null, 'Darwin 23.5.0'), null), 'macos');
+    assert.strictEqual(g(node(null, 'Android 14'), null), 'android');
+    assert.strictEqual(g(node(null, 'Linux Android 9'), null), 'android', 'Android before the Linux pattern');
+    assert.strictEqual(g(node(null, 'Ubuntu 24.04.2 LTS'), null), 'linux');
+    assert.strictEqual(g(node(null, 'Microsoft Windows 11 Pro'), { os: 'bogus' }), 'windows');
+    assert.strictEqual(g(node(null, 'FreeBSD 14'), null), null);
+    assert.strictEqual(g(null, null), null);
+});
+
+test('Android devices: the Assistant is not available, with the reason to show; aiStart is refused', async function () {
+    const t = F.setup({ mock: mock, db: { meta: null } });
+    let admin = false;
+    t.plugin.isFullAdmin = function () { return admin; };
+    t.node.agent = { ver: 0, id: 14, caps: 0 };
+    t.node.osdesc = 'Android 14';
+    let a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual([a.assistant, a.assistantReason, a.endpoint, 'starters' in a], [false, 'android', null, false]);
+    assert.strictEqual(a.reasonText, aiIndex.ANDROID_NOTE);
+    assert.match(a.reasonText, /^Event logs are not available on Android devices: the MeshCentral Android agent cannot run the plugin's collector, and Android lets an app read other apps' logs only with the READ_LOGS permission \(granted over adb or root\)\.$/);
+    admin = true;
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual([a.assistantReason, a.canManage], ['android', true]);
+    // without the permission or the Details right the usual reasons come first
+    a = await t.ai.accessInfo(t.myparent, t.node, 0x8);
+    assert.strictEqual(a.assistantReason, 'deviceRights');
+    t.plugin.perms.deviceAssistant = false;
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual(a, { assistant: false, assistantReason: 'permission', endpoint: null, categories: {}, remaining: null });
+    t.plugin.perms.deviceAssistant = true;
+    await t.start('ask', { text: 'q' });
+    const e = t.last('onAiError');
+    assert.deepStrictEqual([e.code, e.message], ['unsupported', aiIndex.ANDROID_NOTE]);
+    assert.strictEqual(chatReqs().length, 0);
+    t.close();
+});
+
+test('macOS devices: prompt wording, the collector\'s macOS version in the device info, categories instead of Windows logs, restart from the kernel\'s boot line', async function () {
+    mock.script(CHAT,
+        { sse: chatSse({ calls: [{ id: 'c1', name: 'get_device_info', args: {} }] }) },
+        { sse: chatSse({ text: 'It restarted after a kernel panic.' }) });
+    const t = F.setup({ mock: mock, db: { meta: { os: 'macos', caps: { log: true, ndjson: true, osver: '14.5', crashDir: true } } } });
+    t.node.agent = { ver: 0, id: 29, caps: 15 };
+    t.node.osdesc = 'macOS Sonoma';
+    delete t.node.lastbootuptime;
+    const boot = F.NOW - 5 * F.H;
+    // LogName Kernel is not among the config set's Windows logs (Application, System): found only because they are dropped
+    t.events.push({ _id: 'b0000000000000000000000a', nodeid: F.NODE, tc: boot, LogName: 'Kernel', Level: 4, MsgType: 'Default', ProviderName: 'kernel', Subsystem: '', OsCategory: '', ProcessPath: '/kernel', Id: '0', Message: 'Darwin Kernel Version 23.5.0: Wed May  1 20:12:58 PDT 2024; root:xnu-10063.121.3~5/RELEASE_ARM64_T6000' });
+    await t.start('diagnose', { window: 'restart' });
+    assert.ok(t.last('onAiDone'), methods(t));
+    const q = t.db.calls.filter(function (c) { return c.fn === 'getEventsFor' && c.params && c.params.text; })[0];
+    assert.strictEqual(q.params.text, 'Darwin Kernel Version');
+    const body = chatReqs()[0].body;
+    const sys = body.messages[0].content;
+    assert.match(sys, /\(macOS\)\.\nYou help a technician understand its unified log entries and crash reports and device data\./);
+    assert.match(sys, /On this macOS device, /);
+    assert.ok(body.messages.some(function (m) { return m.role === 'user' && m.content.indexOf('around the most recent restart, at ' + new Date(boot).toISOString()) >= 0; }), 'the restart window comes from the boot line');
+    const toolMsg = chatReqs()[1].body.messages.filter(function (m) { return m.role === 'tool'; })[0];
+    assert.match(toolMsg.content, /"osVersion":"14\.5"/);
+    t.close();
+});

@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Added
+- macOS endpoints (experimental, not yet tested on a real Mac): Live view and Stored history from the unified log (`log show`) plus crash and kernel panic reports, in the categories System, Application, Kernel, Auth, Install and Crash; a view selector (Kernel, Security, Software install, Crash reports, This boot); the Assistant works for Macs and has its own starter questions
+- Android devices show in the Event Log tab why there are no logs (the Android agent cannot run the collector, and reading other apps' logs needs the READ_LOGS permission)
+
+### Changed
+- Config sets: the categories filter applies to Linux and macOS (Install and Crash are macOS-only; Cron, Daemon and Audit Linux-only)
 
 ## [0.6.1] - 2026-11-19
 ### Fixed

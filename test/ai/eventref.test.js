@@ -39,6 +39,18 @@ test('every Linux entry is complete and its pattern compiles', function () {
     }
 });
 
+test('every macOS entry is complete and its pattern compiles', function () {
+    const keys = new Set();
+    assert.ok(Array.isArray(DATA.macos) && DATA.macos.length >= 8);
+    for (const e of DATA.macos) {
+        assert.ok(typeof e.key === 'string' && /^mac-/.test(e.key) && !keys.has(e.key), e.key);
+        keys.add(e.key);
+        assert.doesNotThrow(() => new RegExp(e.pattern, e.flags || ''), e.key);
+        checkEntry(e, e.key);
+    }
+    assert.strictEqual(E.list().macos, DATA.macos);
+});
+
 test('required coverage', function () {
     const need = {
         'Microsoft-Windows-Kernel-Power': [41, 42, 107, 109], EventLog: [6005, 6006, 6008, 6009, 6013], User32: [1074, 1076], BugCheck: [1001],
@@ -124,4 +136,33 @@ test('lookupLinux patterns', function () {
     assert.strictEqual(E.lookupLinux('x'.repeat(100000)), null);
     assert.strictEqual(E.lookupLinux('Journal file corrupt, replacing', 'systemd-journald.service').key, 'journal-corrupted');
     assert.strictEqual(E.lookupLinux('Journal effectively 0 bytes', 'systemd-journald.service'), null);
+});
+
+test('lookupMac patterns: unified log messages and crash reports; process and subsystem count', function () {
+    const cases = [
+        ['panic(cpu 2 caller 0xfffffe0013a5c8f0): "userspace watchdog timeout: no successful checkins from WindowServer in 120 seconds"', 'kernel', null, 'mac-watchdog'],
+        ['panic(cpu 0 caller 0xffffff8012345678): Kernel trap at 0xffffff7f9a2b3c4d, type 14=page fault', 'kernel', null, 'mac-kernel-panic'],
+        ['{"bug_type":"210","timestamp":"2026-11-18 08:00:00.00 +0100","os_version":"macOS 14.5 (23F79)"}\npanic(cpu 4 caller ...)', 'Kernel', null, 'mac-kernel-panic'],
+        ['{"app_name":"Safari","timestamp":"2026-11-18 09:12:01.00 +0100","bug_type":"309","os_version":"macOS 14.5 (23F79)"}\n{', 'Safari', null, 'mac-app-crash'],
+        ['Process: Mail [812]\nException Type:  EXC_BAD_ACCESS (SIGSEGV)', 'Mail', null, 'mac-app-crash'],
+        ['memorystatus: killing_specific_process pid 4321 [Slack] (per-process-limit 2) 1536000KB', 'kernel', null, 'mac-memory-kill'],
+        ['Sleep Wake failure in EFI', 'kernel', null, 'mac-sleep-wake'],
+        ['Failed password for invalid user admin from 203.0.113.9 port 51234 ssh2', 'sshd', null, 'mac-ssh-failed'],
+        ['Failed to authenticate user <private> (error: 9).', 'loginwindow', 'com.apple.loginwindow.logging', 'mac-auth-failure'],
+        ['Install failed: The package is damaged.', 'installd', 'com.apple.install', 'mac-install-failed'],
+        ['SUOSUAgent: download of update failed', 'softwareupdated', 'com.apple.SoftwareUpdate', 'mac-install-failed'],
+        ['disk2s1: I/O error.', 'kernel', null, 'mac-disk-error'],
+        ['apfs_vfsop_mount:2144: nx_corruption_detected_int:', 'kernel', 'com.apple.apfs', 'mac-disk-error']
+    ];
+    for (const [msg, proc, sub, key] of cases) {
+        const r = E.lookupMac(msg, proc, sub);
+        assert.ok(r, msg);
+        assert.deepStrictEqual([r.key, r.known], [key, true], msg);
+    }
+    assert.strictEqual(E.lookupMac('Accepted publickey for bob from 10.0.0.5 port 50022 ssh2', 'sshd'), null);
+    assert.strictEqual(E.lookupMac('Connection invalidated', 'launchd', 'com.apple.xpc'), null);
+    assert.strictEqual(E.lookupMac(null), null);
+    assert.strictEqual(E.lookupMac('x'.repeat(100000)), null);
+    // Linux and Windows lookups do not use the macOS table
+    assert.strictEqual(E.lookupLinux('Sleep Wake failure in EFI'), null);
 });

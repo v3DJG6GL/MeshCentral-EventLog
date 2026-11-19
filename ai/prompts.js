@@ -157,8 +157,8 @@ const FACTORY_HASH = Object.freeze(PARTS.reduce(function (o, p) { o[p] = crypto.
 const PLACEHOLDERS = Object.freeze({
     device: 'Device name (values replaced when personal data is replaced)',
     os: 'Operating system in brackets, e.g. " (Windows)"; empty when unknown',
-    logKind: 'What the logs are, e.g. "Windows Event Log events" or "systemd journal entries (journald)"',
-    osNotes: 'Notes for the operating system (Linux: journal fields and commands); empty for Windows',
+    logKind: 'What the logs are, e.g. "Windows Event Log events", "systemd journal entries (journald)" or "unified log entries and crash reports"',
+    osNotes: 'Notes for the operating system (Linux: journal fields and commands; macOS: unified log fields, crash reports and commands); empty for Windows',
     now: 'Current time (ISO 8601, UTC)',
     timezone: 'Line with the technician\'s time zone (from the browser) and the current time there, asking for times in that zone; empty when the browser sent none. A base template without it gets no time zone, and answers give times in UTC',
     window: 'Line with the time window of interest; empty when there is none',
@@ -203,10 +203,13 @@ function tzLine(tz, now) {
         '. Write times for the technician in that zone, e.g. "18:53", not in UTC (convert the epoch milliseconds).';
 }
 
+const OS_NAMES = { windows: 'Windows', linux: 'Linux', macos: 'macOS' };
+const LOG_KINDS = { Windows: 'Windows Event Log events', Linux: 'systemd journal entries (journald)', macOS: 'unified log entries and crash reports' };
+
 function values(ctx) {
     ctx = (ctx && typeof ctx === 'object') ? ctx : {};
     const device = String(ctx.deviceName == null ? 'this device' : ctx.deviceName).replace(/[\u0000-\u001f\u007f<>]/g, ' ').replace(/"/g, "'").replace(/\s+/g, ' ').trim().slice(0, 120) || 'this device';
-    const os = ctx.os === 'windows' ? 'Windows' : (ctx.os === 'linux' ? 'Linux' : null);
+    const os = OS_NAMES[ctx.os] || null;
     const tools = Array.isArray(ctx.tools) ? ctx.tools.filter((t) => typeof t === 'string' && /^[a-z_]{1,40}$/.test(t)) : [];
     const has = (t) => tools.includes(t);
     const T = [];
@@ -229,6 +232,15 @@ function values(ctx) {
         // id = _PID; lookup_event_id with a ref uses the curated Linux message reference (provider+id is Windows only)
         osNotes = 'On this Linux device, "lvl" maps journal priorities (crit = 0–2, err = 3, warn = 4, info = 5–6, verbose = 7), "log" is the plugin\'s category (e.g. Kernel, Auth, System), "unit" is the systemd unit and "id" is the process id, not an event id. Prefer bash commands such as journalctl, systemctl and dmesg' +
             (has('lookup_event_id') ? '; use lookup_event_id only with a ref for Linux messages.' : '.');
+    } else if (os === 'macOS') {
+        // levels: the agent maps unified-log message types (Fault = crit, Error = err, Default/Info = info,
+        // Debug = verbose; macOS has no warning level); log = the agent's category (LogName); id = PID;
+        // crash reports are LogName 'Crash' (kernel panics: msg_type Panic); ai/tools.js compactEvent field names
+        osNotes = 'On this macOS device, the events come from the unified log (log show) and from crash reports (DiagnosticReports). "lvl" maps the log\'s message types (Fault = crit, Error = err, Default and Info = info, Debug = verbose); macOS has no warning level. ' +
+            '"log" is the plugin\'s category (System, Application, Kernel, Auth, Install, Crash), "src" is the process name, "subsystem" and "os_category" are the os_log subsystem and category (e.g. com.apple.securityd), "msg_type" is the raw message type and "id" is the process id, not an event id. ' +
+            'Events with log "Crash" are crash reports (the start of the report as the message); msg_type "Panic" is a kernel panic. ' +
+            'Suggest zsh/bash commands in ```bash blocks, such as log show --last 1h --predicate \'...\', log show --style syslog, sw_vers, pmset -g log, ls /Library/Logs/DiagnosticReports, softwareupdate --history; point to Console.app for browsing logs and crash reports' +
+            (has('lookup_event_id') ? '; use lookup_event_id only with a ref for macOS messages.' : '.');
     }
     const win = ctx.window && (ctx.window.from != null || ctx.window.to != null)
         ? 'Time window of interest: ' + (iso(ctx.window.from) || 'start') + ' to ' + (iso(ctx.window.to) || 'now') + '.' : '';
@@ -236,7 +248,7 @@ function values(ctx) {
     return {
         device: device,
         os: os ? ' (' + os + ')' : '',
-        logKind: os === 'Linux' ? 'systemd journal entries (journald)' : (os === 'Windows' ? 'Windows Event Log events' : 'event log events'),
+        logKind: LOG_KINDS[os] || 'event log events',
         osNotes: osNotes,
         now: nowIso,
         timezone: tzLine(ctx.tz, nowIso),
@@ -376,7 +388,7 @@ function validateDiagnosis(json, opts) {
     let from = toTime(opts.windowFrom), to = toTime(opts.windowTo);
     if (from != null && to != null && from > to) { const x = from; from = to; to = x; }
     const clampT = (t) => { if (from != null && t < from) t = from; if (to != null && t > to) t = to; return t; };
-    const defShell = opts.os === 'linux' ? 'bash' : 'powershell';
+    const defShell = opts.os === 'linux' || opts.os === 'macos' ? 'bash' : 'powershell';
 
     const out = { v: 1 };
     if (from != null || to != null) out.window = { from: from, to: to };

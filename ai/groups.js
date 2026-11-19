@@ -6,9 +6,12 @@
  * numbers with 2+ digits, hex runs of 8+) become "<*>", whitespace is collapsed, the result is capped at 160 chars.
  *
  * groupEvents(events, { top, samples, os }) groups stored event records
- * ({ _id, tc, LogName, Level, ProviderName, Id, Message, Unit?, Priority? }):
+ * ({ _id, tc, LogName, Level, ProviderName, Id, Message, Unit?, Priority?, Subsystem?, MsgType? }):
  *   Windows: key = ProviderName|Id
  *   Linux (os === 'linux', or the record has Unit/Priority): key = Unit|ProviderName|mask(Message).slice(0, 120)
+ *   macOS (os === 'macos', or the record has Subsystem/MsgType): key = Subsystem|ProviderName|mask(Message).slice(0, 120)
+ *     (Id is the process id there, never part of the key)
+ * Each group carries unit (Linux) and subsystem (macOS), '' when the records have none.
  * Sorted by severity (lower Level = more severe; Level 0 counts as information) then by count (desc), then by last
  * occurrence (desc). sampleIds are the _ids of the most recent occurrences (newest first).
  */
@@ -55,10 +58,11 @@ function num(v, d) { const n = Number(v); return Number.isFinite(n) ? n : d; }
 function sevLevel(l) { const n = num(l, 4); return (n >= 1 && n <= 5) ? n : 4; }
 function str(v) { return v == null ? '' : String(v); }
 
-function isLinuxEvent(e, os) {
-    if (os === 'linux') return true;
+// journald (Linux) and unified-log (macOS) records: grouped by message template, Id is a process id
+function isTemplateEvent(e, os) {
+    if (os === 'linux' || os === 'macos') return true;
     if (os === 'windows') return false;
-    return e.Unit !== undefined || e.Priority !== undefined;
+    return e.Unit !== undefined || e.Priority !== undefined || e.Subsystem !== undefined || e.MsgType !== undefined;
 }
 
 function groupEvents(events, opts) {
@@ -69,15 +73,16 @@ function groupEvents(events, opts) {
     const map = new Map();
     for (const e of events) {
         if (!e || typeof e !== 'object') continue;
-        const linux = isLinuxEvent(e, opts.os);
+        const byTemplate = isTemplateEvent(e, opts.os);
         const src = str(e.ProviderName);
         const id = e.Id == null ? '' : e.Id;
         const unit = e.Unit == null ? '' : str(e.Unit);
+        const subsystem = e.Subsystem == null ? '' : str(e.Subsystem);
         let template = null;
         let key;
-        if (linux) {
+        if (byTemplate) {
             template = mask(e.Message);
-            key = unit + '|' + src + '|' + template.slice(0, 120);
+            key = (unit || subsystem) + '|' + src + '|' + template.slice(0, 120);
         } else {
             key = src + '|' + str(id);
         }
@@ -85,7 +90,7 @@ function groupEvents(events, opts) {
         const lvl = sevLevel(e.Level);
         let g = map.get(key);
         if (!g) {
-            g = { key: key, count: 0, first: tc, last: tc, level: lvl, log: str(e.LogName), src: src, id: id, unit: unit,
+            g = { key: key, count: 0, first: tc, last: tc, level: lvl, log: str(e.LogName), src: src, id: id, unit: unit, subsystem: subsystem,
                 template: template !== null ? template : mask(e.Message), _samples: [] };
             map.set(key, g);
         }
@@ -104,7 +109,7 @@ function groupEvents(events, opts) {
     out.sort((a, b) => (a.level - b.level) || (b.count - a.count) || (b.last - a.last) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     return out.slice(0, top).map((g) => ({
         key: g.key, count: g.count, first: g.first, last: g.last, level: g.level, log: g.log, src: g.src, id: g.id,
-        unit: g.unit, template: g.template, sampleIds: g._samples.map((x) => x.id)
+        unit: g.unit, subsystem: g.subsystem, template: g.template, sampleIds: g._samples.map((x) => x.id)
     }));
 }
 

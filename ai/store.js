@@ -41,8 +41,9 @@
 //   factoryHash} } } ('' or the factory text itself -> null; edited entries of factory parts are dropped) and
 //   extraInstructions (<= 4000 chars). mergeSettings(base, input) is the same merge without saving.
 //   history { enabled (default true), retentionDays 1..3650 (default 30) }: saved chats, diagnoses and explanations
-//   (ai/history.js). starters { windows, linux }: null (factory list, STARTERS) | up to 12 one-line texts of at most
-//   200 characters (the factory list itself -> null); startersFor(settings, os) picks a device's list.
+//   (ai/history.js). starters { windows, linux, macos }: null (factory list, STARTERS) | up to 12 one-line texts of at
+//   most 200 characters (the factory list itself -> null; a stored document without a list, e.g. from before macOS
+//   support, gets null = the factory list); startersFor(settings, os) picks a device's list.
 //   chatGen { enabled (default true) }: users may change thinking and temperature per chat (ai/index.js).
 //   The stored document also carries sv (SETTINGS_VERSION, server-side only); an older document is migrated once
 //   on load (old defaults -> new defaults) and saved again; a failed save is logged and does not fail the load.
@@ -86,16 +87,18 @@ const DEFAULTS = {
     // saved results (chats, the last diagnosis, explanations) per user and device, ai/history.js
     history: { enabled: true, retentionDays: 30 },
     // starter questions of an empty Ask panel per device OS (null = the factory list, STARTERS)
-    starters: { windows: null, linux: null },
+    starters: { windows: null, linux: null, macos: null },
     // users may change thinking and temperature per chat (on top of the endpoint's generation settings)
     chatGen: { enabled: true }
 };
-// Factory starter questions (the buttons of an empty Ask panel); a device of unknown OS gets the Windows list.
+// Factory starter questions (the buttons of an empty Ask panel); a device of unknown OS gets the Windows list, an
+// Android device none (no event logs there).
 const STARTERS = {
     windows: ['Why did this device restart recently?', 'What changed in the last 24 hours?', 'Are there signs of disk or hardware problems?'],
-    linux: ['Why did this device restart recently?', 'Which services failed in the last 24 hours?', 'Are there signs of disk, memory or hardware problems?']
+    linux: ['Why did this device restart recently?', 'Which services failed in the last 24 hours?', 'Are there signs of disk, memory or hardware problems?'],
+    macos: ['Why did this Mac restart recently? Was there a kernel panic?', 'Which apps crashed in the last 7 days?', 'Did any software update or installation fail recently?', 'Were there failed logins or authentication errors?']
 };
-const STARTER_OS = ['windows', 'linux'];
+const STARTER_OS = ['windows', 'linux', 'macos'];
 const MAX_STARTERS = 12, MAX_STARTER_LEN = 200;
 const PROMPT_PARTS = prompts.PARTS;
 const MAX_TEMPLATE = prompts.MAX_TEMPLATE, MAX_EXTRA = prompts.MAX_EXTRA;
@@ -168,9 +171,11 @@ function normStarters(os, v) {
     if (out.length === f.length && out.every(function (t, i) { return t === f[i]; })) return null;
     return out;
 }
-// the starter questions for a device: the saved list for its OS, else the factory list (unknown OS: Windows)
+// the starter questions for a device: the saved list for its OS, else the factory list (unknown OS: Windows;
+// Android: none)
 function startersFor(settings, os) {
-    const k = os === 'linux' ? 'linux' : 'windows';
+    if (os === 'android') return [];
+    const k = STARTER_OS.indexOf(os) >= 0 ? os : 'windows';
     const v = settings && isObj(settings.starters) ? settings.starters[k] : null;
     return Array.isArray(v) ? v.slice(0, MAX_STARTERS) : STARTERS[k].slice();
 }
@@ -602,4 +607,4 @@ function create(opts) {
     };
 }
 
-module.exports = { create, validateEndpoint, sanitize, mergeSettings, startersFor, DEFAULTS, STARTERS, SETTINGS_VERSION, FORMATS, PRESETS, TOOL_MODES, ID_RE };
+module.exports = { create, validateEndpoint, sanitize, mergeSettings, startersFor, DEFAULTS, STARTERS, STARTER_OS, SETTINGS_VERSION, FORMATS, PRESETS, TOOL_MODES, ID_RE };

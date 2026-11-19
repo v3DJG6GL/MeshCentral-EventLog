@@ -44,3 +44,14 @@ test('explain digest: event, reference, device, neighbours without the event its
     const plan = digest.plan('ask', {}, F.NOW);
     assert.deepStrictEqual(plan.map(function (p) { return p.tool; }), ['get_device_info', 'event_facets', 'event_groups']);
 });
+
+test('explain digest on Linux / macOS: the 7-day group is not filtered by the event\'s Id (a process id there)', function () {
+    const now = F.NOW;
+    const mac = { _id: 'x', tc: now - 1000, ProviderName: 'launchd', Id: '1', Subsystem: 'com.apple.xpc', MsgType: 'Error', Message: 'm' };
+    const grp = function (input) { return digest.plan('explain', input, now).find(function (p) { return p.tool === 'event_groups'; }).args.filters; };
+    assert.deepStrictEqual(grp({ ref: 'E1', event: mac, os: 'macos' }), { sources: ['launchd'] });
+    assert.deepStrictEqual(grp({ ref: 'E1', event: mac }), { sources: ['launchd'] }, 'told by the record\'s fields');
+    assert.deepStrictEqual(grp({ ref: 'E1', event: { ProviderName: 'kernel', Id: '0', Message: 'm' }, os: 'linux' }), { sources: ['kernel'] });
+    assert.deepStrictEqual(grp({ ref: 'E1', event: { ProviderName: 'launchd', Id: '1', Message: 'm' }, os: 'macos' }), { sources: ['launchd'] }, 'also when the database kept no macOS fields');
+    assert.deepStrictEqual(grp({ ref: 'E1', event: { ProviderName: 'disk', Id: 7, Message: 'm' }, os: 'windows' }), { sources: ['disk'], ids: '7' });
+});

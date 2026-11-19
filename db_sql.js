@@ -323,7 +323,8 @@ module.exports.install = function (obj, meshserver, kind, shared) {
     function toRow(nodeid, e, nowMs) {
         var tc = shared.tcOf(e.TimeCreated);
         var extra = {};
-        ['Priority', 'Unit', 'Transport', 'BootId'].forEach(function (k) { if (e[k] != null && e[k] !== '') extra[k] = e[k]; });
+        // Linux (journald) and macOS (unified log) fields that have no column of their own
+        ['Priority', 'Unit', 'Transport', 'BootId', 'Subsystem', 'OsCategory', 'ProcessPath', 'MsgType'].forEach(function (k) { if (e[k] != null && e[k] !== '') extra[k] = e[k]; });
         var eid = (e.Id == null) ? null : trunc(e.Id, 64);
         var lvl = Number(e.Level);
         return {

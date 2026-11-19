@@ -141,3 +141,59 @@ test('history disabled and db failures become error results', async function () 
     const r2 = await y.T.exec('get_events', {}, {});
     assert.ok(r2.isError && /failed/.test(r2.content));
 });
+
+function macEvents() {
+    const t0 = F.NOW - 3600000;
+    const e = function (id, o) { return Object.assign({ _id: id, nodeid: F.NODE, Level: 2, LogName: 'System', MsgType: 'Error', Subsystem: '', OsCategory: '', ProcessPath: '', Id: '' }, o); };
+    return [
+        e('m00000000000000000000001', { tc: t0, LogName: 'Crash', Level: 1, MsgType: 'Panic', ProviderName: 'Kernel', ProcessPath: '/Library/Logs/DiagnosticReports/panic-full-2026-11-18-080000.panic', Message: 'panic(cpu 0 caller 0xffffff8012345678): Kernel trap at 0xffffff7f9a2b3c4d, type 14=page fault' }),
+        e('m00000000000000000000002', { tc: t0 + 1000, ProviderName: 'launchd', Subsystem: 'com.apple.xpc', OsCategory: 'connection', ProcessPath: '/sbin/launchd', Id: '1', Message: 'Service exited with abnormal code: 78' }),
+        e('m00000000000000000000003', { tc: t0 + 2000, ProviderName: 'launchd', Subsystem: 'com.apple.xpc', OsCategory: 'connection', ProcessPath: '/sbin/launchd', Id: '1', Message: 'Service exited with abnormal code: 15' }),
+        // a PID that is also a Windows event id with a curated entry (Kernel-Power 41): never looked up as one
+        e('m00000000000000000000004', { tc: t0 + 3000, LogName: 'Application', Level: 4, MsgType: 'Default', ProviderName: 'Kernel-Power', Id: '41', Message: 'nothing special' })
+    ];
+}
+
+test('macOS events: subsystem, os_log category, message type and PID in the output; groups by subsystem; the macOS reference', async function () {
+    const x = mk(null, { os: 'macos', histOpts: { historyEntryTypes: [1, 2, 3, 4] } });
+    x.db.events.length = 0;
+    macEvents().forEach(function (e) { x.db.events.push(e); });
+    const r = await x.T.run('get_events', { window: { since: '7d' } });
+    assert.ok(r.ok);
+    const byMsg = function (re) { return r.data.events.find(function (e) { return re.test(e.msg_untrusted); }); };
+    const svc = byMsg(/abnormal code: 78/);
+    assert.deepStrictEqual([svc.log, svc.src, svc.id, svc.subsystem, svc.os_category, svc.msg_type, svc.lvl], ['System', 'launchd', '1', 'com.apple.xpc', 'connection', 'Error', 'err']);
+    const panic = byMsg(/^panic/);
+    assert.deepStrictEqual([panic.log, panic.msg_type, panic.lvl, 'subsystem' in panic, 'os_category' in panic], ['Crash', 'Panic', 'crit', false, false]);
+    assert.ok(!('unit' in svc));
+    // get_event adds the process path
+    const ge = await x.T.run('get_event', { ref: svc.ref });
+    assert.strictEqual(ge.data.process_path, '/sbin/launchd');
+    // event_groups: the two launchd errors are one template group with the subsystem
+    const g = await x.T.run('event_groups', { window: { since: '7d' } });
+    const xpc = g.data.groups.find(function (gr) { return gr.subsystem === 'com.apple.xpc'; });
+    assert.deepStrictEqual([xpc.count, xpc.src, xpc.template_untrusted], [2, 'launchd', 'Service exited with abnormal code: <*>']);
+    // lookup_event_id with a ref: the macOS reference, never the Windows one by PID
+    assert.deepStrictEqual([(await x.T.run('lookup_event_id', { ref: panic.ref })).data.key, (await x.T.run('lookup_event_id', { ref: panic.ref })).data.known], ['mac-kernel-panic', true]);
+    assert.strictEqual((await x.T.run('lookup_event_id', { ref: byMsg(/nothing special/).ref })).data.known, false);
+    // the device info carries the collector's macOS version
+    const y = mk({ deviceSummary: true }, { os: 'macos', osVersion: '14.5' });
+    const di = await y.T.run('get_device_info', {});
+    assert.strictEqual(di.data.device.osVersion, '14.5');
+    assert.strictEqual((await mk({ deviceSummary: true }).T.run('get_device_info', {})).data.device.osVersion, undefined);
+    // the schema descriptions name macOS
+    assert.match(tools.DEFS.event_groups.description, /unit\/subsystem\+message template \(Linux, macOS\)/);
+    assert.match(tools.DEFS.get_events.parameters.properties.filters.properties.logs.description, /Linux and macOS: categories/);
+});
+
+test('macOS records on a device of unknown OS are told by their fields; Windows records keep the provider+id reference', async function () {
+    const x = mk(null, { os: null });
+    x.db.events.length = 0;
+    macEvents().forEach(function (e) { x.db.events.push(e); });
+    const r = await x.T.run('get_events', { window: { since: '7d' } });
+    const kp = r.data.events.find(function (e) { return /nothing special/.test(e.msg_untrusted); });
+    assert.strictEqual((await x.T.run('lookup_event_id', { ref: kp.ref })).data.known, false, 'MsgType marks a macOS record: Id is a PID');
+    const w = mk();
+    const g = await w.T.run('event_groups', { window: { since: '7d' }, top_n: 1 });
+    assert.ok((await w.T.run('lookup_event_id', { ref: g.data.groups[0].sample_refs[0] })).data.known);
+});

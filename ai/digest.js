@@ -4,7 +4,7 @@
 //
 // build({ tools, mode, input, budgetTokens, nonce, now }) -> Promise<{ text, refs, sections }>
 //   tools  : toolset from ai/tools.js (run / pack / has)
-//   mode   : 'explain'  input { ref, event }  -> event + reference + device + +-15 min neighbours (10) + 7-day group
+//   mode   : 'explain'  input { ref, event, os? } -> event + reference + device + +-15 min neighbours (10) + 7-day group
 //            'diagnose' input { window:{from,to} } -> device + facets + top 25 groups (most severe first) + 2 samples each
 //            'ask'      input {}               -> the diagnose digest for the last 24 h
 //   text   : prompts.fence(nonce, 'digest', ...) (redacted by tools.pack); '' when nothing could be added
@@ -23,14 +23,15 @@ function plan(mode, input, now) {
     if (mode === 'explain') {
         const e = input.event || {};
         const tc = Number(e.tc) || now;
-        const linux = e.Unit != null || e.Priority != null;
+        // Linux / macOS: Id is a process id, not an event id (os: the device's, else told by the record's fields)
+        const pidIds = input.os === 'linux' || input.os === 'macos' || (input.os !== 'windows' && (e.Unit != null || e.Priority != null || e.Subsystem != null || e.MsgType != null));
         P.push({ label: 'The event to explain', tool: 'get_event', args: { ref: input.ref } });
         P.push({ label: 'Reference for this event', tool: 'lookup_event_id', args: { ref: input.ref } });
         P.push({ label: 'Device', tool: 'get_device_info', args: {} });
         P.push({ label: 'Events within 15 minutes of it', tool: 'get_events', args: { window: { since: iso(tc - 900000), until: iso(tc + 900000) }, limit: 11 }, internal: { excludeId: e._id }, cut: 10 });
         const f = {};
         if (e.ProviderName) f.sources = [String(e.ProviderName).slice(0, 200)];
-        if (!linux && e.Id != null && /^\d{1,6}$/.test(String(e.Id))) f.ids = String(e.Id);
+        if (!pidIds && e.Id != null && /^\d{1,6}$/.test(String(e.Id))) f.ids = String(e.Id);
         P.push({ label: 'The same event over the last 7 days', tool: 'event_groups', args: { window: { since: iso(now - 7 * 86400000), until: iso(now) }, filters: f, top_n: 3 } });
     } else {
         let w = mode === 'diagnose' && input.window ? input.window : { from: now - 86400000, to: now };

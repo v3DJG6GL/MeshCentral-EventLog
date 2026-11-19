@@ -540,8 +540,8 @@
         cfgValue: '',         // aiEndpointId of the config set in the editor
         factory: {}, factoryHash: {}, placeholders: {},   // system prompt templates (aiAdminData)
         promptsBuilt: false, promptEdit: false, promptPart: 'base', factoryOpen: {},
-        starters: { windows: [], linux: [] },               // starter questions being edited (texts, in order)
-        startersFactory: { windows: [], linux: [] },        // factory lists (aiAdminData)
+        starters: { windows: [], linux: [], macos: [] },          // starter questions being edited (texts, in order)
+        startersFactory: { windows: [], linux: [], macos: [] },   // factory lists (aiAdminData)
         histAvailable: false, histCounts: null              // saved results on the server (aiAdminData / aiAdminHistoryStats)
       };
       var EL_AI_PRESETS = {
@@ -1206,7 +1206,8 @@
       }
 
       // ---- starter questions (per OS): add, remove, reorder, reset ----
-      var EL_AI_OSES = ['windows', 'linux'], EL_AI_START_MAX = 12, EL_AI_START_LEN = 200;
+      var EL_AI_OSES = ['windows', 'linux', 'macos'], EL_AI_START_MAX = 12, EL_AI_START_LEN = 200;
+      var EL_AI_OS_NAMES = { windows: 'Windows', linux: 'Linux', macos: 'macOS' };
       function elAiStartSame(a, b) { return a.length === b.length && a.every(function(x, i) { return x === b[i]; }); }
       function elAiStartClean(list) {
         var out = [];
@@ -1222,7 +1223,7 @@
       function elAiStartChanged() { elAi.settingsDirty = true; }
       function elAiStartRender(os, focus) {
         var ol = Q('elAiStart_' + os); if (ol == null) return;
-        var list = elAi.starters[os], name = (os == 'linux') ? 'Linux' : 'Windows';
+        var list = elAi.starters[os], name = EL_AI_OS_NAMES[os];
         ol.textContent = '';
         list.forEach(function(text, i) {
           var li = document.createElement('li'); li.className = 'elAiStartRow';
@@ -1341,7 +1342,8 @@
         s.retentionDays = ret;
         s.storeTranscripts = Q('elAiTranscripts').checked;
         s.history = { enabled: Q('elAiHistOn').checked, retentionDays: histDays };
-        s.starters = { windows: elAiStartValue('windows'), linux: elAiStartValue('linux') };
+        s.starters = {};
+        EL_AI_OSES.forEach(function(os) { s.starters[os] = elAiStartValue(os); });
         s.prompts = elAiPromptDraft();   // the server records who edited which part
         s.extraInstructions = Q('elAiExtra').value;
         return s;
@@ -1612,7 +1614,7 @@
             var cur = elAiStartClean(elAi.starters[os]), fac = elAi.startersFactory[os] || [];
             var saved = Array.isArray(sst[os]) ? elAiStartClean(sst[os]) : fac;
             if (!elAiStartSame(cur, saved)) su = true;
-            txt.push((os == 'linux' ? 'Linux' : 'Windows') + ': ' + cur.length + (cur.length == 1 ? ' question' : ' questions') + (elAiStartSame(cur, fac) ? '' : ' (edited)'));
+            txt.push(EL_AI_OS_NAMES[os] + ': ' + cur.length + (cur.length == 1 ? ' question' : ' questions') + (elAiStartSame(cur, fac) ? '' : ' (edited)'));
           });
           items.push([txt.join(', ') + '.', null]);
           if (su) items.push(['Unsaved changes', 'unsaved']);
@@ -2006,7 +2008,7 @@
         var pp = document.querySelector('input[name="elAiPreview"]:checked');
         return {
           data: JSON.stringify([EL_AI_REDACT.map(function(x) { return c('elAiR_' + x[0]); }), EL_AI_CATS.map(function(x) { return c('elAiC_' + x[0]); }), pp ? pp.value : '']),
-          beh: JSON.stringify([v('elAiExtra').replace(/\r\n?/g, '\n'), elAi.promptsBuilt ? elAiPromptDraft() : null, elAiStartClean(elAi.starters.windows), elAiStartClean(elAi.starters.linux)]),
+          beh: JSON.stringify([v('elAiExtra').replace(/\r\n?/g, '\n'), elAi.promptsBuilt ? elAiPromptDraft() : null, EL_AI_OSES.map(function(os) { return elAiStartClean(elAi.starters[os]); })]),
           access: JSON.stringify([c('elAiEnabled'), c('elAiChatGen'), v('elAiQuotaQ'), v('elAiQuotaT'), v('elAiRounds'), v('elAiCalls'), v('elAiSentKB')]),
           saved: JSON.stringify([c('elAiHistOn'), v('elAiHistDays')]),
           req: JSON.stringify([v('elAiRetention'), c('elAiTranscripts')])
@@ -2481,7 +2483,7 @@
     .elAiTestOut .elAiLine { display: block; }
     .elAiFilters { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
     .elAiFilters > label { display: inline-flex; align-items: center; gap: 8px; }
-    /* starter questions: two numbered lists; each row an input with move / remove */
+    /* starter questions: one numbered list per device OS; each row an input with move / remove */
     .elAiStartCols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 14px 28px; }
     .elAiStartCol h4 { margin: 0 0 6px; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
     .elAiStartCol h4 .elAiTag { vertical-align: 0; }
@@ -2721,16 +2723,16 @@
             <div class="col-h"><span class="lbl-sm">Live view</span><input type="text" id="elliveLogs" name="liveLogs" aria-label="Live view: Windows logs"></div>
             <div class="col-h"><span class="lbl-sm">Stored history</span><input type="text" id="elhistoryLogs" name="historyLogs" aria-label="Stored history: Windows logs"></div>
 
-            <div class="rl" id="elRowCats">Linux categories<small>journald. Nothing selected means no filter. Application is program output, usually the noisiest on desktops.</small></div>
+            <div class="rl" id="elRowCats">Categories (Linux, macOS)<small>journald and the macOS unified log. Cron, Daemon and Audit exist on Linux only, Install and Crash (crash reports) on macOS only. Nothing selected means no filter. Application is program output, usually the noisiest on desktops.</small></div>
             <div class="col-h"><span class="lbl-sm">Live view</span>
-              <select id="elliveCategoriesMode" name="liveCategoriesMode" aria-label="Live view: Linux categories, include or exclude"><option value="include">Include selected</option><option value="exclude" selected>Exclude selected</option></select>
-              <div class="chips" id="elliveCategories" role="group" aria-label="Live view: Linux categories">
-                <label class="chip"><input type="checkbox" value="System"><span>System</span></label><label class="chip"><input type="checkbox" value="Application"><span>Application</span></label><label class="chip"><input type="checkbox" value="Kernel"><span>Kernel</span></label><label class="chip"><input type="checkbox" value="Auth"><span>Auth</span></label><label class="chip"><input type="checkbox" value="Cron"><span>Cron</span></label><label class="chip"><input type="checkbox" value="Daemon"><span>Daemon</span></label><label class="chip"><input type="checkbox" value="Audit"><span>Audit</span></label>
+              <select id="elliveCategoriesMode" name="liveCategoriesMode" aria-label="Live view: categories (Linux, macOS), include or exclude"><option value="include">Include selected</option><option value="exclude" selected>Exclude selected</option></select>
+              <div class="chips" id="elliveCategories" role="group" aria-label="Live view: categories (Linux, macOS)">
+                <label class="chip"><input type="checkbox" value="System"><span>System</span></label><label class="chip"><input type="checkbox" value="Application"><span>Application</span></label><label class="chip"><input type="checkbox" value="Kernel"><span>Kernel</span></label><label class="chip"><input type="checkbox" value="Auth"><span>Auth</span></label><label class="chip"><input type="checkbox" value="Cron"><span>Cron</span></label><label class="chip"><input type="checkbox" value="Daemon"><span>Daemon</span></label><label class="chip"><input type="checkbox" value="Audit"><span>Audit</span></label><label class="chip"><input type="checkbox" value="Install"><span>Install</span></label><label class="chip"><input type="checkbox" value="Crash"><span>Crash</span></label>
               </div></div>
             <div class="col-h"><span class="lbl-sm">Stored history</span>
-              <select id="elhistoryCategoriesMode" name="historyCategoriesMode" aria-label="Stored history: Linux categories, include or exclude"><option value="include">Include selected</option><option value="exclude" selected>Exclude selected</option></select>
-              <div class="chips" id="elhistoryCategories" role="group" aria-label="Stored history: Linux categories">
-                <label class="chip"><input type="checkbox" value="System"><span>System</span></label><label class="chip"><input type="checkbox" value="Application"><span>Application</span></label><label class="chip"><input type="checkbox" value="Kernel"><span>Kernel</span></label><label class="chip"><input type="checkbox" value="Auth"><span>Auth</span></label><label class="chip"><input type="checkbox" value="Cron"><span>Cron</span></label><label class="chip"><input type="checkbox" value="Daemon"><span>Daemon</span></label><label class="chip"><input type="checkbox" value="Audit"><span>Audit</span></label>
+              <select id="elhistoryCategoriesMode" name="historyCategoriesMode" aria-label="Stored history: categories (Linux, macOS), include or exclude"><option value="include">Include selected</option><option value="exclude" selected>Exclude selected</option></select>
+              <div class="chips" id="elhistoryCategories" role="group" aria-label="Stored history: categories (Linux, macOS)">
+                <label class="chip"><input type="checkbox" value="System"><span>System</span></label><label class="chip"><input type="checkbox" value="Application"><span>Application</span></label><label class="chip"><input type="checkbox" value="Kernel"><span>Kernel</span></label><label class="chip"><input type="checkbox" value="Auth"><span>Auth</span></label><label class="chip"><input type="checkbox" value="Cron"><span>Cron</span></label><label class="chip"><input type="checkbox" value="Daemon"><span>Daemon</span></label><label class="chip"><input type="checkbox" value="Audit"><span>Audit</span></label><label class="chip"><input type="checkbox" value="Install"><span>Install</span></label><label class="chip"><input type="checkbox" value="Crash"><span>Crash</span></label>
               </div></div>
 
             <div class="rl" id="elRowSrc">Sources<small>Source or provider names, comma separated, case-insensitive. <code>*</code> matches anything. Empty means no filter.</small></div>
@@ -2740,9 +2742,9 @@
             <div class="col-h"><span class="lbl-sm">Stored history</span>
               <select id="elhistorySourcesMode" name="historySourcesMode" aria-label="Stored history: sources, include or exclude"><option value="include">Include</option><option value="exclude" selected>Exclude</option></select>
               <div class="sub"><input type="text" id="elhistorySources" name="historySources" class="mono-in" placeholder="plasmashell, kwin*" aria-label="Stored history: sources" aria-describedby="elhistorySourcesHelp"></div>
-              <p class="help" id="elhistorySourcesHelp">Applied on the server as events arrive, for Windows and Linux alike.</p></div>
+              <p class="help" id="elhistorySourcesHelp">Applied on the server as events arrive, for Windows, Linux and macOS alike.</p></div>
 
-            <div class="rl">Entry types<small>None selected means all</small></div>
+            <div class="rl">Entry types<small>None selected means all. macOS has no Warning level.</small></div>
             <div class="col-h"><span class="lbl-sm">Live view</span>
               <div class="chips" id="elliveEntryTypes" role="group" aria-label="Live view: entry types" style="margin-top:0">
                 <label class="chip"><input type="checkbox" value="0"><span>LogAlways</span></label><label class="chip"><input type="checkbox" value="1"><span>Critical</span></label><label class="chip"><input type="checkbox" value="2"><span>Error</span></label><label class="chip"><input type="checkbox" value="3"><span>Warning</span></label><label class="chip"><input type="checkbox" value="4"><span>Info</span></label><label class="chip"><input type="checkbox" value="5"><span>Verbose</span></label>
@@ -2961,7 +2963,7 @@
             <div class="coll" id="elAiStartFs">
               <h3 class="coll-h"><button type="button" class="coll-btn" id="elAiColl_starters" aria-expanded="false" aria-controls="elAiStartBody"><svg class="elAiChev" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="coll-t" id="elAiStartT">Starter questions</span><span class="coll-s" id="elAiCollSum_starters"></span></button></h3>
               <div id="elAiStartBody" class="coll-body" data-coll="starters" hidden>
-                <p class="help" id="elAiStartHelp" style="margin-top:0">The example questions an empty Ask panel offers, one list per device type. Devices whose system is not known get the Windows list. Up to 12 questions of at most 200 characters each; the order here is the order of the buttons.</p>
+                <p class="help" id="elAiStartHelp" style="margin-top:0">The example questions an empty Ask panel offers, one list per device type. Devices whose system is not known get the Windows list; Android devices have no event logs and get none. Up to 12 questions of at most 200 characters each; the order here is the order of the buttons.</p>
                 <div class="elAiStartCols">
                   <section class="elAiStartCol" aria-labelledby="elAiStartH_windows"><h4 id="elAiStartH_windows">Windows devices <span id="elAiStartTag_windows"></span></h4>
                     <ol id="elAiStart_windows" class="elAiStartL"></ol>
@@ -2970,6 +2972,10 @@
                   <section class="elAiStartCol" aria-labelledby="elAiStartH_linux"><h4 id="elAiStartH_linux">Linux devices <span id="elAiStartTag_linux"></span></h4>
                     <ol id="elAiStart_linux" class="elAiStartL"></ol>
                     <div class="elAiBtns"><button type="button" id="elAiStartAdd_linux">Add a question</button><button type="button" class="elQuiet" id="elAiStartReset_linux">Reset to factory defaults</button><span class="elAiCount" id="elAiStartCount_linux" style="margin:0"></span></div>
+                  </section>
+                  <section class="elAiStartCol" aria-labelledby="elAiStartH_macos"><h4 id="elAiStartH_macos">macOS devices <span id="elAiStartTag_macos"></span></h4>
+                    <ol id="elAiStart_macos" class="elAiStartL"></ol>
+                    <div class="elAiBtns"><button type="button" id="elAiStartAdd_macos">Add a question</button><button type="button" class="elQuiet" id="elAiStartReset_macos">Reset to factory defaults</button><span class="elAiCount" id="elAiStartCount_macos" style="margin:0"></span></div>
                   </section>
                 </div>
               </div>
@@ -2982,7 +2988,7 @@
                 <p class="help" id="elAiPrevHelp" style="margin-top:0">What the model receives as instructions, built from the text on this page including unsaved changes. Sample values: device SAMPLE-PC, every tool available, personal values replaced.</p>
                 <div class="elAiFilters">
                   <label>Question type <select id="elAiPrevMode"><option value="ask">Ask</option><option value="explain">Explain</option><option value="diagnose">Diagnosis</option></select></label>
-                  <label>Device <select id="elAiPrevOs"><option value="windows">Windows</option><option value="linux">Linux</option></select></label>
+                  <label>Device <select id="elAiPrevOs"><option value="windows">Windows</option><option value="linux">Linux</option><option value="macos">macOS</option></select></label>
                   <label>Endpoint <select id="elAiPrevEp"><option value="">None</option></select></label>
                   <button type="button" id="elAiPrevBtn">Show the full prompt</button>
                   <span id="elAiPrevStatus" class="elSaveStatus" role="status" aria-live="polite"></span>

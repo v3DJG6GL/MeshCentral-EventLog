@@ -526,6 +526,18 @@ test('accessInfo: saved results info and the starter questions for the device\'s
     t.store.settings.history = { enabled: true, retentionDays: 7 };
     a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
     assert.deepStrictEqual([a.starters, a.saved.retentionDays], [['Is journald healthy?'], 7]);
+    t.db.meta = { os: 'macos', caps: { log: true, osver: '14.5' } };
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual(a.starters, storeMod.STARTERS.macos, 'macOS: its own list (settings stored before macOS support have none)');
+    t.store.settings.starters = { windows: null, linux: null, macos: ['Is FileVault on?'] };
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual(a.starters, ['Is FileVault on?']);
+    t.db.meta = null;
+    t.node.agent = { ver: 0, id: 29, caps: 15 };   // an Apple silicon agent that never reported: macOS from the agent id
+    a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual(a.starters, ['Is FileVault on?']);
+    t.node.agent = { ver: 0, id: 4, caps: 15 };
+    t.store.settings.starters = { windows: null, linux: ['Is journald healthy?'] };
     t.db.meta = { os: null };
     t.node.osdesc = 'FreeBSD 14';
     a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
@@ -539,7 +551,7 @@ test('accessInfo: saved results info and the starter questions for the device\'s
 test('settings: starters merge (clean, clamp, dedupe, factory -> null, reset) and history retention clamp', function () {
     const S = storeMod.STARTERS;
     let s = storeMod.mergeSettings(storeMod.DEFAULTS, {});
-    assert.deepStrictEqual([s.starters, s.history], [{ windows: null, linux: null }, { enabled: true, retentionDays: 30 }]);
+    assert.deepStrictEqual([s.starters, s.history], [{ windows: null, linux: null, macos: null }, { enabled: true, retentionDays: 30 }]);
     s = storeMod.mergeSettings(s, { starters: { windows: [' Is the disk OK?\n', 'Is the disk OK?', '', 42, 'x'.repeat(250)].concat(Array(20).fill('q').map(function (q, i) { return q + i; })), linux: S.linux.slice() } });
     assert.strictEqual(s.starters.windows.length, 12);
     assert.strictEqual(s.starters.windows[0], 'Is the disk OK?');
@@ -552,11 +564,24 @@ test('settings: starters merge (clean, clamp, dedupe, factory -> null, reset) an
     assert.deepStrictEqual([s.starters.windows, s.starters.linux], [null, []], 'reset; a non-list is ignored');
     assert.deepStrictEqual(storeMod.startersFor(s, 'windows'), S.windows);
     assert.deepStrictEqual(storeMod.startersFor({}, 'mac'), S.windows);
+    assert.deepStrictEqual(storeMod.startersFor(s, 'macos'), S.macos, 'no macOS list stored: the factory list');
+    assert.deepStrictEqual(storeMod.startersFor(s, 'android'), [], 'Android: none (no event logs)');
+    assert.deepStrictEqual(storeMod.startersFor(s, null), S.windows);
+    assert.deepStrictEqual(Object.keys(S), ['windows', 'linux', 'macos']);
+    assert.ok(S.macos.length >= 3 && S.macos.length <= 12 && S.macos.every(function (q) { return q.length <= 200; }));
+    // a stored document from before macOS support (windows / linux only) keeps its lists and gets macOS null
+    let old = storeMod.mergeSettings(storeMod.DEFAULTS, {});
+    old = storeMod.mergeSettings(Object.assign({}, old, { starters: { windows: ['A?'], linux: ['B?'] } }), {});
+    assert.deepStrictEqual(old.starters, { windows: ['A?'], linux: ['B?'], macos: null });
+    old = storeMod.mergeSettings(old, { starters: { macos: S.macos.slice() } });
+    assert.strictEqual(old.starters.macos, null, 'the macOS factory list is stored as null');
+    old = storeMod.mergeSettings(old, { starters: { macos: ['Is FileVault on?'] } });
+    assert.deepStrictEqual(old.starters, { windows: ['A?'], linux: ['B?'], macos: ['Is FileVault on?'] });
     s = storeMod.mergeSettings(s, { history: { enabled: false, retentionDays: 0 } });
     assert.deepStrictEqual(s.history, { enabled: false, retentionDays: 1 });
     s = storeMod.mergeSettings(s, { history: { retentionDays: 99999, enabled: 'yes' } });
     assert.deepStrictEqual(s.history, { enabled: false, retentionDays: 3650 });
     // a stored document from before (no history / starters fields) gets the defaults
     s = storeMod.mergeSettings(storeMod.DEFAULTS, { enabled: true, starters: 'garbage', history: { retentionDays: 'x' } });
-    assert.deepStrictEqual([s.starters, s.history], [{ windows: null, linux: null }, { enabled: true, retentionDays: 30 }]);
+    assert.deepStrictEqual([s.starters, s.history], [{ windows: null, linux: null, macos: null }, { enabled: true, retentionDays: 30 }]);
 });

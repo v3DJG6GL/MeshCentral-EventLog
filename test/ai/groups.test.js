@@ -71,3 +71,25 @@ test('bad input is tolerated', function () {
     assert.strictEqual(g.length, 1);
     assert.strictEqual(g[0].level, 4);
 });
+
+test('macOS grouping by subsystem|process|masked message; the PID (Id) is not part of the key', function () {
+    const ev = [
+        { _id: 'a', tc: 1, Level: 2, MsgType: 'Error', LogName: 'System', Subsystem: 'com.apple.xpc', OsCategory: 'connection', ProviderName: 'launchd', Id: '1', Message: 'Service exited with abnormal code: 78' },
+        { _id: 'b', tc: 5, Level: 2, MsgType: 'Error', LogName: 'System', Subsystem: 'com.apple.xpc', OsCategory: 'connection', ProviderName: 'launchd', Id: '1', Message: 'Service exited with abnormal code: 15' },
+        { _id: 'c', tc: 3, Level: 4, MsgType: 'Default', LogName: 'Auth', Subsystem: '', ProviderName: 'sshd', Id: '812', Message: 'Accepted publickey for bob from 10.0.0.5 port 50022 ssh2' },
+        { _id: 'd', tc: 4, Level: 4, MsgType: 'Default', LogName: 'Auth', Subsystem: '', ProviderName: 'sshd', Id: '944', Message: 'Accepted publickey for bob from 10.0.0.9 port 51234 ssh2' }
+    ];
+    for (const os of ['macos', undefined]) {   // the device's OS, or told by the records' Subsystem / MsgType
+        const g = G.groupEvents(ev, { os: os });
+        assert.strictEqual(g.length, 2, String(os));
+        assert.strictEqual(g[0].key, 'com.apple.xpc|launchd|Service exited with abnormal code: <*>');
+        assert.deepStrictEqual([g[0].count, g[0].subsystem, g[0].unit, g[0].first, g[0].last, g[0].sampleIds], [2, 'com.apple.xpc', '', 1, 5, ['b', 'a']]);
+        assert.strictEqual(g[1].key, '|sshd|Accepted publickey for bob from <*> port <*> ssh2');
+        assert.strictEqual(g[1].count, 2, 'different PIDs, same template');
+    }
+    // os: 'macos' forces template keys even without the macOS fields (an SQL database keeps only known columns)
+    assert.strictEqual(G.groupEvents([{ _id: 'x', tc: 1, Level: 4, ProviderName: 'kernel', Id: '0', Message: 'AppleUSBHostPort: port 3 connected 12' }], { os: 'macos' })[0].key,
+        '|kernel|AppleUSBHostPort: port 3 connected <*>');
+    // Windows records keep provider|id
+    assert.strictEqual(G.groupEvents([{ _id: 'w', tc: 1, Level: 2, ProviderName: 'disk', Id: 7, Message: 'bad block' }], {})[0].subsystem, '');
+});

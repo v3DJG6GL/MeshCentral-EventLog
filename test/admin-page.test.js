@@ -178,7 +178,7 @@ test('first endpoint offer: Not now, and a refused save keeps the offer with the
     assert.strictEqual(w.elAi.offer, null);
 });
 
-var FACT = { windows: ['Why did this device restart recently?', 'What changed in the last 24 hours?', 'Are there signs of disk or hardware problems?'], linux: ['Why did this device restart recently?', 'Which services failed in the last 24 hours?', 'Are there signs of disk, memory or hardware problems?'] };
+var FACT = { windows: ['Why did this device restart recently?', 'What changed in the last 24 hours?', 'Are there signs of disk or hardware problems?'], linux: ['Why did this device restart recently?', 'Which services failed in the last 24 hours?', 'Are there signs of disk, memory or hardware problems?'], macos: require('../ai/store.js').STARTERS.macos.slice() };
 function dataWith(w, settings, extra) {
     var get = w.last('aiAdminGet');
     w.h.aiAdminData(null, Object.assign({ reqId: get && get.reqId, endpoints: [], usedBy: {}, startersFactory: FACT, historyAvailable: true, historyCounts: { chat: 4, diagnosis: 1, explain: 7, total: 12 },
@@ -228,7 +228,7 @@ test('starter questions: factory lists shown, add / remove / reorder (focus foll
     assert.deepStrictEqual(texts(w, 'windows'), FACT.windows);
     w.elAiSaveSettings();
     var s = w.last('aiAdminSaveSettings').settings;
-    assert.deepStrictEqual(JSON.parse(JSON.stringify(s.starters)), { windows: null, linux: [] });
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(s.starters)), { windows: null, linux: [], macos: null });
     $(w, 'elAiStartAdd_linux').click();
     w.document.activeElement.value = '  Which units failed?  '; w.document.activeElement.dispatchEvent(new w.Event('input', { bubbles: true }));
     $(w, 'elAiStartAdd_linux').click();   // left empty
@@ -372,7 +372,7 @@ test('collapsed by default: only System prompt, Starter questions, Full prompt p
     ['elAiColl_data', 'elAiColl_requests', 'elAiCollSum_data'].forEach(function (id) { assert.strictEqual($(w, id), null, id); });
     // summaries while closed
     assert.deepStrictEqual(summary(w, 'prompt'), ['Factory default in all four parts.', 'Editing is off.']);
-    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 3 questions.']);
+    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 3 questions, macOS: 4 questions.']);
     assert.match($(w, 'elAiCollSum_preview').textContent, /including unsaved changes/);
     // remembered per browser; blocked storage leaves them closed
     $(w, 'elAiColl_prompt').click();
@@ -577,6 +577,58 @@ test('config sets: the side-by-side editor saves exactly the stored format; chip
     assert.strictEqual(w.document.activeElement, rules[1].querySelector('.elaName'));
 });
 
+test('config sets: one categories row for Linux and macOS (union of both), the help says which exist where', { skip: SKIP }, function () {
+    var sets = [Object.assign({}, SETS[0], { liveCategories: ['crash', 'Cron'], historyCategories: 'Install,kernel' }), SETS[1]];
+    var w = page({ sets: sets });
+    w.elGoPage('configsets');
+    var row = $(w, 'elRowCats');
+    assert.strictEqual(row.firstChild.textContent, 'Categories (Linux, macOS)');
+    assert.match(row.querySelector('small').textContent, /Cron, Daemon and Audit exist on Linux only, Install and Crash \(crash reports\) on macOS only\./);
+    ['elliveCategories', 'elhistoryCategories'].forEach(function (id) {
+        assert.deepStrictEqual(Array.prototype.map.call($(w, id).querySelectorAll('input'), function (i) { return i.value; }),
+            ['System', 'Application', 'Kernel', 'Auth', 'Cron', 'Daemon', 'Audit', 'Install', 'Crash'], id);
+        assert.strictEqual($(w, id).getAttribute('aria-label'), (id == 'elliveCategories' ? 'Live view' : 'Stored history') + ': categories (Linux, macOS)');
+    });
+    assert.deepStrictEqual(Array.prototype.map.call($(w, 'elliveCategories').querySelectorAll('input:checked'), function (i) { return i.value; }), ['Cron', 'Crash']);
+    assert.deepStrictEqual(Array.prototype.map.call($(w, 'elhistoryCategories').querySelectorAll('input:checked'), function (i) { return i.value; }), ['Kernel', 'Install']);
+    assert.match($(w, 'elhistorySourcesHelp').textContent, /for Windows, Linux and macOS alike/);
+    assert.match(w.document.body.textContent, /macOS has no Warning level/);
+    w.saveConfig();
+    var o = w.last('adminSaveConfig').opts;
+    assert.deepStrictEqual([o.liveCategories, o.historyCategories], [['Cron', 'Crash'], ['Kernel', 'Install']]);
+});
+
+test('starter questions and prompt preview: a macOS list next to Windows and Linux; older settings without it get the factory list', { skip: SKIP }, function () {
+    var w = page();
+    w.elGoPage('assistant');
+    $(w, 'elAiColl_starters').click();   // the part is closed until opened (focus only lands on visible elements)
+    dataWith(w, { starters: { windows: null, linux: null } });   // stored before macOS support
+    assert.strictEqual($(w, 'elAiStartH_macos').firstChild.textContent.trim(), 'macOS devices');
+    assert.deepStrictEqual(texts(w, 'macos'), FACT.macos);
+    assert.ok(FACT.macos.length >= 3 && FACT.macos.some(function (q) { return /kernel panic/i.test(q); }));
+    assert.strictEqual($(w, 'elAiStartTag_macos').textContent, 'Factory default');
+    assert.match($(w, 'elAiStartHelp').textContent, /Android devices have no event logs and get none/);
+    assert.strictEqual(w.document.querySelector('#elAiStart_macos li input').getAttribute('aria-label'), 'macOS starter question 1 of ' + FACT.macos.length);
+    w.elAiSaveSettings();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(w.last('aiAdminSaveSettings').settings.starters)), { windows: null, linux: null, macos: null });
+    // edit the macOS list: saved as its own list, the others stay factory
+    $(w, 'elAiStartAdd_macos').click();
+    w.document.activeElement.value = 'Is FileVault on?'; w.document.activeElement.dispatchEvent(new w.Event('input', { bubbles: true }));
+    assert.strictEqual($(w, 'elAiStartTag_macos').textContent, 'Edited');
+    w.elAiSaveSettings();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(w.last('aiAdminSaveSettings').settings.starters)), { windows: null, linux: null, macos: FACT.macos.concat(['Is FileVault on?']) });
+    // a stored macOS list is shown as stored
+    var w2 = page();
+    dataWith(w2, { starters: { windows: null, linux: null, macos: ['Was there a kernel panic?'] } });
+    assert.deepStrictEqual(texts(w2, 'macos'), ['Was there a kernel panic?']);
+    assert.strictEqual($(w2, 'elAiStartTag_macos').textContent, 'Edited');
+    // the full prompt preview offers a macOS device
+    assert.deepStrictEqual(Array.prototype.map.call($(w, 'elAiPrevOs').options, function (o) { return o.value + ':' + o.textContent; }), ['windows:Windows', 'linux:Linux', 'macos:macOS']);
+    $(w, 'elAiPrevOs').value = 'macos';
+    w.elAiPreview();
+    assert.strictEqual(w.last('aiAdminPreviewPrompt').os, 'macos');
+});
+
 test('config sets: switching with unsaved changes is held back in the save bar; Discard and switch; Delete asks first', { skip: SKIP }, function () {
     var w = page({ sets: SETS });
     w.elGoPage('configsets');
@@ -700,7 +752,7 @@ test('collapsible parts: summaries follow edits (edited parts, unsaved changes, 
     var w = page();
     withPrompts(w, { prompts: { ask: 'My ask. <followups>' }, starters: { windows: null, linux: ['Is journald healthy?'] } });
     assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Ask)', 'Editing is off.']);
-    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 1 question (edited).']);
+    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 1 question (edited), macOS: 4 questions.']);
     $(w, 'elAiPromptEdit').checked = true; fire(w, $(w, 'elAiPromptEdit'));
     $(w, 'elAiTpl_base').value = 'Base rules without the nonce.'; fire(w, $(w, 'elAiTpl_base'), 'input');
     assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Base, Ask)', 'Unsaved changes', 'Editing', '1 note']);
@@ -711,11 +763,11 @@ test('collapsible parts: summaries follow edits (edited parts, unsaved changes, 
     assert.deepStrictEqual(summary(w, 'prompt'), ['Edited (Ask)', 'Editing is off.']);
     assert.strictEqual(bar(w), null);
     w.elAiStartReset('linux');
-    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 3 questions.', 'Unsaved changes']);
+    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 3 questions, macOS: 4 questions.', 'Unsaved changes']);
     assert.strictEqual(bar(w), 'Assistant behaviour');
     w.elAiSaveSettings();
     var sv = w.last('aiAdminSaveSettings');
     w.h.aiAdminSettingsSaved(null, { reqId: sv.reqId, settings: sv.settings });
-    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 3 questions.']);
+    assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 3 questions, macOS: 4 questions.']);
     assert.strictEqual(bar(w), null);
 });

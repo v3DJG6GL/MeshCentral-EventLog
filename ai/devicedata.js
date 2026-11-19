@@ -13,7 +13,8 @@
 // networkSummary(ifDoc)                       -> [{ name, type, status, mac, ipv4[], ipv6[], gateway, dns[] }]|null
 // lastConnect(lcDoc)                          -> { time, addr }|null
 // notes(ntDoc)                                -> string|null              (truncated to 4000 chars)
-// deviceInfo({ meshDb, nodeid, node, categories, getConnectivityState, serials }) -> Promise<object>
+// deviceInfo({ meshDb, nodeid, node, categories, getConnectivityState, serials, osVersion }) -> Promise<object>
+//   osVersion: the OS version the plugin's collector reported (macOS: e.g. '14.5'), added as device.osVersion
 // deviceEvents({ meshDb, nodeid, domain, userid, rights, limit })              -> Promise<[{ time, action, msg }]>
 // seeds(node, siDoc)                          -> { hosts, domains, users, serials } for ai/redact.js
 
@@ -221,6 +222,8 @@ async function deviceInfo(p) {
     try { conn = typeof p.getConnectivityState === 'function' ? p.getConnectivityState(nodeid) : undefined; } catch (e) { conn = undefined; }
     if (cats.deviceSummary !== false) {
         out.device = nodeSummary(node, { connectivity: conn === undefined ? undefined : (conn || null) });
+        const ov = str(p.osVersion, 40);
+        if (ov && isObj(out.device)) out.device.osVersion = ov;
         const si = await getDoc(p.meshDb, 'si' + nodeid);
         const sys = sysinfoSummary(si, { serials: !!p.serials });
         if (sys) out.system = sys;

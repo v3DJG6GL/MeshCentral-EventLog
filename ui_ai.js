@@ -949,6 +949,7 @@ module.exports.attach = function (obj) {
         if (r == 'disabled') return 'Assistant: turned off in the plugin settings.' + (admin ? ' Turn it on in ' + path + 'Assistant.' : '');
         if (r == 'deviceRights') return 'Assistant: needs the Details right on this device.';
         if (r == 'unavailable' || r == 'error') return 'Assistant: not available on this server (see the server log).';
+        if (r == 'android') return 'Assistant: not available on Android devices (no event logs can be collected there).';
         return '';
     };
     // phase: for 'timeout', where it happened (connect = the endpoint was never reached)
@@ -959,6 +960,7 @@ module.exports.attach = function (obj) {
             quota: 'You reached today\'s limit for the Assistant.',
             busy: 'Another question of yours is still running. Wait for it to finish, then try again.',
             noEndpoint: 'No assistant endpoint is assigned to this device\'s config set.',
+            unsupported: 'The Assistant is not available for this type of device.',
             auth: 'The endpoint refused the API key. An administrator needs to check it in the plugin\'s Assistant settings.',
             model: 'The endpoint cannot run this request with the configured model. An administrator needs to check the endpoint.',
             rateLimit: 'The endpoint is limiting requests right now. Try again in a minute.',

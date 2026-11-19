@@ -104,6 +104,11 @@ module.exports.eventlog = function (parent) {
       // Linux support (v0.1.5)
       'elPlatform',
       'elIsSupported',
+      // macOS + Android (Android: a note only)
+      'elIsNix',
+      'elLxViews',
+      'elAndroidNote',
+      'elMacFields',
       'elPriName',
       'elLbl',
       'elRawOf',
@@ -248,24 +253,51 @@ module.exports.eventlog = function (parent) {
     //  Front end (browser) code below. Serialized into the page.
     // ------------------------------------------------------------------
 
-    // 'windows' | 'linux' | null. Decided from the agent architecture id: on Linux, osdesc is the
-    // distro pretty-name ("Ubuntu 24.04.2 LTS") and never contains "linux", so osdesc is only a
-    // last-resort fallback for Windows.
+    // 'windows' | 'linux' | 'macos' | 'android' | null. Decided from the agent architecture id: on Linux, osdesc
+    // is the distro pretty-name ("Ubuntu 24.04.2 LTS") and never contains "linux", so osdesc is only a
+    // last-resort fallback (Windows, macOS, Android).
     obj.elPlatform = function() {
       if ((typeof currentNode == 'undefined') || (currentNode == null)) return null;
       if (currentNode.agent != null && currentNode.agent.id != null) {
-          var id = currentNode.agent.id;
+          var id = Number(currentNode.agent.id);
           var win = [1,2,3,4,21,22,34,42,43,10003,10004,10006,11000,11001,11002];
-          var lin = [5,6,7,8,9,10,12,13,15,18,19,20,24,25,26,27,28,32,33,35,36,37,40,41,45]; // 11 is macOS despite its 'linux' platform tag
+          var lin = [5,6,7,8,9,10,13,15,18,19,20,24,25,26,27,28,32,33,35,36,37,40,41,45];
+          var mac = [11,16,29,10005];   // 11 is the old x86-32 macOS agent despite its 'linux' platform tag
+          var andr = [12,14];           // 12 native Android x86-32 agent, 14 the Google Play app
           if (win.indexOf(id) >= 0) return 'windows';
           if (lin.indexOf(id) >= 0) return 'linux';
+          if (mac.indexOf(id) >= 0) return 'macos';
+          if (andr.indexOf(id) >= 0) return 'android';
       }
-      if ((typeof currentNode.osdesc == 'string') && (currentNode.osdesc.toLowerCase().indexOf('windows') !== -1)) return 'windows';
+      if (typeof currentNode.osdesc == 'string') {
+          var d = currentNode.osdesc;
+          if (/windows/i.test(d)) return 'windows';
+          if (/android/i.test(d)) return 'android';
+          if (/mac ?os|os x|macos|darwin/i.test(d)) return 'macos';
+      }
       return null;
     };
     obj.elIsSupported = function() {
       var p = pluginHandler.eventlog.elPlatform();
-      return (p == 'windows' || p == 'linux');
+      return (p == 'windows' || p == 'linux' || p == 'macos');
+    };
+    // Linux and macOS share the non-Windows shape: categories instead of logs, PIDs instead of event ids,
+    // the View selector, config set categories and the collection cursor.
+    obj.elIsNix = function(os) {
+      return (os == 'linux' || os == 'macos');
+    };
+    // View selector entries per OS ([lsel value, label]); the values are pushed down to the agent in Live view
+    obj.elLxViews = function(os) {
+      if (os == 'macos') return [['','All'],['kernel','Kernel'],['auth','Security (auth)'],['install','Software install'],['crash','Crash reports'],['boot','This boot']];
+      return [['','All'],['kernel','Kernel'],['auth','Security (auth)'],['audit','Audit'],['boot','This boot']];
+    };
+    // Android: the tab shows this note only (no Live, History or Assistant, no requests to the agent or server)
+    obj.elAndroidNote = function() {
+      if (!Q('pluginEventLog')) return false;
+      if (Q('evlAndroid')) return true;
+      QH('pluginEventLog', '<div id=evlAndroid role=note style="padding:18px 14px;opacity:.85">Event logs are not available on Android devices: the MeshCentral Android agent cannot run the plugin\'s collector, ' +
+         'and Android lets an app read other apps\' logs only with the READ_LOGS permission (granted over adb or root).</div>');
+      return true;
     };
     // syslog priority name (Linux detail views keep the raw 0-7 priority next to the collapsed level)
     obj.elPriName = function(p) {
@@ -274,11 +306,22 @@ module.exports.eventlog = function (parent) {
     };
     // column/detail labels differ per OS: journald has categories and PIDs instead of logs and event ids
     obj.elLbl = function(key) {
-      var lx = (pluginHandler.eventlog.elState().os == 'linux');
+      var lx = pluginHandler.eventlog.elIsNix(pluginHandler.eventlog.elState().os);
       if (key == 'log') return lx ? 'Category' : 'Log';
       if (key == 'id') return lx ? 'PID' : 'Event ID';
       if (key == 'idShort') return lx ? 'PID' : 'ID';
       return key;
+    };
+    // macOS unified log fields for the detail views and Copy, as [label, value, monospace]; empty for other OSes
+    // (their events do not carry these fields). Crash reports: the path is the report file.
+    obj.elMacFields = function(ev) {
+      var out = [];
+      if (ev == null) return out;
+      if (ev.subsystem) out.push(['Subsystem', ev.subsystem, false]);
+      if (ev.oscat) out.push(['os_log category', ev.oscat, false]);
+      if (ev.ppath) out.push([(ev.msgtype == 'Crash' || ev.msgtype == 'Panic' || ev.log == 'Crash') ? 'Report file' : 'Process path', ev.ppath, true]);
+      if (ev.msgtype) out.push(['Log type', ev.msgtype, false]);
+      return out;
     };
     // the raw event for the JSON pane / copy: full journald record when available, else the reconstructed shape
     obj.elRawOf = function(ev) {
@@ -306,19 +349,20 @@ module.exports.eventlog = function (parent) {
         for (var i = 0; i < rules.res.length; i++) { if (rules.res[i].test(v)) { hit = true; break; } }
         return rules.exclude ? !hit : hit;
     };
-    // Live view: apply the config set's Live categories (Linux) and sources (all OSes) in the browser,
+    // Live view: apply the config set's Live categories (Linux, macOS) and sources (all OSes) in the browser,
     // so it works for Windows too, where the agent forwards PowerShell output as-is.
     obj.elLiveAllowed = function(ev) {
         var ph = pluginHandler.eventlog, st = ph.elState();
         var cfg = st.cfg;
         if (cfg == null) return true;
-        if (st.os == 'linux' && !ph.elAllowed(ph.elRules(cfg.liveCategories, cfg.liveCategoriesMode), ev.log)) return false;
+        if (ph.elIsNix(st.os) && !ph.elAllowed(ph.elRules(cfg.liveCategories, cfg.liveCategoriesMode), ev.log)) return false;
         return ph.elAllowed(ph.elRules(cfg.liveSources, cfg.liveSourcesMode), ev.source);
     };
 
     // called to notify the web server that there is a new tab in town
     obj.registerPluginTab = function() {
-      if (!pluginHandler.eventlog.elIsSupported()) return { tabId: null, tabTitle: null };
+      // Android: the tab is shown, with a note only (elAndroidNote)
+      if (!pluginHandler.eventlog.elIsSupported() && pluginHandler.eventlog.elPlatform() != 'android') return { tabId: null, tabTitle: null };
       return {
         tabTitle: "Event Log",
         tabId: "pluginEventLog"
@@ -337,8 +381,8 @@ module.exports.eventlog = function (parent) {
             ph.byKey = {};
             ph.st = {
                 view: 'live',
-                os: ph.elPlatform(),                                 // 'windows' | 'linux' | null (state resets on node change)
-                lsel: '',                                            // Linux view selector ('', kernel, auth, audit, boot)
+                os: ph.elPlatform(),                                 // 'windows' | 'linux' | 'macos' | null (state resets on node change)
+                lsel: '',                                            // View selector: Linux ('', kernel, auth, audit, boot), macOS ('', kernel, auth, install, crash, boot)
                 meta: null,                                          // {os, caps} reported by the agent / server
                 layout: getstore('evl_layout', 'ledger'),           // 'ledger' | 'viewer'
                 fold: (getstore('evl_fold', '1') == '1'),
@@ -414,11 +458,16 @@ module.exports.eventlog = function (parent) {
                 message: pluginHandler.eventlog.elFixText(raw.Message),
                 pri: (raw.Priority != null && !isNaN(Number(raw.Priority))) ? Number(raw.Priority) : null,
                 unit: (raw.Unit != null) ? pluginHandler.eventlog.elFixText(raw.Unit) : '',
-                transport: (raw.Transport != null) ? String(raw.Transport) : ''
+                transport: (raw.Transport != null) ? String(raw.Transport) : '',
+                // macOS unified log: os_log subsystem / category, process image path, raw message type
+                subsystem: (raw.Subsystem != null) ? pluginHandler.eventlog.elFixText(raw.Subsystem) : '',
+                oscat: (raw.OsCategory != null) ? pluginHandler.eventlog.elFixText(raw.OsCategory) : '',
+                ppath: (raw.ProcessPath != null) ? pluginHandler.eventlog.elFixText(raw.ProcessPath) : '',
+                msgtype: (raw.MsgType != null) ? String(raw.MsgType) : ''
             };
             ev.sig = pluginHandler.eventlog.elHash(ev.level + '|' + ev.log + '|' + ev.source + '|' + ev.id + '|' + ev.message);
             ev.key = pluginHandler.eventlog.elHash(ev.sig + '|' + ev.time);
-            ev._raw = raw;   // full record for the JSON pane / copy (journald fields on Linux)
+            ev._raw = raw;   // full record for the JSON pane / copy (journald fields on Linux, unified log fields on macOS)
             return ev;
         } catch (e) { return null; }
     };
@@ -728,6 +777,7 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog;
         ph.elInjectStyles();
         if (!Q('pluginEventLog')) return false;
+        if (ph.elPlatform() == 'android') { ph.elAndroidNote(); return false; }   // a note only, nothing else
         if (!ph.elAccessGate()) return false;
         if (!Q('evlWrap')) {
             var st0 = ph.elState();   // open on a view this user is allowed to see ('ai': the Assistant is all they have)
@@ -764,9 +814,12 @@ body.night #pluginEventLog {
         if (st.view == 'ai') {
             // the Assistant only: no event list, so no filters
         } else {
-        if (st.os == 'linux') {
-            h += '<span class=evlLbl>View</span> <select id=evlLxSel class=evlSel title="Log view - in Live view this is queried from journalctl directly (Kernel = -k, Security = auth facilities, This boot = -b)" onchange="return pluginHandler.eventlog.elSelCat(this.value)">';
-            [['','All'],['kernel','Kernel'],['auth','Security (auth)'],['audit','Audit'],['boot','This boot']].forEach(function(o){ h += '<option value="' + o[0] + '"' + (st.lsel == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
+        if (ph.elIsNix(st.os)) {
+            var vTitle = (st.os == 'macos')
+                ? 'Log view - in Live view this is queried from the unified log directly (Kernel = kernel messages, Security = authentication and authorization, Software install = installer and updates, Crash reports = DiagnosticReports, This boot = since the last boot)'
+                : 'Log view - in Live view this is queried from journalctl directly (Kernel = -k, Security = auth facilities, This boot = -b)';
+            h += '<span class=evlLbl>View</span> <select id=evlLxSel class=evlSel title="' + vTitle + '" onchange="return pluginHandler.eventlog.elSelCat(this.value)">';
+            ph.elLxViews(st.os).forEach(function(o){ h += '<option value="' + o[0] + '"' + (st.lsel == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
             h += '</select>';
         }
         if (st.layout == 'ledger') {
@@ -839,9 +892,11 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         var esc = EscapeHtml, h = '';
         var counts = ph.elCounts(fr);
-        h += '<span class=evlLbl>Level</span>';
+        var mac = (st.os == 'macos');
+        h += '<span class=evlLbl' + (mac ? ' title="macOS has no Warning level: Fault = Critical, Error = Error, Default and Info = Info, Debug = Verbose"' : '') + '>Level</span>';
         ph.elLevelInfo().forEach(function(li) {
             if (li.n == 0 && !counts.level[0]) return; // hide LogAlways unless present
+            if (mac && li.n == 3 && !counts.level[3]) return; // macOS has no Warning level
             var off = (st.filters.levels != null && !st.filters.levels[li.n]);
             h += '<span class="evlChip' + (off ? ' off' : '') + '" role=button tabindex=0 onclick="return pluginHandler.eventlog.elToggleLevel(' + li.n + ')" onkeypress="if(event.key==\'Enter\')pluginHandler.eventlog.elToggleLevel(' + li.n + ')">' +
                  '<i class=sw style="background:var(--evl-' + li.cls + ')"></i>' + li.name + ' <span class=n>' + (counts.level[li.n] || 0) + '</span></span>';
@@ -957,6 +1012,7 @@ body.night #pluginEventLog {
                          '<dt>' + ph.elLbl('id') + '</dt><dd class=evlMono>' + esc(dev.id) + '</dd><dt>Level</dt><dd>' + esc(dev.levelName) + ' (' + dev.level + ')</dd>' +
                          (dev.unit ? '<dt>Unit</dt><dd title="' + esc(dev.unit) + '">' + esc(dev.unit) + '</dd>' : '') +
                          (dev.pri != null ? '<dt>Priority</dt><dd>' + esc(ph.elPriName(dev.pri)) + ' (' + dev.pri + ')</dd>' : '') +
+                         ph.elMacFields(dev).map(function(f) { return '<dt>' + f[0] + '</dt><dd title="' + esc(f[1]) + '"' + (f[2] ? ' class=evlMono' : '') + '>' + esc(f[1]) + '</dd>'; }).join('') +
                          '<dt>Recorded</dt><dd class=evlMono>' + ph.elFmtTime(dev.time) + '</dd>' +
                          (selRep.count > 1 ? '<dt>Seen</dt><dd class=evlOccDd>' + selRep.count + '&times; &mdash; ' + ph.aiOccTimesHtml(selRep, 6, ', ', occ) + '</dd>' : '') +
                          '</dl>' + (exH ? '</div><div>' + exH + '</div>' : '') + '</div>';
@@ -998,6 +1054,7 @@ body.night #pluginEventLog {
              '<span>' + ph.elLbl('id') + ' <b class=evlMono>' + esc(ev.id) + '</b></span><span>Level <b>' + esc(ev.levelName) + ' (' + ev.level + ')</b></span>' +
              (ev.unit ? '<span>Unit <b>' + esc(ev.unit) + '</b></span>' : '') +
              (ev.pri != null ? '<span>Priority <b>' + esc(ph.elPriName(ev.pri)) + ' (' + ev.pri + ')</b></span>' : '') +
+             ph.elMacFields(ev).map(function(f) { return '<span>' + f[0] + ' <b' + (f[2] ? ' class=evlMono' : '') + '>' + esc(f[1]) + '</b></span>'; }).join('') +
              '<span>Recorded <b class=evlMono>' + ph.elFmtTime(ev.time) + '</b></span></div>';
         if (r.count > 1) {
             h += '<div class=evlMeta><span>Occurrences (' + r.count + ')</span><span class="evlMono evlOccDd">' + ph.aiOccTimesHtml(r, 12, ' &middot; ', occ) + '</span></div>';
@@ -1036,6 +1093,13 @@ body.night #pluginEventLog {
             if (histEnd < st.hist.total) h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elLoadMore()">Load ' + Math.min(st.show, st.hist.total - histEnd) + ' more</button>';
             h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.elCollectNow()">Collect now</button>';
             if (st.collectMsg) h += '<span>' + st.collectMsg + '</span>';
+        }
+        if (st.os == 'macos') {
+            h += '<span title="macOS support is experimental: it has not been tested on a real Mac yet. Please report problems on the plugin\'s issue tracker.">macOS support is new &mdash; report problems</span>';
+            var mc = (st.meta && st.meta.os == 'macos' && st.meta.caps) ? st.meta.caps : null;
+            if (mc && mc.log === false) h += '<span class=warn>The log tool (/usr/bin/log) was not found on this Mac &mdash; no unified log events can be read</span>';
+            else if (mc && mc.ndjson === false) h += '<span class=warn>This macOS version' + (mc.osver ? ' (' + EscapeHtml(String(mc.osver)) + ')' : '') + ' is too old: its log tool cannot write NDJSON</span>';
+            if (mc && mc.crashDir === false) h += '<span class=warn title="/Library/Logs/DiagnosticReports could not be read by the agent">Crash reports cannot be read on this Mac</span>';
         }
         if (st.os == 'linux' && st.meta && st.meta.caps) {
             if (st.meta.caps.journalctl === false) h += '<span class=warn>systemd-journald not found on this device &mdash; flat-file /var/log support arrives in a later plugin version</span>';
@@ -1092,12 +1156,12 @@ body.night #pluginEventLog {
         if (st.view == 'history') ph.elLoadHistory(true); else ph.elUpdate();
         return false;
     };
-    // Linux view selector: in Live view the selection is pushed down to journalctl; in both views
+    // Linux / macOS view selector: in Live view the selection is pushed down to the agent (journalctl / log show); in both views
     // it also drives the client-side Category filter so the table follows immediately.
     obj.elSelCat = function(v) {
         var ph = pluginHandler.eventlog, st = ph.elState();
         st.lsel = v;
-        var catMap = { kernel: 'Kernel', auth: 'Auth', audit: 'Audit' };
+        var catMap = { kernel: 'Kernel', auth: 'Auth', audit: 'Audit', install: 'Install', crash: 'Crash' };
         if (catMap[v]) { st.filters.logs = {}; st.filters.logs[catMap[v]] = 1; } else { st.filters.logs = null; }
         if (st.view == 'live') ph.elRequestLive(null);
         ph.elUpdate();
@@ -1391,11 +1455,12 @@ body.night #pluginEventLog {
     obj.elDetailsText = function(key) {
         var ph = pluginHandler.eventlog, r = ph.elRowFor(key);
         if (!r) return '';
-        var ev = r.ev, st = ph.elState(), lx = (st.os == 'linux'), pad = function(l) { return (l + '              ').substring(0, 15); };
+        var ev = r.ev, st = ph.elState(), lx = ph.elIsNix(st.os), pad = function(l) { return (l.length >= 15) ? l + ' ' : (l + '              ').substring(0, 15); };
         var t = pad((lx ? 'Category:' : 'Log Name:')) + ev.log + '\n' + pad('Source:') + ev.source + '\n' + pad('Date:') + ph.elFmtTime(ev.time) + '\n' +
                 pad((lx ? 'PID:' : 'Event ID:')) + ev.id + '\n' + pad('Level:') + ev.levelName + ' (' + ev.level + ')' + '\n';
         if (ev.unit) t += pad('Unit:') + ev.unit + '\n';
         if (ev.pri != null) t += pad('Priority:') + ph.elPriName(ev.pri) + ' (' + ev.pri + ')' + '\n';
+        ph.elMacFields(ev).forEach(function(f) { t += pad(f[0] + ':') + f[1] + '\n'; });
         if (r.count > 1) t += pad('Occurrences:') + r.count + ' (' + r.times.slice(0, 12).map(function(x) { return ph.elFmtTime(x); }).join(', ') + (r.times.length > 12 ? ', ...' : '') + ')\n';
         t += 'Description:\n' + ev.message;
         return t;
@@ -1452,7 +1517,7 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, st = ph.elState();
         var fr = ph.elFiltered();
         var q = function(v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
-        var lx = (st.os == 'linux');
+        var lx = ph.elIsNix(st.os);
         var lines = ['Level,Time,' + (lx ? 'Category' : 'Log') + ',Source,' + (lx ? 'PID' : 'EventId') + ',Message'];
         fr.rows.forEach(function(ev) {
             lines.push([q(ev.levelName), q(new Date(ev.time).toISOString()), q(ev.log), q(ev.source), q(ev.id), q(ev.message)].join(','));
@@ -1476,7 +1541,7 @@ body.night #pluginEventLog {
                 // when folding repeats, fetch a larger batch so that N distinct rows can be shown
                 var cmd = { action: 'plugin', plugin: 'eventlog', pluginaction: 'getlivelogs', num: st.fold ? Math.min(1000, st.show * 4) : st.show };
                 if (since != null) cmd.since = since;
-                if (st.os == 'linux' && st.lsel) cmd.lsel = st.lsel;
+                if (ph.elIsNix(st.os) && st.lsel) cmd.lsel = st.lsel;
                 ph.livelog.sendText(cmd);
             }
         } catch (e) { }
@@ -1788,7 +1853,7 @@ body.night #pluginEventLog {
       ph.elHookTabSwitch();
       if (typeof ph.livelog == 'undefined') { ph.livelog = null; }
       if (typeof ph.livelognode == 'undefined') { ph.livelognode = null; }
-      var isSupported = ph.elIsSupported();   // Windows and Linux endpoints
+      var isSupported = ph.elIsSupported();   // Windows, Linux and macOS endpoints
       var sameNode = isSupported && (ph.livelognode != null) && (ph.livelognode._id == currentNode._id);
       // MeshCentral calls this hook on every gotoDevice() -- tab switches, node updates, connection state changes.
       // Only tear down the UI state when the node actually changed; otherwise keep the live connection
@@ -1800,7 +1865,12 @@ body.night #pluginEventLog {
           ph.st = null;      // reset UI state for the new node
           ph.byKey = {};
       }
-      if (!isSupported) { ph.elStopLive(); return; }
+      if (!isSupported) {
+          ph.elStopLive();
+          // Android: the tab holds a note only - no permission check, no tunnel, no history request
+          if (ph.elPlatform() == 'android') { ph.elInjectStyles(); ph.elAndroidNote(); }
+          return;
+      }
       ph.livelognode = currentNode;
       ph.elRequestAccess();   // every refresh (at most once per 5 s per device): a grant or a revoke takes effect without a page reload
       // the plugin tab DOM is rebuilt by MeshCentral on every refresh: re-create the shell (renders from state)
@@ -1856,7 +1926,11 @@ body.night #pluginEventLog {
     };
     obj.fixEvents = function(events) {
         var list = Array.isArray(events) ? events : [events];
-        list.forEach(function(e) { if (e && typeof e == 'object') { e.Message = obj.fixText(e.Message); e.ProviderName = obj.fixText(e.ProviderName); e.LogName = obj.fixText(e.LogName); if (e.Unit != null) e.Unit = obj.fixText(e.Unit); } });
+        list.forEach(function(e) {
+            if (!e || typeof e != 'object') return;
+            // Unit (Linux), Subsystem / OsCategory / ProcessPath (macOS)
+            ['Message', 'ProviderName', 'LogName', 'Unit', 'Subsystem', 'OsCategory', 'ProcessPath'].forEach(function (k) { if (e[k] != null) e[k] = obj.fixText(e[k]); });
+        });
         return events;
     };
 
@@ -1876,11 +1950,11 @@ body.night #pluginEventLog {
     };
 
     // Config set History rules, applied to a batch as it arrives. Categories only mean something for
-    // journald (on Windows LogName is the event log, which historyLogs already selects); sources
-    // apply everywhere. Returns the events to store.
+    // Linux (journald) and macOS (unified log); on Windows LogName is the event log, which historyLogs
+    // already selects. Sources apply everywhere. Returns the events to store.
     obj.applyCollectionFilters = function(events, cfg, os) {
         if (cfg == null) return events;
-        var cats = (os == 'linux') ? obj.elRules(cfg.historyCategories, cfg.historyCategoriesMode) : null;
+        var cats = obj.elIsNix(os) ? obj.elRules(cfg.historyCategories, cfg.historyCategoriesMode) : null;
         var srcs = obj.elRules(cfg.historySources, cfg.historySourcesMode);
         if (cats == null && srcs == null) return events;
         return events.filter(function (e) { return e != null && obj.elAllowed(cats, e.LogName) && obj.elAllowed(srcs, e.ProviderName); });
@@ -2247,7 +2321,7 @@ body.night #pluginEventLog {
                         var mp = obj.meshServer.pluginHandler.eventlog_db.setNodeMeta(metaNode, meta);
                         // drop the cache entry again if the write failed, or the endpoint's OS would
                         // stay unknown until it changes (History would then apply the Windows log
-                        // filter to a Linux node and hide its Kernel/Auth categories)
+                        // filter to a Linux or macOS node and hide its Kernel/Auth categories)
                         if (mp != null && typeof mp.catch == 'function') {
                             mp.catch(function (e) {
                                 delete obj._lastMeta[metaNode];
@@ -2291,7 +2365,7 @@ body.night #pluginEventLog {
                         sessionid: true,
                         value: String(res.maxTc)    // ms since epoch, as the agent expects
                     };
-                    if (command.os == 'linux' && command.cursor != null) ack.cursor = command.cursor; // echo: the agent commits this journal cursor
+                    if (obj.elIsNix(command.os) && command.cursor != null) ack.cursor = command.cursor; // echo: the agent commits this journal / unified log cursor
                     myparent.send(JSON.stringify(ack));
                 })
                 .catch(function (e) { console.log('EVENTLOG: error storing collected events: ' + e); });
@@ -2320,9 +2394,9 @@ body.night #pluginEventLog {
                   .catch(function (e) { console.log('EVENTLOG: getNodeHistory config lookup failed: ' + (e.message || e)); return null; })
                   .then((cfg) => {
                     var opts = cfg || {};
-                    if (meta && meta.os == 'linux' && opts.historyLogs != null) {
-                        // the config's historyLogs are Windows log names; on Linux they would hide
-                        // stored categories (Kernel, Auth, ...) from the query
+                    if (meta && obj.elIsNix(meta.os) && opts.historyLogs != null) {
+                        // the config's historyLogs are Windows log names; on Linux and macOS they would
+                        // hide stored categories (Kernel, Auth, Install, ...) from the query
                         opts = Object.assign({}, opts); delete opts.historyLogs;
                     }
                     var reply = function(events, total, extra) {
