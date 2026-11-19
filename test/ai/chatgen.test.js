@@ -100,7 +100,7 @@ test('aiFollowups: a saved chat without an open conversation; another user canno
     let r = t.last('onAiFollowups');
     assert.deepStrictEqual([r.chatId, r.convId, r.turn, r.followups.length], [chatId, null, 1, 3]);
     assert.strictEqual(r.followups[0], 'Is PC-ALICE01 still crashing?');
-    assert.ok(!('reasoning_effort' in chatReqs().pop().body), 'thinking support unknown: nothing sent for it');
+    assert.strictEqual(chatReqs().pop().body.reasoning_effort, 'none', 'thinking support unknown: thinking off is still asked for');
     const saved = await t.hist.get('user/d/alice', F.NODE, 'chat', chatId);
     assert.strictEqual(saved.messages[0].followups[1], 'Which driver failed?');
 
@@ -148,6 +148,72 @@ test('aiFollowups: no block -> empty list; a model error is reported to the butt
     const a = t.store.audits.filter(function (x) { return x.kind === 'followups'; });
     assert.deepStrictEqual(a.map(function (x) { return x.result + ':' + (x.error || ''); }), ['answered:', 'error:auth']);
     t.close();
+});
+
+test('aiFollowups with a thinking model: thinking off asked for; a 400 naming it -> once more without; cut off while reasoning -> once more with more room; an empty reply fails clearly', async function () {
+    mock.script(CHAT, { sse: chatSse({ text: 'Fine.' }) });
+    const t = setup();
+    await t.start('ask', { text: 'First?' });
+    const convId = t.last('onAiStarted').convId;
+    const fuReqs = function () { return chatReqs().filter(function (r) { return /Suggest the follow-up questions now/.test(r.bodyText); }); };
+
+    // the server refuses reasoning_effort: once more without it
+    mock.reset();
+    mock.script(CHAT, { status: 400, json: { error: { message: 'Unrecognized request argument supplied: reasoning_effort', type: 'invalid_request_error' } } }, { sse: chatSse({ text: FU }) });
+    await t.fu({ convId: convId, reqId: 'a' });
+    let r = t.last('onAiFollowups');
+    assert.ok(r && r.reqId === 'a', t.ws.sent.map(function (m) { return m.method + (m.code ? ':' + m.code : ''); }).join(','));
+    assert.strictEqual(r.followups.length, 3);
+    assert.deepStrictEqual(fuReqs().map(function (x) { return x.body.reasoning_effort; }), ['none', undefined]);
+
+    // it reasoned until max_tokens and wrote nothing: once more with 1500 tokens
+    mock.reset();
+    mock.script(CHAT, { sse: chatSse({ reasoning: 'The user wants questions about the restart...', text: '', finish: 'length', usage: { prompt_tokens: 40, completion_tokens: 300 } }) },
+        { sse: chatSse({ text: '<think>short</think>\n["Did the PSU fail?", "Was there a BSOD?"]', usage: { prompt_tokens: 40, completion_tokens: 30 } }) });
+    await t.fu({ convId: convId, reqId: 'b' });
+    r = t.last('onAiFollowups');
+    assert.deepStrictEqual([r.reqId, r.followups], ['b', ['Did the PSU fail?', 'Was there a BSOD?']]);
+    assert.deepStrictEqual(fuReqs().map(function (x) { return x.body.max_tokens; }), [300, 1500]);
+    const au = t.store.audits.filter(function (x) { return x.kind === 'followups'; }).pop();
+    assert.deepStrictEqual([au.tokensIn, au.tokensOut, au.result], [80, 330, 'answered'], 'both requests counted');
+
+    // still nothing: a clear error, the reason class in the server log (no content)
+    mock.reset();
+    mock.always(CHAT, { sse: chatSse({ reasoning: 'Thinking hard', text: '', finish: 'length' }) });
+    await t.fu({ convId: convId, reqId: 'c' });
+    const e = t.last('onAiError');
+    assert.deepStrictEqual([e.scope, e.reqId, e.code], ['followups', 'c', 'noAnswer']);
+    assert.strictEqual(fuReqs().length, 2, 'one retry only');
+    assert.ok(t.logs.some(function (l) { return l === 'EVENTLOG AI: Suggest questions: no questions in the reply (cutOff)'; }), t.logs.join('\n'));
+    t.close();
+});
+
+test('aiFollowups: no thinking setting when the endpoint is known not to take "off"', async function () {
+    mock.script(CHAT, { sse: chatSse({ text: 'Fine.' }) });
+    const t = setup({ ep: { caps: { thinking: { supported: true, levels: ['low', 'medium', 'high'], verified: true }, at: Date.now() } } });
+    await t.start('ask', { text: 'First?' });
+    mock.reset();
+    mock.script(CHAT, { sse: chatSse({ text: FU }) });
+    await t.fu({ convId: t.last('onAiStarted').convId });
+    assert.strictEqual(t.last('onAiFollowups').followups.length, 3);
+    assert.ok(!('reasoning_effort' in chatReqs()[0].body));
+    t.close();
+});
+
+test('readFollowups: lenient reading of a reply', function () {
+    const P = require('../../ai/prompts.js');
+    const q = function (s) { return P.readFollowups(s); };
+    assert.deepStrictEqual(q('<followups>["A?", "B?"]</followups>'), { followups: ['A?', 'B?'], reason: null });
+    assert.deepStrictEqual(q('<think>reasoning [1, 2]</think>Here you go:\n["Is the disk failing?", "When did it start?"]').followups, ['Is the disk failing?', 'When did it start?']);
+    assert.deepStrictEqual(q('<think>never closed, all reasoning').reason, 'empty');
+    assert.deepStrictEqual(q('reasoning without its opening tag</think>\n- First question\n- Second question').followups, ['First question', 'Second question']);
+    assert.deepStrictEqual(q('Suggestions:\n1. **Which driver failed?**\n2) "Is the PSU OK?"\n3. Did Windows update?\n4. Fourth?').followups, ['Which driver failed?', 'Is the PSU OK?', 'Did Windows update?']);
+    assert.deepStrictEqual(q('You could ask:\nWhich service crashed first?\nIs the spooler disabled now?').followups, ['Which service crashed first?', 'Is the spooler disabled now?']);
+    assert.deepStrictEqual(q('<followups>["Complete one?", "Cut o').followups, ['Complete one?'], 'a block cut off inside the array');
+    assert.deepStrictEqual(q('<tool_call>\n<function=get_events>\n</function>\n</tool_call>\n<followups>["After markup?"]</followups>').followups, ['After markup?']);
+    assert.deepStrictEqual(q('<tool_call>\n<function=get_events>\n</function>\n</tool_call>'), { followups: [], reason: 'empty' });
+    assert.deepStrictEqual(q('I cannot think of any.'), { followups: [], reason: 'noQuestions' });
+    assert.deepStrictEqual(q(''), { followups: [], reason: 'empty' });
 });
 
 test('chatGenInfo / genIn: levels from the endpoint, unknown -> all not verified, none for Anthropic or no thinking setting', function () {

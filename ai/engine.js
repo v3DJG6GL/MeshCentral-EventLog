@@ -27,6 +27,14 @@
 // kept with the steps; onAiDelta { turn, seq, round, text } carries the round, so the browser can drop the text of a
 // round that turned out to be such a note. The answer (and the <diagnosis> / <explain> / <followups> blocks) is the
 // text of the last round only (the last note's text when the last round wrote nothing).
+// Tool calls a model wrote as text (ai/toolcalls.js: Qwen/Hermes <tool_call>, <function_calls>, [TOOL_CALLS] ...) are
+// never shown: in a round that may still use tools and has no structured calls they are run like structured calls;
+// otherwise they are removed from the text (the stream to the browser stops where such markup starts).
+// When tool use ends for the turn (Max steps / tool calls / data per answer, or the context is nearly full), that
+// model call gets a short closing instruction as a last user message (not kept in the transcript) and the browser
+// an onAiNote { turn, i, round, text, kind: 'limit' } saying so. A closing round that only announces more lookups
+// (or tool calls) is asked once more, more firmly; if it still writes no answer the turn fails with code stepLimit.
+// onAiDone.usage.steps counts the model calls that ran lookups (what Max steps per answer limits).
 // While the model reasons, onAiThinking { turn, round, chars } is sent (at most every 500 ms per model call; round
 // counts the model calls of the turn, chars the reasoning characters of that call so far): a count only, never the
 // reasoning text, and nothing once the call's answer text has started.
@@ -35,6 +43,7 @@
 
 const prompts = require('./prompts.js');
 const citations = require('./citations.js');
+const toolcalls = require('./toolcalls.js');
 const budgetMod = require('./budget.js');
 
 const MAX_DELTA_CHARS = 5000;           // <= 16 KB per onAiDelta message
@@ -43,8 +52,36 @@ const MAX_TRANSCRIPT_BYTES = 256 * 1024;
 const CODE_MAP = {
     auth: 'auth', model: 'model', rateLimit: 'rateLimit', overloaded: 'overloaded', timeout: 'timeout', network: 'network',
     blocked: 'blocked', contextFull: 'contextFull', aborted: 'aborted', badResponse: 'badResponse', badRequest: 'badResponse',
-    server: 'badResponse', toolsUnsupported: 'model', denied: 'denied', refusal: 'refusal'
+    server: 'badResponse', toolsUnsupported: 'model', denied: 'denied', refusal: 'refusal', stepLimit: 'stepLimit'
 };
+// what the browser is told when tool use ends for the turn (steps list and status line)
+const LIMIT_NOTE = {
+    steps: 'Step limit reached: writing the answer with what was found so far.',
+    calls: 'Lookup limit reached: writing the answer with what was found so far.',
+    data: 'Data limit for one answer reached: writing the answer with what was found so far.',
+    context: 'The model\'s context is nearly full: writing the answer with what was found so far.'
+};
+const LIMIT_ERR = {
+    steps: 'The model kept asking for more data after the step limit. Try a shorter time window, or have an administrator raise Max steps per answer.',
+    calls: 'The model kept asking for more data after the lookup limit. Try a shorter time window, or have an administrator raise Tool calls per answer.',
+    data: 'The model kept asking for more data after the data limit for one answer. Try a shorter time window or a narrower question.',
+    context: 'The model kept asking for more data although its context is nearly full. Try a shorter time window or a narrower question.'
+};
+// A closing answer that only announces more work ("Let me verify the event IDs.") is no answer.
+const PREAMBLE_RE = /^(?:let me|let's|let us|i'll|i will|i need to|i should|i'm going to|i am going to|i'd like to|i want to|now,? (?:i|let)|next,? (?:i|let)|first,? (?:i|let)|to (?:verify|confirm|check|be sure)|checking|looking up|verifying)\b/i;
+function usableAnswer(text, mode) {
+    const t = prompts.parseFollowups(String(text || '')).text.trim();
+    if (!t) return false;
+    if ((mode === 'diagnose' && /<diagnosis\s*>/i.test(text)) || (mode === 'explain' && /<explain\s*>/i.test(text))) return true;
+    if (t.length >= 200 || /\[\s*E\d{1,6}/.test(t)) return true;
+    return !(PREAMBLE_RE.test(t) || /[:\u2026]\s*$|\.\.\.\s*$/.test(t));
+}
+function closingText(mode, firm) {
+    const block = mode === 'diagnose' ? ' End with the <diagnosis> block as instructed.' : mode === 'explain' ? ' End with the <explain> block as instructed.' : ' End with the <followups> block as instructed.';
+    return firm
+        ? 'Tool calls are not available any more and will not be run. Do not write <tool_call>, <function=...> or any other tool call, and do not announce further lookups. Write your complete final answer now from the data above; say what remains unverified.' + block
+        : 'No more lookups are available for this question. Write your final answer now from the data you already have; do not call tools.' + block;
+}
 
 function isObj(v) { return v != null && typeof v === 'object' && !Array.isArray(v); }
 function clip(s, n) { s = s == null ? '' : String(s); return s.length > n ? s.slice(0, n) + '…' : s; }
@@ -127,7 +164,7 @@ async function turn(S, userText, deps) {
     let finalText = null;
     let rounds = 0, calls = 0, bytesSent = 0, bytesRecv = 0, dataBytes = bytes(userText);
     let tokIn = 0, tokOut = 0, estimated = false, stopReason = 'end';
-    let ignoredNone = false, fellBack = false, segRetried = false;
+    let ignoredNone = false, fellBack = false, segRetried = false, firm = false, askedMore = false, limitWhy = null, textCalls = false;
     let abortReason = null, cur = null, abortReject = null;
     const abortP = new Promise(function (resolve, reject) { abortReject = reject; });
     abortP.catch(function () { });
@@ -173,23 +210,47 @@ async function turn(S, userText, deps) {
     }
     function stopThinking() { if (thinkTimer) { clearTimeout(thinkTimer); thinkTimer = null; } }
 
+    // the text of the current model call as received; what was streamed of it; held back from markedAt on (tool-call
+    // markup, ai/toolcalls.js) and, until the next chunk, a tail that could be the start of such markup
+    let roundRaw = '', roundSent = 0, markedAt = -1;
+    function streamable(final) {
+        if (markedAt >= 0) return markedAt;
+        const m = toolcalls.MARK_RE.exec(roundRaw.slice(Math.max(0, roundSent - 40)));
+        if (m) { markedAt = Math.max(0, roundSent - 40) + m.index; return Math.max(roundSent, markedAt); }
+        if (final) return roundRaw.length;
+        const k = Math.max(roundRaw.lastIndexOf('<'), roundRaw.lastIndexOf('['));
+        return k >= roundSent && roundRaw.length - k < 40 ? k : roundRaw.length;
+    }
+    function sendRound(final) {
+        const end = Math.max(roundSent, streamable(final));
+        if (end > roundSent) { emit(rs.push(roundRaw.slice(roundSent, end))); roundSent = end; }
+    }
     function onText(d) {
         if (abortReason) return;
         stopThinking();
         S.lastActive = now();
         if (!roundHasText) { roundHasText = true; flush(); deltaRound = callNo; }
-        emit(rs.push(d));
+        roundRaw += d;
+        sendRound(false);
     }
     // the text of a round that also called tools: a note in the steps, not part of the answer
     function addNote(text) {
         emit(rs.flush()); flush();
-        let t = prompts.parseFollowups(String(text || '')).text;
+        let t = prompts.parseFollowups(toolcalls.strip(String(text || ''))).text;
         t = prompts.parseBlock(prompts.parseBlock(t, 'diagnosis').text, 'explain').text.trim();
         if (!t || steps.length >= 64) return;
         const note = clip(R.restore(t, { mark: true }), 2000);
         const i = steps.length;
         steps.push({ note: note });
         deps.send('onAiNote', { turn: turnNo, i: i, round: callNo, text: note });
+    }
+    // tool use ended for this turn: once, in the steps
+    function addLimitNote(why) {
+        if (limitWhy || steps.length >= 64) { limitWhy = limitWhy || why; return; }
+        limitWhy = why;
+        const i = steps.length;
+        steps.push({ note: LIMIT_NOTE[why], kind: 'limit' });
+        deps.send('onAiNote', { turn: turnNo, i: i, round: callNo, text: LIMIT_NOTE[why], kind: 'limit' });
     }
 
     function newSegment(text) {
@@ -208,14 +269,17 @@ async function turn(S, userText, deps) {
     if (S.mode === 'ask' && S.transcript.items.length && estAll > 0.85 * B.input && newSegment(userText)) segRetried = true;
     else S.transcript.items.push({ role: 'user', text: userText });
 
-    function streamOnce(toolChoice, toolsSent) {
+    // closing: an instruction sent as the last user message of this call only
+    function streamOnce(toolChoice, toolsSent, closing) {
         let ep;
         try { ep = deps.epCall(); } catch (e) { throw mkErr('auth', 'The API key could not be read'); }
-        bytesSent += bytes(S.transcript) + bytes(toolsSent);
+        const tr = closing ? { system: S.transcript.system, items: S.transcript.items.concat([{ role: 'user', text: closing }]) } : S.transcript;
+        bytesSent += bytes(tr) + bytes(toolsSent);
         stopThinking();
         callNo++; thinkChars = 0; thinkOn = false;
+        roundRaw = ''; roundSent = 0; markedAt = -1;
         cur = deps.llm.stream({
-            ep: ep, adapter: deps.adapter, transcript: S.transcript, tools: toolsSent,
+            ep: ep, adapter: deps.adapter, transcript: tr, tools: toolsSent,
             opts: { toolChoice: toolChoice, maxOutputTokens: B.maxOutput }, net: deps.net,
             onEvent: function (ev) { if (ev && ev.t === 'text') onText(ev.d); else if (ev && ev.t === 'thinking') onThinking(ev.n); },
             idleTimeoutMs: tmo.idleMs, totalTimeoutMs: tmo.totalMs, connectTimeoutMs: tmo.connectMs, log: log
@@ -236,14 +300,17 @@ async function turn(S, userText, deps) {
             const toolMode = S.toolMode === 'tools';
             const toolsSent = toolMode ? deps.tools.defs : [];
             const estIn = budgetMod.estimateTokens(S.transcript, S.ratio) + budgetMod.estimateTokens(toolsSent, S.ratio);
-            const closed = !toolMode || rounds >= maxRounds || calls >= maxCalls || estIn > 0.85 * B.input || dataBytes >= maxSent || ignoredNone;
+            const why = !toolMode ? null : rounds >= maxRounds ? 'steps' : calls >= maxCalls ? 'calls' : estIn > 0.85 * B.input ? 'context' : dataBytes >= maxSent ? 'data' : ignoredNone ? (limitWhy || 'steps') : null;
+            const closed = !toolMode || !!why;
             const toolChoice = closed ? 'none' : 'auto';
+            if (why) addLimitNote(why);
             roundHasText = false;
             let res;
-            try { res = await streamOnce(toolChoice, toolsSent); }
+            try { res = await streamOnce(toolChoice, toolsSent, why ? closingText(S.mode, firm) : null); }
             catch (e) { if (e && e.quirks) learnQuirks(e.quirks); throw e; }
             finally { cur = null; stopThinking(); }
             if (abortReason) throw mkErr('aborted', 'Aborted');
+            sendRound(true);
             if (res.quirks) learnQuirks(res.quirks);
             bytesRecv += bytes(res.text || '') + (res.calls || []).reduce(function (n, c) { return n + bytes(c.argsText || ''); }, 0);
             if (res.usage && res.usage.in > 0) {
@@ -253,26 +320,49 @@ async function turn(S, userText, deps) {
                 estimated = true;
                 tokIn += estIn; tokOut += budgetMod.estimateTokens(res.text || '') + budgetMod.estimateTokens((res.calls || []).map(function (c) { return c.argsText; }).join(''));
             }
-            if (res.text) texts.push(res.text);
-            const rcalls = Array.isArray(res.calls) ? res.calls : [];
-            S.transcript.items.push({ role: 'assistant', text: res.text || '', calls: rcalls, raw: res.raw || null });
+            let rcalls = Array.isArray(res.calls) ? res.calls : [];
+            let rtext = res.text || '', raw = res.raw || null;
+            // tool calls written as text: run them while tools may still be used, else drop them from the text
+            const tx = toolcalls.parse(rtext, deps.tools && deps.tools.defs);
+            if (tx.found) {
+                rtext = tx.text;
+                if (!rcalls.length && !closed && tx.calls.length) {
+                    rcalls = tx.calls.map(function (c) { return { id: 'txt_' + turnNo + '_' + callNo + '_' + Math.random().toString(36).slice(2, 8), name: c.name, args: c.args, argsText: c.argsText }; });
+                    raw = null;   // the provider's own blocks hold the text, not these calls
+                    if (!textCalls) { textCalls = true; log('EVENTLOG AI: the model wrote its tool calls as text; they are read from the text'); }
+                }
+            }
             stopReason = res.stopReason || 'end';
-            if (!rcalls.length) { finalText = res.text || ''; return; }
+            if (stopReason === 'tools' && !rcalls.length) stopReason = 'end';
+            if (why && !rcalls.length && !usableAnswer(rtext, S.mode) && (tx.found || stopReason !== 'length')) {
+                // a closing round that asks for more data (or writes nothing) instead of answering: once more, more firmly;
+                // then a model that still only asks for data fails the turn (an empty answer stays an empty answer)
+                if (tx.found || rtext.trim()) askedMore = true;
+                addNote(rtext);   // what it wrote leaves the answer area for the steps
+                if (!firm) { firm = true; continue; }
+                if (askedMore) throw mkErr('stepLimit', LIMIT_ERR[why] || LIMIT_ERR.steps);
+            }
+            if (rtext) texts.push(rtext);
+            S.transcript.items.push({ role: 'assistant', text: rtext, calls: rcalls, raw: raw });
+            if (!rcalls.length) { finalText = rtext; return; }
 
             if (stopReason === 'length' || stopReason === 'refusal') {
                 S.transcript.items.push({ role: 'tool', results: rcalls.map(function (c) { return errorResult(c, 'Not executed: the answer was cut off'); }) });
-                finalText = res.text || '';
+                finalText = rtext;
                 return;
             }
             if (closed) {
                 // tool use is over for this turn (limits); a model that still calls tools gets one more chance to answer
                 S.transcript.items.push({ role: 'tool', results: rcalls.map(function (c) { return errorResult(c, 'Tool use has ended for this question. Answer now with the data you already have.'); }) });
-                if (ignoredNone) { finalText = res.text || ''; return; }
-                ignoredNone = true;
-                addNote(res.text);
+                if (ignoredNone) {
+                    if (toolMode && !usableAnswer(rtext, S.mode)) { addNote(rtext); throw mkErr('stepLimit', LIMIT_ERR[limitWhy] || LIMIT_ERR.steps); }
+                    finalText = rtext; return;
+                }
+                ignoredNone = true; firm = true; askedMore = true;
+                addNote(rtext);
                 continue;
             }
-            addNote(res.text);
+            addNote(rtext);
             const results = [];
             for (let i = 0; i < rcalls.length; i++) {
                 const c = rcalls[i];
@@ -355,7 +445,7 @@ async function turn(S, userText, deps) {
         deps.send('onAiDone', doneMsg);
         // the caller saves the result (ai/history.js); what it does never changes this turn
         if (typeof deps.onDone === 'function') {
-            try { deps.onDone(doneMsg, { steps: steps.map(function (x) { return x.note != null ? { note: x.note } : { tool: x.tool, args: x.args, ms: x.ms, items: x.items, status: x.status === 'running' ? 'error' : x.status }; }) }); }
+            try { deps.onDone(doneMsg, { steps: steps.map(function (x) { return x.note != null ? (x.kind ? { note: x.note, kind: x.kind } : { note: x.note }) : { tool: x.tool, args: x.args, ms: x.ms, items: x.items, status: x.status === 'running' ? 'error' : x.status }; }) }); }
             catch (e) { log('EVENTLOG AI: saving the result failed (' + ((e && e.name) || 'Error') + ')'); }
         }
     } else {
@@ -394,6 +484,7 @@ async function turn(S, userText, deps) {
         emit(rs.flush());
         // the answer is the last round's text; notes written between lookups are not part of it
         let body = (finalText != null && finalText.trim()) ? finalText : (texts.filter(function (x) { return x && x.trim(); }).pop() || '');
+        body = toolcalls.strip(body);
         let structured = null;
         const pf = prompts.parseFollowups(body);
         body = pf.text;
@@ -433,7 +524,7 @@ async function turn(S, userText, deps) {
         return {
             turn: turnNo, text: text, structured: structured, citations: cites, invalidCitations: Array.from(invalid),
             suspicious: Array.from(S.suspicious).filter(function (r) { return S.refs.returned.has(r); }),
-            redactionCounts: R.counts(), usage: { in: tokIn, out: tokOut, estimated: estimated, ms: now() - t0, rounds: rounds + 1 },
+            redactionCounts: R.counts(), usage: { in: tokIn, out: tokOut, estimated: estimated, ms: now() - t0, rounds: rounds + 1, steps: rounds },
             stopReason: stopReason, followups: followups, segment: S.segment || 0
         };
     }

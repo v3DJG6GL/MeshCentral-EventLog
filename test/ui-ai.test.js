@@ -44,6 +44,24 @@ test('aiVisible hides machine-readable blocks while streaming, also a tag still 
     assert.strictEqual(p.aiVisible('Answer.\n```json\n<explain>{}'), 'Answer.\n');
     assert.strictEqual(p.aiVisible('Plain < 5 and done'), 'Plain < 5 and done');
     assert.strictEqual(p.aiVisible('Text <'), 'Text ');
+    // tool calls written as text: hidden from where they start, also while still being typed
+    assert.strictEqual(p.aiVisible('Let me verify.\n<tool_call>\n<function=lookup_event_id>\n<parameter=id>\n10'), 'Let me verify.\n');
+    assert.strictEqual(p.aiVisible('Let me verify.\n<tool_ca'), 'Let me verify.\n');
+    assert.strictEqual(p.aiVisible('Answer [TOOL_CALLS][{"name":"x"'), 'Answer ');
+    assert.strictEqual(p.aiVisible('Answer <|tool_c'), 'Answer ');
+});
+
+test('aiNoToolMarkup removes tool calls written as text; aiStepResult labels', function () {
+    var p = loadPlugin();
+    var qwen = '<tool_call>\n<function=lookup_event_id>\n<parameter=id>\n1023\n</parameter>\n</function>\n</tool_call>';
+    assert.strictEqual(p.aiNoToolMarkup('Summary [E1].\n\n' + qwen + '\n' + qwen), 'Summary [E1].');
+    assert.strictEqual(p.aiNoToolMarkup('A <function_calls><invoke name="get_events"><parameter name="limit">5</parameter></invoke></function_calls> B'), 'A  B');
+    assert.strictEqual(p.aiNoToolMarkup('Text\n[TOOL_CALLS][{"name":"get_events","arguments":{}}]'), 'Text');
+    assert.strictEqual(p.aiNoToolMarkup('Plain a < b, [E2].'), 'Plain a < b, [E2].');
+    assert.strictEqual(p.aiStepResult({ tool: 'lookup_event_id', status: 'done', items: 0 }), 'not in the reference list');
+    assert.strictEqual(p.aiStepResult({ tool: 'lookup_event_id', status: 'done', items: 1 }), 'in the reference list');
+    assert.strictEqual(p.aiStepResult({ tool: 'get_events', status: 'done', items: 0 }), '0 events');
+    assert.strictEqual(p.aiStepResult({ tool: 'get_events', status: 'error' }), 'failed');
 });
 
 test('pure helpers: counts, args, markers, timeline clusters', function () {
@@ -309,7 +327,7 @@ test('Ask: start, steps, streaming, done with citations -> gutter chip, chip jum
     assert.ok(ans.innerHTML.indexOf('<strong>stalls</strong>') >= 0);
     assert.ok(ans.textContent.indexOf('<scr') < 0);
     assert.ok(doc.querySelector('#evlAiLog details.evlAiSteps'));
-    ph.onAiDone(null, { nodeid: NODE, convId: 'cv1', turn: 1, text: 'The drive stalls [E1].', structured: null, citations: { E1: REC }, invalidCitations: [], redactionCounts: {}, usage: { 'in': 14000, out: 800, ms: 6100, rounds: 2 }, followups: ['Widen to 7 days'] });
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cv1', turn: 1, text: 'The drive stalls [E1].', structured: null, citations: { E1: REC }, invalidCitations: [], redactionCounts: {}, usage: { 'in': 14000, out: 800, ms: 6100, rounds: 2, steps: 1 }, followups: ['Widen to 7 days'] });
     assert.strictEqual(doc.getElementById('evlAiSend').textContent, 'Send');
     var chip = doc.querySelector('#evlAiLog button.evlCite[data-r=E1]');
     assert.ok(chip);
@@ -318,7 +336,7 @@ test('Ask: start, steps, streaming, done with citations -> gutter chip, chip jum
     assert.strictEqual(gut.closest('tr').id, 'evlR_' + ph.elNormalize(REC).key);
     var tg = doc.querySelector('#evlAiLog .evlAiFu .evlAiFuTg');
     assert.ok(tg && /Suggested questions \(1\)/.test(tg.textContent) && tg.getAttribute('aria-expanded') == 'false', 'follow-ups collapsed by default');
-    assert.ok(doc.querySelector('#evlAiLog details.evlAiSteps summary').textContent.indexOf('1 step, 6.1 s, 14.8k tokens') >= 0);
+    assert.ok(doc.querySelector('#evlAiLog details.evlAiSteps summary').textContent.indexOf('1 lookup in 1 step, 6.1 s, 14.8k tokens') >= 0);
     ph.aiGotoCite(ph.st.ai.chat, 'E1');
     var key = ph.elNormalize(REC).key;
     assert.strictEqual(ph.st.expanded[key], true);
@@ -435,7 +453,14 @@ test('Diagnose: the toolbar button opens the window choice in full width; the di
     await sleep(200);
     assert.strictEqual(doc.querySelector('#evlAiLog [data-p=a]').textContent, '');
     assert.match(doc.querySelector('#evlAiLog details.evlAiSteps .evlAiStep.note').textContent, /Model: I will look at the restarts first\./);
-    assert.match(doc.querySelector('#evlAiLog details.evlAiSteps summary').textContent, /^1 step so far/);
+    assert.match(doc.querySelector('#evlAiLog details.evlAiSteps summary').textContent, /^1 lookup so far/);
+    // tool use ended for the answer: a status entry in the steps and the status line, not a model note
+    ph.onAiNote(null, { nodeid: NODE, convId: 'cv4', turn: 1, i: 2, round: 1, text: 'Step limit reached: writing the answer with what was found so far.', kind: 'limit' });
+    await sleep(200);
+    var lim = doc.querySelector('#evlAiLog details.evlAiSteps .evlAiStep.note.limit');
+    assert.ok(lim && lim.textContent === 'Step limit reached: writing the answer with what was found so far.' && lim.textContent.indexOf('Model:') < 0);
+    assert.ok(doc.querySelector('#evlAiLog .evlAiLive').textContent.indexOf('Step limit reached: writing the answer') == 0, doc.querySelector('#evlAiLog .evlAiLive').textContent);
+    assert.match(doc.querySelector('#evlAiLog details.evlAiSteps summary').textContent, /^1 lookup so far/, 'the limit entry is not a lookup');
     ph.onAiDelta(null, { nodeid: NODE, convId: 'cv4', turn: 1, seq: 2, round: 2, text: 'Looking. <diagnosis>{"v":1,' });
     await sleep(200);
     assert.ok(doc.querySelector('#evlAiLog [data-p=a]').textContent.indexOf('diagnosis') < 0);
@@ -626,8 +651,8 @@ test('running state: strip, status line phases, elapsed time, caret; everything 
     ph.onAiStep(null, { nodeid: NODE, convId: 'cv1', turn: 1, i: 0, tool: 'get_device_info', args: {}, status: 'done', items: 1 });
     ph.onAiStep(null, { nodeid: NODE, convId: 'cv1', turn: 1, i: 1, tool: 'event_facets', args: { window: '24h' }, status: 'running' });
     await sleep(200);
-    assert.ok(live().indexOf('Step 2: counting events (24h)') == 0, live());
-    assert.strictEqual(doc.getElementById('evlAiSay').textContent, 'Step 2: counting events (24h)', 'the phase change is announced');
+    assert.ok(live().indexOf('Lookup 2: counting events (24h)') == 0, live());
+    assert.strictEqual(doc.getElementById('evlAiSay').textContent, 'Lookup 2: counting events (24h)', 'the phase change is announced');
     // the counter moves once a second
     var c = ph.st.ai.convs[ph.st.ai.chat];
     c.turns[0].t0 = Date.now() - 65000;
@@ -640,7 +665,7 @@ test('running state: strip, status line phases, elapsed time, caret; everything 
     var caret = doc.querySelector('#evlAiLog [data-p=a] .evlAiCaret');
     assert.ok(caret, 'a caret follows the streaming text');
     assert.strictEqual(caret.parentNode.nodeName, 'P');
-    assert.strictEqual(doc.getElementById('evlAiSay').textContent, 'Step 2: counting events (24h)', 'announcements are throttled');
+    assert.strictEqual(doc.getElementById('evlAiSay').textContent, 'Lookup 2: counting events (24h)', 'announcements are throttled');
     ph.onAiDone(null, { nodeid: NODE, convId: 'cv1', turn: 1, text: 'The drive stalls.', citations: {}, usage: {} });
     assert.strictEqual(doc.querySelector('#evlAiLog .evlAiLive'), null);
     assert.strictEqual(doc.querySelector('#evlAiLog .evlAiCaret'), null);
@@ -689,7 +714,7 @@ test('running state: dot on the Ask button while the panel is closed; Explain an
     ph.onAiStarted(null, { nodeid: NODE, reqId: s2.reqId, convId: 'cv2' });
     ph.onAiStep(null, { nodeid: NODE, convId: 'cv2', turn: 1, i: 0, tool: 'lookup_event_id', args: { provider: 'stornvme', id: 129 }, status: 'running' });
     await sleep(200);
-    assert.ok(doc.querySelector('.evlAiEx .evlAiLive').textContent.indexOf('Step 1: looking up event 129 (stornvme)') == 0);
+    assert.ok(doc.querySelector('.evlAiEx .evlAiLive').textContent.indexOf('Lookup 1: looking up event 129 (stornvme)') == 0);
     ph.onAiError(null, { nodeid: NODE, convId: 'cv2', turn: 1, code: 'timeout', message: '' });
     assert.strictEqual(doc.querySelector('.evlAiEx .evlAiStrip.on'), null);
     assert.strictEqual(doc.querySelector('.evlAiEx .evlAiLive'), null);
@@ -739,7 +764,7 @@ test('running state: "Thinking…" with a growing counter between steps and befo
     // a step, then the next model call thinks again
     ph.onAiStep(null, { nodeid: NODE, convId: 'cv1', turn: 1, i: 0, tool: 'event_facets', args: { window: '24h' }, status: 'running' });
     await sleep(200);
-    assert.ok(live().indexOf('Step 1: counting events (24h)') == 0, live());
+    assert.ok(live().indexOf('Lookup 1: counting events (24h)') == 0, live());
     ph.onAiThinking(null, { nodeid: NODE, convId: 'cv1', turn: 1, round: 2, chars: 80 });
     await sleep(200);
     assert.ok(live().indexOf('Thinking… (80 characters)') == 0, live());
@@ -884,7 +909,7 @@ test('saved diagnoses are chats: listed with a marker (also one moved from an ea
     assert.ok(!/This is wrong/.test(card.textContent) && /Ask about this/.test(card.textContent), 'no feedback on a saved diagnosis, asking about it works');
     var note = card.querySelector('.evlAiStep.note');
     assert.ok(note && /Model: I will look at the disk first\./.test(note.textContent), 'saved notes in the steps');
-    assert.match(card.querySelector('.evlDgFoot summary').textContent, /^1 step/, 'notes are not counted as steps');
+    assert.match(card.querySelector('.evlDgFoot summary').textContent, /^1 lookup/, 'notes are not counted as lookups');
     assert.strictEqual(doc.querySelector('#evlAiHd h2').textContent, 'Diagnosis');
     // a question continues the saved diagnosis chat in a new session with a recap
     ph.aiAsk('Did it happen again?');

@@ -58,14 +58,15 @@ test('history: a chat is saved per user and device; nobody else can read, list o
     const x = makeHistory(), h = x.h;
     const id = h.newChatId();
     assert.match(id, /^ch[0-9a-f]{24}$/);
-    assert.strictEqual(await h.saveChatTurn({ userid: U1, nodeid: N1, chatId: id, question: 'Why did it restart?', done: done('Power loss [E1].', { E1: rec('e1') }), steps: [{ tool: 'get_events', args: '{"limit":5}', ms: 3, items: 5, status: 'done' }], endpointName: 'gpu', model: 'm1' }), true);
+    assert.strictEqual(await h.saveChatTurn({ userid: U1, nodeid: N1, chatId: id, question: 'Why did it restart?', done: done('Power loss [E1].', { E1: rec('e1') }), steps: [{ tool: 'get_events', args: '{"limit":5}', ms: 3, items: 5, status: 'done' }, { note: 'Step limit reached: writing the answer with what was found so far.', kind: 'limit' }, { note: 'Let me check.', kind: 'other' }], endpointName: 'gpu', model: 'm1' }), true);
     x.clock.t += 1000;
     assert.strictEqual(await h.saveChatTurn({ userid: U1, nodeid: N1, chatId: id, question: 'And before?', done: done('Nothing [E2].', { E2: rec('e2') }), steps: [], model: 'm1' }), true);
     const item = await h.get(U1, N1, 'chat', id);
     assert.strictEqual(item.title, 'Why did it restart?');
     assert.deepStrictEqual(item.messages.map(function (m) { return m.q; }), ['Why did it restart?', 'And before?']);
     assert.strictEqual(item.messages[0].cites.E1._id, 'e1');
-    assert.deepStrictEqual(item.messages[0].steps, [{ tool: 'get_events', args: '{"limit":5}', status: 'done', items: 5, ms: 3 }]);
+    assert.deepStrictEqual(item.messages[0].steps, [{ tool: 'get_events', args: '{"limit":5}', status: 'done', items: 5, ms: 3 },
+        { note: 'Step limit reached: writing the answer with what was found so far.', kind: 'limit' }, { note: 'Let me check.' }], 'limit entries keep their kind');
     assert.strictEqual(item.messages[1].model, 'm1');
     const l = await h.list(U1, N1);
     assert.deepStrictEqual([l.enabled, l.retentionDays, l.chats.length, l.chats[0].id, l.chats[0].count, l.chats[0].title], [true, 30, 1, id, 2, 'Why did it restart?']);

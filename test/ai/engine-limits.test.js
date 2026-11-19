@@ -198,8 +198,10 @@ test('Ask context overflow -> new segment with a server-built recap', async func
     assert.strictEqual(d2.turn, 2);
     assert.strictEqual(d2.segment, 1);
     const b = chatReqs()[1].body;
-    const users = b.messages.filter(function (m) { return m.role === 'user'; });
+    // the context is nearly full: tool use is closed for this call, with the closing instruction as a last user message
+    const users = b.messages.filter(function (m) { return m.role === 'user' && !/^No more lookups are available/.test(m.content); });
     assert.strictEqual(users.length, 1, 'old messages dropped');
+    assert.match(b.messages[b.messages.length - 1].content, /^No more lookups are available/);
     assert.ok(/label=recap/.test(users[0].content) && /first question/.test(users[0].content) && /second question/.test(users[0].content));
     assert.ok(!b.messages.some(function (m) { return m.role === 'assistant'; }));
     t.close();

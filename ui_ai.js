@@ -324,8 +324,12 @@ module.exports.attach = function (obj) {
         var c = ph.aiFind(m); if (!c || !ph.aiBusy(c)) return;
         var t = ph.aiTurn(c, m.turn), i = Number(m.i), round = Number(m.round);
         if (!t || t.status != 'running' || !(i >= 0 && i < 128) || Math.floor(i) !== i) return;
-        t.steps[i] = { note: String(m.text == null ? '' : m.text).slice(0, 2000) };
-        if (!(round >= 0) || round >= (t.round || 0)) { t.text = ''; t.live = ''; t.gap = false; }
+        // kind 'limit': tool use ended for this answer (a status, not model text; the answer text stays)
+        if (m.kind == 'limit') t.steps[i] = { note: String(m.text == null ? '' : m.text).slice(0, 300), kind: 'limit' };
+        else {
+            t.steps[i] = { note: String(m.text == null ? '' : m.text).slice(0, 2000) };
+            if (!(round >= 0) || round >= (t.round || 0)) { t.text = ''; t.live = ''; t.gap = false; }
+        }
         t.ph = 'step';
         c.last = Date.now();
         if (c.status == 'starting') c.status = 'running';
@@ -498,7 +502,7 @@ module.exports.attach = function (obj) {
             t.usage = (x.usage && typeof x.usage == 'object') ? x.usage : null;
             t.followups = (Array.isArray(x.followups) ? x.followups : []).filter(function (f) { return typeof f == 'string' && f.trim(); }).slice(0, 3).map(function (f) { return f.slice(0, 200); });
             t.steps = (Array.isArray(x.steps) ? x.steps : []).slice(0, 128).map(function (s) {
-                if (s && typeof s.note == 'string') return { note: s.note.slice(0, 2000) };
+                if (s && typeof s.note == 'string') return s.kind == 'limit' ? { note: s.note.slice(0, 2000), kind: 'limit' } : { note: s.note.slice(0, 2000) };
                 var args = s && s.args; if (typeof args == 'string') { try { args = JSON.parse(args); } catch (e) { } }
                 return { tool: String((s && s.tool) || '').slice(0, 60), args: args, status: (s && s.status == 'error') ? 'error' : 'done', items: Number(s && s.items) || 0, ms: Number(s && s.ms) || 0 };
             });
@@ -726,11 +730,33 @@ module.exports.attach = function (obj) {
         var lb = Q('evlAiLog'); if (lb) lb.setAttribute('aria-busy', ph.aiBusy(st.ai.convs[st.ai.chat]) ? 'true' : 'false');
     };
     // While streaming, hide the machine-readable blocks the model appends (and a tag still being typed).
+    // Tool calls a model wrote as text (Qwen/Hermes <tool_call>, <function=…>, <function_calls>/<invoke>, <|tool_call|>,
+    // [TOOL_CALLS] …) are never shown; the server already removes them, this is the last line of defence.
+    // streaming: cut at the first such markup (the rest of a streamed text may still be part of it).
+    obj.aiNoToolMarkup = function (text, streaming) {
+        var s = String(text == null ? '' : text);
+        var mark = /<\s*tool_calls?\b|<\|(?:tool_calls?(?:_start|_begin|_section_begin)?|python_tag)\|>|<\s*function_calls\b|<\s*invoke\s+name\s*=|<\s*function\s*=|\[TOOL_CALLS\]|<\uFF5Ctool\u2581calls?\u2581begin\uFF5C>/i;
+        var at = s.search(mark);
+        if (at < 0) return s;
+        if (streaming) return s.slice(0, at);
+        s = s.replace(/<\s*tool_calls?\s*>[\s\S]*?(?:<\s*\/\s*tool_calls?\s*>|$)/gi, '')
+             .replace(/<\s*function_calls\s*>[\s\S]*?(?:<\s*\/\s*function_calls\s*>|$)/gi, '')
+             .replace(/<\s*invoke\s+name\s*=[\s\S]*?(?:<\s*\/\s*invoke\s*>|$)/gi, '')
+             .replace(/<\s*function\s*=[\s\S]*?(?:<\s*\/\s*function\s*>|$)/gi, '')
+             .replace(/<\|(?:tool_calls?(?:_start|_begin|_section_begin)?|python_tag)\|>[\s\S]*?(?:<\|(?:\/tool_calls?|tool_calls?_(?:end|section_end)|eom_id|eot_id)\|>|$)/gi, '')
+             .replace(/<\uFF5Ctool\u2581calls?\u2581begin\uFF5C>[\s\S]*?(?:<\uFF5Ctool\u2581calls\u2581end\uFF5C>|$)/g, '')
+             .replace(/\[TOOL_CALLS\][\s\S]*$/, '')
+             .replace(/<\s*\/\s*(?:tool_calls?|function_calls|function|invoke|parameter)\s*>/gi, '');
+        return s.replace(/\n{3,}/g, '\n\n').trim();
+    };
     obj.aiVisible = function (text) {
         text = String(text == null ? '' : text);
         var m = /<\s*\/?\s*(?:diagnosis|explain|followups)\b/i.exec(text);
         if (m) text = text.slice(0, m.index);
-        text = text.replace(/<\s*\/?\s*[a-z]{0,10}$/i, '');
+        // tool calls written as text (see aiNoToolMarkup): hidden from where they start
+        var tm = text.search(/<\s*tool_calls?\b|<\|(?:tool_calls?(?:_start|_begin|_section_begin)?|python_tag)\|>|<\s*function_calls\b|<\s*invoke\s+name\s*=|<\s*function\s*=|\[TOOL_CALLS\]|<\uFF5Ctool\u2581calls?\u2581begin\uFF5C>/i);
+        if (tm >= 0) text = text.slice(0, tm);
+        text = text.replace(/<\s*\/?\s*[a-z_]{0,14}$/i, '').replace(/<\|[a-z_]{0,20}\|?$/i, '').replace(/\[[A-Z_]{0,10}$/, '');
         text = text.replace(/(^|\n)[ \t]*`{3,}[\w-]*[ \t]*\n?[ \t]*$/, '$1');
         return text;
     };
@@ -795,7 +821,7 @@ module.exports.attach = function (obj) {
     obj.aiMd = function (text, c, opts) {
         var ph = pluginHandler.eventlog;
         opts = opts || {};
-        text = String(text == null ? '' : text);
+        text = ph.aiNoToolMarkup(String(text == null ? '' : text), false);
         if (text.length > 400000) text = text.slice(0, 400000);
         // pseudonymized values -> numbered placeholders, so Markdown cannot reinterpret them; stray marks dropped
         var vals = [], src = '', last = 0, m, re = /([a-z]{1,12})([^-]{0,400}?)/g;
@@ -945,6 +971,8 @@ module.exports.attach = function (obj) {
             refusal: 'The model declined to answer. Rephrase the question and try again.',
             aborted: 'Stopped.',
             badResponse: 'The endpoint sent an answer the plugin could not read. Try again.',
+            stepLimit: 'The model kept asking for more data after the step limit. Try a shorter time window, or have an administrator raise Max steps per answer.',
+            noAnswer: 'The model sent an empty reply. Try again.',
             invalid: 'The server did not accept this request.',
             unavailable: 'The Assistant is not available on this server right now. An administrator can check the MeshCentral log.',
             internal: 'Something went wrong on the server. Try again.'
@@ -952,7 +980,8 @@ module.exports.attach = function (obj) {
     };
     obj.aiErrHtml = function (c, t) {
         var ph = pluginHandler.eventlog, e = t.error || {}, code = e.code || 'internal', esc = ph.aiEsc;
-        var h = '<div class=evlAiErr role=alert><p>' + esc(ph.aiErrText(code, e.phase)) + '</p>';
+        // stepLimit: the server's message names the limit that was reached
+        var h = '<div class=evlAiErr role=alert><p>' + esc(code == 'stepLimit' && e.message ? e.message : ph.aiErrText(code, e.phase)) + '</p>';
         if (e.message && (['model', 'badResponse', 'blocked', 'network', 'auth', 'invalid', 'refusal'].indexOf(code) >= 0 || (code == 'timeout' && e.phase == 'connect'))) h += '<p class=evlAiMuted>' + esc(e.message) + '</p>';
         h += '<div class=evlAiActs>';
         var transient = ['timeout', 'noReply', 'network', 'overloaded', 'rateLimit', 'badResponse', 'internal', 'busy'];
@@ -979,13 +1008,16 @@ module.exports.attach = function (obj) {
         if (s.status == 'running') return 'running';
         if (s.status == 'error') return 'failed';
         var noun = ({ event_facets: 'events', get_events: 'events', get_event: 'event', get_device_events: 'device events', event_groups: 'groups', get_installed_software: 'apps' })[s.tool];
-        if (s.tool == 'lookup_event_id') return s.items ? 'reference' : 'no reference';
+        if (s.tool == 'lookup_event_id') return s.items ? 'in the reference list' : 'not in the reference list';
         if (noun && s.items >= 0) return s.items + ' ' + noun;
         return 'done';
     };
+    // "27 lookups in 15 steps, 1 min 34 s, 263.2k tokens": a lookup is one tool call, a step one model call that
+    // asked for lookups (what "Max steps per answer" limits; older saved results only know the lookups)
     obj.aiUsageText = function (t) {
         var n = pluginHandler.eventlog.aiToolSteps(t).length, u = t.usage || {}, parts = [];
-        parts.push(n ? (n + (n == 1 ? ' step' : ' steps')) : 'No tools used');
+        var st = Number(u.steps) > 0 ? Math.floor(Number(u.steps)) : 0;
+        parts.push(n ? (n + (n == 1 ? ' lookup' : ' lookups') + (st ? ' in ' + st + (st == 1 ? ' step' : ' steps') : '')) : 'No lookups');
         var ms = Number(u.ms) || 0;
         if (ms > 0) { var s = ms / 1000; parts.push(s < 10 ? s.toFixed(1) + ' s' : (s < 60 ? Math.round(s) + ' s' : Math.floor(s / 60) + ' min ' + Math.round(s % 60) + ' s')); }
         var tok = (Number(u['in']) || 0) + (Number(u.out) || 0);
@@ -999,12 +1031,13 @@ module.exports.attach = function (obj) {
         var running = (t.status == 'running');
         var open = (t.stepsOpen != null) ? t.stepsOpen : running;
         var h = '<details class=evlAiSteps data-t=' + key + ' data-p=s' + (open ? ' open' : '') + '><summary onclick="return pluginHandler.eventlog.aiStepsClick(\'' + c.id + '\',' + t.n + ',this)">' +
-                (running ? (steps.length ? steps.length + (steps.length == 1 ? ' step' : ' steps') + ' so far' : 'Getting started') : esc(ph.aiUsageText(t))) + '</summary><div class=evlAiStepL>';
+                (running ? (steps.length ? steps.length + (steps.length == 1 ? ' lookup' : ' lookups') + ' so far' : 'Getting started') : esc(ph.aiUsageText(t))) + '</summary><div class=evlAiStepL>';
         var k = 0;
         t.steps.forEach(function (s) {
             if (s == null) return;
             // what the model wrote between its lookups (model text: escaped, never Markdown here)
-            if (s.note != null) { h += '<div class="evlAiStep note"><span class=n aria-hidden=true></span><span class=t><b>Model:</b> ' + ph.aiPlain(s.note) + '</span></div>'; return; }
+            if (s.note != null && s.kind == 'limit') { h += '<div class="evlAiStep note limit"><span class=n aria-hidden=true></span><span class=t>' + esc(s.note) + '</span></div>'; return; }
+            if (s.note != null) { var nt = ph.aiNoToolMarkup(s.note, false); if (nt) h += '<div class="evlAiStep note"><span class=n aria-hidden=true></span><span class=t><b>Model:</b> ' + ph.aiPlain(nt) + '</span></div>'; return; }
             var r = ph.aiStepResult(s);
             h += '<div class=evlAiStep><span class=n>' + (++k) + '</span><code>' + esc(s.tool) + '(' + esc(ph.aiArgsShort(s.args)) + ')</code><span class="r' + (s.status == 'error' ? ' err' : '') + '">' + esc(r) + '</span></div>';
         });
@@ -1046,8 +1079,10 @@ module.exports.attach = function (obj) {
         if (c.status == 'stopping') return { key: 'stop', text: 'Stopping…', step: '', clock: true };
         if (t.ph == 'write') return { key: 'write', text: ({ explain: 'Writing the explanation…', diagnose: 'Writing the diagnosis…' })[c.mode] || 'Writing the answer…', step: '', clock: true };
         if (t.ph == 'think') return { key: 'think' + ((t.think && t.think.round) || 0), text: 'Thinking…', count: ph.aiThinkCount(t.think && t.think.chars), step: '', clock: true };
+        var all = (t.steps || []).filter(function (x) { return x != null; }), lastE = all.length ? all[all.length - 1] : null;
+        if (lastE && lastE.kind == 'limit') return { key: 'limit', text: lastE.note, step: '', clock: true };
         var ts = ph.aiToolSteps(t), n = ts.length, s = n ? ts[n - 1] : null;
-        if (s) return { key: 'step' + n, text: ph.aiToolWords(s.tool, s.args), step: 'Step ' + n, clock: true };
+        if (s) return { key: 'step' + n, text: ph.aiToolWords(s.tool, s.args), step: 'Lookup ' + n, clock: true };
         return { key: 'prep', text: 'Preparing…', step: '', clock: true };
     };
     obj.aiElapsed = function (ms) {
@@ -2971,6 +3006,8 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlAiStep.note .t { line-height:1.4; overflow-wrap:anywhere; }
 #pluginEventLog .evlAiStep.note b { font-weight:normal; color:var(--evl-ink); }
 #pluginEventLog .evlAiStep.note .n::before { content:""; display:block; width:5px; height:5px; margin:5px auto 0; border-radius:50%; border:1px solid var(--evl-muted); }
+#pluginEventLog .evlAiStep.note.limit { color:var(--evl-ink); font-style:italic; }
+#pluginEventLog .evlAiStep.note.limit .n::before { border-radius:1px; background:var(--evl-muted); }
 #pluginEventLog .evlAiSeg { align-self:stretch; text-align:center; font-size:11px; color:var(--evl-muted); border-top:1px dashed var(--evl-line); padding-top:4px; }
 #pluginEventLog .evlAiIntro p { margin:0 0 10px; line-height:1.5; color:var(--evl-ink); }
 #pluginEventLog .evlAiFollow { display:flex; flex-wrap:wrap; gap:6px; }
@@ -3334,7 +3371,7 @@ body.night #evlAiDlg {
         'onAiStarted', 'onAiPreview', 'onAiStep', 'onAiNote', 'onAiThinking', 'onAiDelta', 'onAiDone', 'onAiError',
         'aiCitesIn', 'aiHistoryInit', 'aiHistoryGet', 'onAiHistory', 'aiConvFromSaved', 'onAiHistoryItem', 'onAiHistoryDeleted', 'aiHistoryTouch',
         'aiHistoryToggle', 'aiHistoryHtml', 'aiWinShort', 'aiDiagTitle', 'aiSavedNote', 'aiHistoryOpen', 'aiHistoryDel', 'aiHistoryDelYes', 'aiHistoryDelNo',
-        'aiRefresh', 'aiSchedule', 'aiFlush', 'aiVisible',
+        'aiRefresh', 'aiSchedule', 'aiFlush', 'aiNoToolMarkup', 'aiVisible',
         'aiMdInit', 'aiMd', 'aiChipHtml', 'aiMdFallback', 'aiMdPost', 'aiCopyCode',
         'aiUnavailText', 'aiErrText', 'aiErrHtml', 'aiArgsShort', 'aiStepResult', 'aiUsageText', 'aiStepsHtml', 'aiStepsClick', 'aiWaitHtml', 'aiInfoLine', 'aiNotesHtml',
         'aiToolWords', 'aiThinkCount', 'aiPhase', 'aiElapsed', 'aiLiveHtml', 'aiStripHtml', 'aiStopInner', 'aiCaret', 'aiAnnounce', 'aiTickStart', 'aiTick', 'aiTimersStop', 'aiBtnSync',

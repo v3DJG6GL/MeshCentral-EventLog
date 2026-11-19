@@ -15,6 +15,7 @@
  */
 
 const crypto = require('node:crypto');
+const toolcalls = require('./toolcalls.js');
 
 const TOOL_NAMES = ['get_device_info', 'event_facets', 'event_groups', 'get_events', 'get_event', 'lookup_event_id', 'get_device_events', 'get_installed_software'];
 const MAX_STR = 2000;
@@ -536,7 +537,54 @@ function parseFollowups(text) {
     return { text: b.text, followups: followups };
 }
 
+// "Suggest questions" replies, read leniently (thinking models, servers that leave reasoning or tool-call markup in the
+// text): <think>…</think> and tool-call markup removed, then a <followups> block, else a JSON array of strings anywhere,
+// else up to 3 list lines or lines ending in "?". -> { followups: [..], reason: null | 'empty' | 'noQuestions' }
+function cleanFollowup(t) {
+    t = String(t).replace(/\s+/g, ' ').trim().replace(/^(?:[-*\u2022]|\d+[.)])\s*/, '').replace(/^\*\*(.*)\*\*$/, '$1').replace(/^["'\u201c\u2018]|["'\u201d\u2019],?$/g, '').trim();
+    return t.length > 200 ? t.slice(0, 200) : t;
+}
+function readFollowups(text) {
+    let t = typeof text === 'string' ? text : (text == null ? '' : String(text));
+    t = t.replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '').replace(/^\s*<think(?:ing)?>[\s\S]*$/i, '').replace(/^[\s\S]*?<\/think(?:ing)?>/i, '');
+    t = toolcalls.strip(t).trim();
+    if (!t) return { followups: [], reason: 'empty' };
+    const add = function (list, out) {
+        for (const it of list) {
+            if (out.length >= 3) break;
+            if (typeof it !== 'string') continue;
+            const f = cleanFollowup(it);
+            if (f && !/^[[\]]$/.test(f) && out.indexOf(f) < 0) out.push(f);
+        }
+        return out;
+    };
+    const blk = parseBlock(t, 'followups');
+    let out = [];
+    // a block cut off inside its JSON array: the strings that are complete
+    if (blk.raw != null && blk.json == null && /^\s*\[/.test(blk.raw)) {
+        const strs = [], re = /"((?:[^"\\\r\n]|\\.)*)"/g;
+        let m;
+        while ((m = re.exec(blk.raw))) { try { strs.push(JSON.parse(m[0])); } catch (e) { } }
+        out = add(strs, []);
+    }
+    if (!out.length) out = parseFollowups(t).followups;
+    if (out.length) return { followups: out, reason: null };
+    const body = blk.text;
+    // a JSON array of strings anywhere
+    for (let i = body.indexOf('['); i >= 0 && !out.length; i = body.indexOf('[', i + 1)) {
+        let v = null;
+        for (let j = body.indexOf(']', i); j >= 0 && v == null; j = body.indexOf(']', j + 1)) { try { v = JSON.parse(body.slice(i, j + 1)); } catch (e) { v = null; } }
+        if (Array.isArray(v) && v.length && v.every(function (x) { return typeof x === 'string'; })) out = add(v, []);
+    }
+    if (out.length) return { followups: out, reason: null };
+    // list lines, else lines that are questions
+    const lines = body.split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean);
+    const listed = lines.filter(function (l) { return /^(?:[-*\u2022]|\d+[.)])\s+\S/.test(l); });
+    out = add(listed.length ? listed : lines.filter(function (l) { return /[?\uff1f]["'\u201d\u2019*]*$/.test(l); }), []);
+    return { followups: out, reason: out.length ? null : 'noQuestions' };
+}
+
 module.exports = {
-    newNonce, fence, stripFences, suspicious, system, render, fill, values, checkTemplates, parseBlock, validateDiagnosis, validateExplain, parseFollowups, diagnosisText,
+    newNonce, fence, stripFences, suspicious, system, render, fill, values, checkTemplates, parseBlock, validateDiagnosis, validateExplain, parseFollowups, readFollowups, diagnosisText,
     TOOL_NAMES, FACTORY, FACTORY_HASH, PARTS, PLACEHOLDERS, MAX_TEMPLATE, MAX_EXTRA
 };

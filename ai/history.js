@@ -109,11 +109,11 @@ function citesOf(src, max, msgMax) {
     }
     return out;
 }
-// tool steps, and the notes the model wrote between its lookups ({ note })
+// tool steps, and the notes the model wrote between its lookups ({ note }; kind 'limit': tool use ended for the turn)
 function stepsOf(steps) {
     return (Array.isArray(steps) ? steps : []).slice(0, MAX_STEPS).map(function (s) {
         s = isObj(s) ? s : {};
-        if (typeof s.note === 'string') return { note: clip(s.note, 2000) };
+        if (typeof s.note === 'string') return s.kind === 'limit' ? { note: clip(s.note, 2000), kind: 'limit' } : { note: clip(s.note, 2000) };
         return { tool: String(s.tool || '').slice(0, 60), args: clip(typeof s.args === 'string' ? s.args : JSON.stringify(s.args == null ? '' : s.args), 300), status: s.status === 'error' ? 'error' : 'done', items: Number(s.items) || 0, ms: Number(s.ms) || 0 };
     });
 }
@@ -126,7 +126,7 @@ function result(done, steps) {
         cites: citesOf(done.citations, MAX_CITES, MAX_CITE_MSG),
         invalid: (Array.isArray(done.invalidCitations) ? done.invalidCitations : []).filter(function (r) { return typeof r === 'string'; }).slice(0, 40),
         followups: followupsOf(done.followups),
-        usage: { in: Number(u.in) || 0, out: Number(u.out) || 0, estimated: u.estimated === true, ms: Number(u.ms) || 0, rounds: Number(u.rounds) || 0 },
+        usage: { in: Number(u.in) || 0, out: Number(u.out) || 0, estimated: u.estimated === true, ms: Number(u.ms) || 0, rounds: Number(u.rounds) || 0, steps: Number(u.steps) || 0 },
         redactionCounts: isObj(done.redactionCounts) ? done.redactionCounts : null,
         steps: stepsOf(steps)
     };
