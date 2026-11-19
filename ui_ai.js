@@ -420,7 +420,7 @@ module.exports.attach = function (obj) {
         if (code != 'aborted') ph.aiSay(ph.aiErrText(code, t.error.phase));
     };
 
-    // ---- saved results (chats, the last diagnosis, explanations; kept on the server per user and device) ------------
+    // ---- saved results (chats incl. diagnoses, explanations; kept on the server per user and device) ------------
     // citations as the server sent them ({ E3: stored event }) -> { E3: { rec, ev, id } }
     obj.aiCitesIn = function (src) {
         var ph = pluginHandler.eventlog, cs = {};

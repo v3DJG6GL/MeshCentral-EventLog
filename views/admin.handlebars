@@ -2338,17 +2338,17 @@
             <div><input type="number" id="elAiRounds" min="1" max="50" step="1" aria-describedby="elAiRoundsHelp">
               <small id="elAiRoundsHelp" class="elAiHelp">A step is one round trip to the model; in each step it may request up to 4 data lookups (1&ndash;50).</small></div>
             <label for="elAiCalls">Tool calls per answer</label>
-            <div><input type="number" id="elAiCalls" min="1" max="200" step="1" aria-describedby="elAiCallsHelp">
+            <div><input type="number" id="elAiCalls" style="width:22em;max-width:100%" min="1" max="200" step="1" aria-describedby="elAiCallsHelp">
               <small id="elAiCallsHelp" class="elAiHelp">The individual data lookups across all steps of one answer (1&ndash;200; empty: automatic).</small></div>
             <label for="elAiSentKB">Data per answer (KB)</label>
-            <div><input type="number" id="elAiSentKB" min="16" max="8192" step="1" aria-describedby="elAiSentKBHelp">
+            <div><input type="number" id="elAiSentKB" style="width:28em;max-width:100%" min="16" max="8192" step="1" aria-describedby="elAiSentKBHelp">
               <small id="elAiSentKBHelp" class="elAiHelp">New data sent to the model for one answer: the question and the lookup results (16&ndash;8192; empty: automatic).</small></div>
           </div>
         </section>
 
         <section class="elAiSec" aria-labelledby="elAiSavedH">
           <h3 id="elAiSavedH">Saved results</h3>
-          <p class="elAiHelp">Ask chats, the last diagnosis and explanations are saved per user and device, so they are still there after a reload. Each user sees only their own; a chat can be continued later. They hold what the user saw, including device data such as event messages, names and addresses in clear text, in the plugin's database.</p>
+          <p class="elAiHelp">Chats (including diagnoses) and explanations are saved per user and device, so they are still there after a reload. Each user sees only their own; a chat can be continued later. They hold what the user saw, including device data such as event messages, names and addresses in clear text, in the plugin's database.</p>
           <div class="elAiGrid">
             <span class="elAiLbl">Saving</span>
             <div><label><input type="checkbox" id="elAiHistOn"> Save chats, diagnoses and explanations</label></div>
