@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+
+## [0.6.0] - 2026-11-19
 ### Added
 - Admin page: a summary at the top of Data sent to the model shows what leaves your network and what is replaced first; a filter on the Assignment page; a bar for unsaved changes with Discard
 
