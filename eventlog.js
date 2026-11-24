@@ -146,7 +146,8 @@ module.exports.eventlog = function (parent) {
         return {
             "deviceLiveTab": "Event Log: Live view",
             "deviceHistoryTab": "Event Log: History and Collect now",
-            "deviceAssistant": "Event Log: Assistant"
+            "deviceAssistant": "Event Log: Assistant",
+            "deviceRunCommands": "Event Log: Run suggested commands"
         };
     };
 
@@ -157,11 +158,13 @@ module.exports.eventlog = function (parent) {
     obj.PERMISSIONS = {
         deviceLiveTab:    { title: 'Event Log: Live view', desc: 'Can open the live event view of a device. Enforced by the tab only: the live view runs through MeshCentral\'s relay tunnel.', default: 'denied' },
         deviceHistoryTab: { title: 'Event Log: History and Collect now', desc: 'Can view the stored event history of a device and ask it to collect now.', default: 'denied' },
-        deviceAssistant:  { title: 'Event Log: Assistant', desc: 'Can ask the Event Log assistant about a device. Also needs the Details right on the device.', default: 'denied' }
+        deviceAssistant:  { title: 'Event Log: Assistant', desc: 'Can ask the Event Log assistant about a device. Also needs the Details right on the device.', default: 'denied' },
+        deviceRunCommands: { title: 'Event Log: Run suggested commands', desc: 'Can run a command the assistant suggested, after confirming it. Also needs the Run commands right on the device.', default: 'denied' }
     };
     obj.MESHRIGHT_DEVICEDETAILS = 0x00100000;
     obj.MESHRIGHT_LIMITEVENTS = 0x00002000;
     obj.MESHRIGHT_NOSOFTWARE = 0x00800000;
+    obj.MESHRIGHT_REMOTECOMMAND = 0x00020000;
     obj.MESHRIGHT_ADMIN = 0xFFFFFFFF;
     obj._permApi = false;
     obj.registerPermissions = function() {
@@ -172,7 +175,7 @@ module.exports.eventlog = function (parent) {
                 obj._permApi = true;
             }
         } catch (e) { console.log('EVENTLOG: could not register plugin permissions: ' + ((e && e.message) || e)); }
-        if (obj._permApi) console.log('EVENTLOG: plugin permissions registered (Live view, History and Collect now, Assistant; all denied by default)');
+        if (obj._permApi) console.log('EVENTLOG: plugin permissions registered (Live view, History and Collect now, Assistant, Run suggested commands; all denied by default)');
         else console.log('EVENTLOG: this MeshCentral has no plugin permission framework; the Event Log tab is limited to full administrators');
         return obj._permApi;
     };
@@ -750,7 +753,8 @@ body.night #pluginEventLog {
         ph.elAccess = a;
         if (typeof currentNode == 'undefined' || currentNode == null || currentNode._id != message.nodeid) return;
         var same = (prev != null && prev.nodeid == a.nodeid && prev.live == a.live && prev.history == a.history && prev.assistant == a.assistant &&
-            prev.assistantReason == a.assistantReason && prev.configSetName == a.configSetName && prev.canManage == a.canManage);
+            prev.assistantReason == a.assistantReason && prev.configSetName == a.configSetName && prev.canManage == a.canManage &&
+            (prev.runCommands === true) == (a.runCommands === true) && String(prev.runShells || '') == String(a.runShells || '') && (prev.runAsUser === true) == (a.runAsUser === true));
         if (same && (Q('evlWrap') || Q('evlNotice'))) {   // nothing changed: keep the tab as it is (the endpoint shown may have)
             if (a.assistant && ph.st != null) ph.aiHistoryInit();
             if (Q('evlAiHd') && ph.st != null) QH('evlAiHd', ph.aiHeadHtml(ph.st.ai.convs[ph.st.ai.chat] || null));
@@ -837,7 +841,7 @@ body.night #pluginEventLog {
     // what the shell was built for (the fields onAccess compares)
     obj.elAccKey = function() {
         var a = pluginHandler.eventlog.elAccess;
-        return a ? [a.nodeid, a.live, a.history, a.assistant, a.assistantReason, a.configSetName, a.canManage].join('|') : '';
+        return a ? [a.nodeid, a.live, a.history, a.assistant, a.assistantReason, a.configSetName, a.canManage, a.runCommands === true, String(a.runShells || ''), a.runAsUser === true].join('|') : '';
     };
     // What a shell put back needs again: the scroll offsets and the focused field with its cursor (detaching loses them).
     obj.elTrack = function(ev) {
@@ -1998,9 +2002,12 @@ body.night #pluginEventLog {
     };
 
     // Called by MeshCentral for every message from every agent, so it returns at once unless the message is an
-    // installed-software reply the Assistant asked for (ai/software.js checks the session id and the agent).
+    // installed-software reply the Assistant asked for (ai/software.js checks the session id and the agent), or the
+    // reply / console note of a command the Assistant ran (ai/runcmd.js: action 'msg', type 'runcommands' or 'console').
     obj.hook_processAgentData = function(command, agentObj, webserver) {
-        if (command == null || command.action != 'software' || obj.ai == null) return;
+        if (command == null || obj.ai == null) return;
+        var a = command.action;
+        if (a != 'software' && (a != 'msg' || (command.type != 'runcommands' && command.type != 'console'))) return;
         try { obj.ai.onAgentData(command, agentObj); } catch (e) { }
     };
 
@@ -2167,13 +2174,16 @@ body.night #pluginEventLog {
     // device actions only from a user session, after the user's rights on that device are confirmed.
     obj.AGENT_ACTIONS = { sendlog: true, gatherlogs: true };
     obj.NODE_ACTIONS = { checkAccess: true, getNodeHistory: true, collectNow: true, aiStart: true, aiConfirm: true, aiSend: true, aiFeedback: true,
-                         aiHistoryList: true, aiHistoryGet: true, aiHistoryDelete: true, aiChatEdit: true, aiFollowups: true };
+                         aiHistoryList: true, aiHistoryGet: true, aiHistoryDelete: true, aiChatEdit: true, aiFollowups: true,
+                         aiCmdRun: true };
     // Device actions that need a plugin permission, and device actions that need MeshCentral device rights on top.
     obj.ACTION_PERMISSION = { getNodeHistory: 'deviceHistoryTab', collectNow: 'deviceHistoryTab', aiStart: 'deviceAssistant', aiConfirm: 'deviceAssistant', aiSend: 'deviceAssistant', aiFeedback: 'deviceAssistant',
-                              aiHistoryList: 'deviceAssistant', aiHistoryGet: 'deviceAssistant', aiHistoryDelete: 'deviceAssistant', aiChatEdit: 'deviceAssistant', aiFollowups: 'deviceAssistant' };
+                              aiHistoryList: 'deviceAssistant', aiHistoryGet: 'deviceAssistant', aiHistoryDelete: 'deviceAssistant', aiChatEdit: 'deviceAssistant', aiFollowups: 'deviceAssistant',
+                              aiCmdRun: 'deviceRunCommands' };
     obj.ACTION_RIGHTS = { aiStart: obj.MESHRIGHT_DEVICEDETAILS, aiConfirm: obj.MESHRIGHT_DEVICEDETAILS, aiSend: obj.MESHRIGHT_DEVICEDETAILS, aiFeedback: obj.MESHRIGHT_DEVICEDETAILS,
                           aiHistoryList: obj.MESHRIGHT_DEVICEDETAILS, aiHistoryGet: obj.MESHRIGHT_DEVICEDETAILS, aiHistoryDelete: obj.MESHRIGHT_DEVICEDETAILS, aiChatEdit: obj.MESHRIGHT_DEVICEDETAILS,
-                          aiFollowups: obj.MESHRIGHT_DEVICEDETAILS };
+                          aiFollowups: obj.MESHRIGHT_DEVICEDETAILS, aiCmdRun: obj.MESHRIGHT_REMOTECOMMAND | obj.MESHRIGHT_DEVICEDETAILS };
+    // (every bit of an ACTION_RIGHTS value is needed; aiCmdRun also needs deviceAssistant, checked in ai/index.js)
     // Assistant actions authorized by conversation ownership inside ai/index.js (same user and connection), so Stop
     // and Close keep working after a permission was revoked; and the Assistant admin actions (full administrators).
     obj.AI_SESSION_ACTIONS = { aiStop: true, aiClose: true };
@@ -2212,6 +2222,11 @@ body.night #pluginEventLog {
             if ((typeof v == 'string' && v.length <= 64) || (typeof v == 'number' && isFinite(v))) msg[k] = v;
         });
         obj.safeSend(myparent, msg);
+        // a refused command run ends in its own result message too (the tab matches it by reqId)
+        if (command.pluginaction == 'aiCmdRun') {
+            obj.safeSend(myparent, { method: 'onAiCmdResult', nodeid: command.nodeid, reqId: obj.aiId(command.reqId), ok: false,
+                error: { code: 'denied', message: /0x/.test(String(reason)) ? 'Running commands needs the Run commands right on this device.' : 'You may not run commands on this device.' } });
+        }
     };
 
     // What the Assistant offers this user on this device. Resolves to {assistant:false, assistantReason} until the
@@ -2237,7 +2252,8 @@ body.night #pluginEventLog {
     // Tell the tab which views this user may use on this device.
     obj.sendAccess = function(myparent, node, rights) {
         var user = myparent.user;
-        var msg = { method: 'onAccess', nodeid: node._id, live: obj.hasPerm(user, 'deviceLiveTab', node), history: obj.hasPerm(user, 'deviceHistoryTab', node) };
+        var msg = { method: 'onAccess', nodeid: node._id, live: obj.hasPerm(user, 'deviceLiveTab', node), history: obj.hasPerm(user, 'deviceHistoryTab', node),
+                    runCommands: false, runShells: [], runAsUser: false };   // ai/index.js accessInfo sets them when commands may run
         return obj.assistantAccess(myparent, node, rights).then(function (a) {
             for (var k in a) { if (k != 'method' && k != 'nodeid') msg[k] = a[k]; }
             obj.safeSend(myparent, msg);
@@ -2259,6 +2275,7 @@ body.night #pluginEventLog {
         if (obj.NODE_ACTIONS[act] && command._node == null) { obj.sendDenied(myparent, command, 'no rights on this device'); return; }
         if (obj.ai == null || typeof obj.ai.handle != 'function') {
             if (obj.AI_SESSION_ACTIONS[act]) return;   // nothing to stop or close
+            if (act == 'aiCmdRun') { obj.safeSend(myparent, { method: 'onAiCmdResult', nodeid: command.nodeid, reqId: obj.aiId(command.reqId), ok: false, error: { code: 'disabled', message: 'The Assistant is not available on this server.' } }); return; }
             obj.safeSend(myparent, { method: 'onAiError', nodeid: command.nodeid, reqId: obj.aiId(command.reqId), convId: obj.aiId(command.convId), code: 'unavailable', message: 'The Assistant is not available on this server', retryable: false });
             return;
         }
@@ -2327,7 +2344,7 @@ body.night #pluginEventLog {
             var perm = obj.ACTION_PERMISSION[act];
             if (perm != null && !obj.hasPerm(myparent.user, perm, node)) { obj.sendDenied(myparent, command, 'missing permission ' + perm); return; }
             var need = obj.ACTION_RIGHTS[act];
-            if (need != null && (rights >>> 0) !== 0xFFFFFFFF && (rights & need) == 0) { obj.sendDenied(myparent, command, 'missing device right 0x' + need.toString(16)); return; }
+            if (need != null && (rights >>> 0) !== 0xFFFFFFFF && ((rights & need) >>> 0) !== (need >>> 0)) { obj.sendDenied(myparent, command, 'missing device right 0x' + need.toString(16)); return; }
             obj._serveraction(command, myparent, grandparent);
         });
     };
@@ -2363,6 +2380,7 @@ body.night #pluginEventLog {
         case 'aiHistoryList': case 'aiHistoryGet': case 'aiHistoryDelete':     // the same, and scoped to this user in ai/index.js
         case 'aiChatEdit':                                                      // the same (edit / delete / retry of a message)
         case 'aiFollowups':                                                     // the same ("Suggest questions")
+        case 'aiCmdRun':                                                        // the same (Run commands right, deviceRunCommands)
         case 'aiStop': case 'aiClose': {                                      // ownership checked in ai/index.js
             obj.aiDeviceAction(command, myparent, grandparent);
             break;

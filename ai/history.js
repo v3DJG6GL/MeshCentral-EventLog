@@ -16,8 +16,10 @@
 //   get(userid, nodeid, kind, key)         -> Promise<item|null>   kind 'chat' (key: chat id), 'diagnosis' (key
 //                                             ignored; only items not migrated yet), 'explain' (key: the stored event id)
 //   remove(userid, nodeid, kind, key)      -> Promise<bool>
-//   saveChatTurn({ userid, nodeid, chatId, question, done, steps, endpointName, model, cont, type, window, range, gen })
-//                                          -> Promise<bool>   type 'diagnosis' (with window '24h'|'7d'|'restart' and
+//   saveChatTurn({ userid, nodeid, chatId, question, done, steps, endpointName, model, cont, type, window, range, gen,
+//                  attach })               -> Promise<bool>   attach { shell, cmd }: the question asked about the output
+//                                             of that command (msg.attach; the output itself is never saved);
+//                                             type 'diagnosis' (with window '24h'|'7d'|'restart' and
 //                                             range) on the first message of a diagnosis chat; gen { model?,
 //                                             thinking?, temperature? } = the chat's model and answer settings
 //                                             (doc.gen, absent = the endpoint's; ai/index.js validated them)
@@ -330,6 +332,7 @@ function create(o) {
                 const msg = { time: t, q: clip(c.question, MAX_Q), a: r.text, structured: r.structured, steps: r.steps, cites: r.cites, invalid: r.invalid,
                               followups: r.followups, usage: r.usage, redactionCounts: r.redactionCounts, model: String(c.model || '').slice(0, 200), endpointName: String(c.endpointName || '').slice(0, 120) };
                 if (c.cont) msg.cont = true;
+                if (isObj(c.attach) && okStr(c.attach.shell, 20) && typeof c.attach.cmd === 'string') msg.attach = { shell: c.attach.shell, cmd: clip(c.attach.cmd, 2000) };
                 doc.messages.push(msg);
                 doc.updated = t;
                 doc.model = msg.model; doc.endpointName = msg.endpointName;

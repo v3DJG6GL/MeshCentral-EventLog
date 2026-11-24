@@ -1405,6 +1405,7 @@
       var EL_AI_PARTS = [['base', 'Base instructions'], ['ask', 'Ask'], ['explain', 'Explain'], ['diagnose', 'Diagnosis']];
       var EL_AI_BLOCKS = { explain: ['explain', 'Explain'], diagnose: ['diagnosis', 'Diagnosis'], ask: ['followups', 'follow-up questions'] };
       var EL_AI_TPL_MAX = 20000, EL_AI_EXTRA_MAX = 4000;
+      var EL_AI_SHELLS = { powershell: 'PowerShell', cmd: 'cmd', bash: 'sh' };
       var EL_AI_CHANGED = {
         'prompts.base': 'Base instructions', 'prompts.ask': 'Ask instructions', 'prompts.explain': 'Explain instructions', 'prompts.diagnose': 'Diagnosis instructions',
         extraInstructions: 'Additional instructions', 'endpoint.extraInstructions': 'Model-specific instructions'
@@ -1729,6 +1730,20 @@
             return;
           }
           td(r.nodename || r.nodeid, null, r.nodeid);
+          if (r.kind == 'command') {   // a suggested command the technician ran: shell, command, result
+            td('Command (' + (EL_AI_SHELLS[r.shell] || r.shell || '?') + ')', null, (r.runAsUser == 1) ? 'Run as the logged-in user' : 'Run as the agent');
+            var cmd = String(r.text == null ? '' : r.text);
+            var cc = td(cmd.length > 200 ? cmd.substring(0, 200) + '…' : cmd, 'elAiCmd', cmd.length > 200 ? cmd.substring(0, 2000) : null);
+            cc.colSpan = 4;
+            var cr = td(r.result, (r.result == 'ok') ? 'elAiOk' : 'elAiBad');
+            var cn = [];
+            if (r.edited) cn.push('edited');
+            if (r.ms != null) cn.push(elAiFmtNum(Math.round(Number(r.ms) / 100) / 10) + ' s');
+            if (r.result == 'ok') cn.push(elAiFmtNum(r.outputChars || 0) + ' chars' + (r.truncated ? ', cut off' : ''));
+            if (cn.length) { var cs = document.createElement('div'); cs.className = 'elAiSub'; cs.textContent = cn.join(', '); cr.appendChild(cs); }
+            tb.appendChild(tr);
+            return;
+          }
           td(r.endpointName, null, r.model ? ('Model: ' + r.model) : null);
           var steps = Array.isArray(r.steps) ? r.steps.length : r.steps;
           td((steps == null) ? '' : elAiFmtNum(steps), 'elNum', (r.rounds != null) ? ('Rounds: ' + r.rounds) : null);
@@ -2606,6 +2621,7 @@
     .elAiOk { color: var(--local); }
     .elAiBad { color: var(--danger); font-weight: 600; }
     .elAiSub { color: var(--muted); font-size: 13px; font-weight: normal; overflow-wrap: anywhere; }
+    .elAiCmd { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
     .elAiUnused { color: var(--muted); font-size: 13px; }
     #eventLogAdmin #elAiEpRows button.elAiLinkBtn { background: none; border: 0; border-radius: 0; padding: 0; min-height: 0; color: var(--accent); text-decoration: underline; font-size: inherit; }
     .elAiOffer { background: var(--accent-soft); border-radius: var(--r-ctl); padding: 12px 14px; margin: 16px 0 0; max-width: 760px; }

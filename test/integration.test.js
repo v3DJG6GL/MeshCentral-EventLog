@@ -107,9 +107,11 @@ test('integration: plugin + SQLite + mock LLM, driven through serveraction', { s
         webserver: gp,
         loginCookieEncryptionKey: Buffer.from('00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff', 'hex'),
         getConfigFilePath: function (name) { return path.join(dir, name); },
-        GetConnectivityState: function () { return { connectivity: 1, powerState: 1 }; }
+        GetConnectivityState: function () { return { connectivity: 1, powerState: 1 }; },
+        DispatchEvent: function (targets, source, event) { meshEvents.push({ targets: targets, event: event }); }
     };
-    var ph = F.makePluginHandler({ 'user/d/alice|deviceAssistant': true, 'user/d/alice|deviceHistoryTab': true });
+    var meshEvents = [];
+    var ph = F.makePluginHandler({ 'user/d/alice|deviceAssistant': true, 'user/d/alice|deviceHistoryTab': true, 'user/d/alice|deviceRunCommands': true });
     ph.parent = meshServer;
     meshServer.pluginHandler = ph;
     var plugin = F.loadPlugin(ph);
@@ -170,11 +172,13 @@ test('integration: plugin + SQLite + mock LLM, driven through serveraction', { s
         assert.strictEqual(acc.history, true);
         assert.strictEqual(acc.live, false);
         assert.deepStrictEqual([acc.endpoint.name, acc.endpoint.model, acc.endpoint.network], ['Mock', 'test-model', 'loopback']);
+        assert.deepStrictEqual([acc.runCommands, acc.runShells, acc.runAsUser], [true, ['cmd', 'powershell'], true]);
 
         act(bob, { pluginaction: 'checkAccess', nodeid: NODE });
         var accB = await waitFor(bob, 'onAccess');
         assert.strictEqual(accB.assistant, false);
         assert.strictEqual(accB.assistantReason, 'permission');
+        assert.deepStrictEqual([accB.runCommands, accB.runShells, accB.runAsUser], [false, [], false]);
         act(bob, { pluginaction: 'aiStart', nodeid: NODE, reqId: 'b1', mode: 'ask', input: { text: 'hi' } });
         var dB = await waitFor(bob, 'onAccessDenied');
         assert.deepStrictEqual([dB.act, dB.reqId], ['aiStart', 'b1']);
@@ -205,6 +209,33 @@ test('integration: plugin + SQLite + mock LLM, driven through serveraction', { s
         var nDone = alice.sent.filter(function (m) { return m.method === 'onAiDone'; }).length;
         act(alice, { pluginaction: 'aiSend', nodeid: NODE, convId: started.convId, text: 'And now?' });
         await waitFor(alice, 'onAiDone', function () { return alice.sent.filter(function (m) { return m.method === 'onAiDone'; }).length > nDone; });
+
+        // ---- run a suggested command: the agent's reply comes back through hook_processAgentData; ask about it ----
+        var agent = F.makeAgent(NODE, 'mesh/d/A');
+        gp.wsagents[NODE] = agent;
+        act(bob, { pluginaction: 'aiCmdRun', nodeid: NODE, reqId: 'bc', shell: 'cmd', text: 'ver', runAsUser: 0, proposed: null });
+        var bc = await waitFor(bob, 'onAiCmdResult');
+        assert.deepStrictEqual([bc.ok, bc.error.code, bc.reqId], [false, 'denied', 'bc']);
+        act(alice, { pluginaction: 'aiCmdRun', nodeid: NODE, reqId: 'c1', shell: 'powershell', text: 'Get-Volume', runAsUser: 1, proposed: 'Get-Volume', chatId: started.chatId });
+        await delay(30);
+        assert.strictEqual(agent.sent.length, 1, 'one command to the agent (none for bob)');
+        var sentCmd = agent.sent[0];
+        assert.deepStrictEqual([sentCmd.action, sentCmd.type, sentCmd.runAsUser, sentCmd.reply], ['runcommands', 2, 1, true]);
+        plugin.hook_processAgentData({ action: 'msg', type: 'runcommands', result: 'DriveLetter C  Healthy  RUNCMD-OUTPUT-42\r\n', sessionid: sentCmd.sessionid, responseid: sentCmd.responseid }, F.makeAgent('node/d/nB', 'mesh/d/B'), gp);
+        plugin.hook_processAgentData({ action: 'msg', type: 'runcommands', result: 'DriveLetter C  Healthy  RUNCMD-OUTPUT-42\r\n', sessionid: sentCmd.sessionid, responseid: sentCmd.responseid }, agent, gp);
+        var cr = await waitFor(alice, 'onAiCmdResult', function (m) { return m.reqId === 'c1'; });
+        assert.strictEqual(cr.ok, true, JSON.stringify(cr));
+        assert.strictEqual(cr.output, 'DriveLetter C  Healthy  RUNCMD-OUTPUT-42\n', 'the reply of another device was ignored');
+        assert.strictEqual(meshEvents.length, 1);
+        assert.deepStrictEqual([meshEvents[0].event.action, meshEvents[0].event.cmds, meshEvents[0].event.cmdType, meshEvents[0].event.userid, meshEvents[0].event.nodeid], ['runcommands', 'Get-Volume', 2, ALICE._id, NODE]);
+        nDone = alice.sent.filter(function (m) { return m.method === 'onAiDone'; }).length;
+        var nChat = mock.requests.filter(function (r) { return r.path === CHAT; }).length;
+        act(alice, { pluginaction: 'aiSend', nodeid: NODE, convId: started.convId, text: 'What does the output say?', attach: { runId: cr.runId } });
+        await waitFor(alice, 'onAiDone', function () { return alice.sent.filter(function (m) { return m.method === 'onAiDone'; }).length > nDone; });
+        var askReq = mock.requests.filter(function (r) { return r.path === CHAT; })[nChat];
+        assert.ok(/label=command-output>>>\\nCommand \(powershell\): Get-Volume\\n\\nDriveLetter C  Healthy  RUNCMD-OUTPUT-42/.test(askReq.bodyText), askReq.bodyText.slice(-600));
+        act(bob, { pluginaction: 'aiStart', nodeid: NODE, reqId: 'b2', mode: 'ask', input: { text: 'q' }, attach: { runId: cr.runId } });
+        await waitFor(bob, 'onAccessDenied', function (m) { return m.reqId === 'b2'; });
 
         // ---- citation jumps in History: recIds and aroundId on the real database ----
         act(alice, { pluginaction: 'getNodeHistory', nodeid: NODE, recIds: [cited._id, '999999', 'x'.repeat(80)] });
@@ -260,7 +291,10 @@ test('integration: plugin + SQLite + mock LLM, driven through serveraction', { s
         await delay(50);
         act(root, { pluginaction: 'aiAdminAudit', reqId: 'a4', since: now - 3600000 });
         var audit = await waitFor(root, 'aiAdminAuditRows', function (m) { return m.reqId === 'a4'; });
-        var turns = audit.rows.filter(function (r) { return r.kind !== 'feedback'; });
+        var cmdRows = audit.rows.filter(function (r) { return r.kind === 'command'; });
+        assert.strictEqual(cmdRows.length, 1);
+        assert.deepStrictEqual([cmdRows[0].shell, cmdRows[0].text, cmdRows[0].result, cmdRows[0].edited, cmdRows[0].counted, cmdRows[0].chatId], ['powershell', 'Get-Volume', 'ok', false, false, started.chatId]);
+        var turns = audit.rows.filter(function (r) { return r.kind !== 'feedback' && r.kind !== 'command'; });
         assert.ok(turns.length >= 5, 'one row per turn: ' + turns.length);
         assert.ok(turns.every(function (r) { return r.userid === ALICE._id && r.nodeid === NODE; }));
         assert.ok(turns.some(function (r) { return r.result === 'cancelled'; }), 'the stopped turn is audited');

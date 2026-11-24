@@ -199,7 +199,7 @@ test('rendering: pseudonym markers become <mark>, citations become chips only wh
     assert.ok(d.querySelector('.evlAiUnv'));
 });
 
-test('rendering: command blocks get Copy and the read-only note; tables scroll; no model text in attributes', { skip: SKIP }, function () {
+test('rendering: command blocks get Copy, their shell and the note; tables scroll; no model text in attributes', { skip: SKIP }, function () {
     var w = makeDom(), ph = w.ph;
     var d = w.document.createElement('div');
     d.innerHTML = ph.aiMd('```powershell\nGet-PhysicalDisk | Get-StorageReliabilityCounter\n```\n\n```json\n{"a":1}\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |', conv());
@@ -207,9 +207,24 @@ test('rendering: command blocks get Copy and the read-only note; tables scroll; 
     assert.strictEqual(wraps.length, 2);
     assert.ok(wraps[0].querySelector('button').getAttribute('onclick').indexOf('aiCopyCode(this)') >= 0);
     assert.strictEqual(d.querySelectorAll('.evlAiCmdNote').length, 1);
-    assert.ok(d.querySelector('.evlAiCmdNote').textContent.indexOf('assistant can only read') >= 0);
+    assert.strictEqual(d.querySelector('.evlAiCmdNote').textContent, 'Commands are suggestions. Copy one to run it in Terminal.');
+    assert.ok(d.textContent.indexOf('can only read') < 0, 'the old note is gone');
+    assert.strictEqual(wraps[0].getAttribute('data-sh'), 'powershell');
+    assert.strictEqual(wraps[1].getAttribute('data-sh'), null, 'other code has no shell');
+    // the shell names a model may use, normalized; "terminal" is a command of no known shell
+    var sh = {};
+    ['pwsh', 'ps1', 'ps', 'bat', 'batch', 'cmd', 'sh', 'zsh', 'shell', 'console', 'bash', 'terminal', 'constructor'].forEach(function (l) {
+        var e = w.document.createElement('div'); e.innerHTML = ph.aiMd('```' + l + '\nx\n```', conv());
+        var cw = e.querySelector('.evlAiCodeW');
+        sh[l] = [cw.getAttribute('data-sh'), !!e.querySelector('.evlAiCmdNote')];
+    });
+    assert.deepStrictEqual(sh, { pwsh: ['powershell', true], ps1: ['powershell', true], ps: ['powershell', true], bat: ['cmd', true], batch: ['cmd', true], cmd: ['cmd', true],
+        sh: ['bash', true], zsh: ['bash', true], shell: ['bash', true], console: ['bash', true], bash: ['bash', true], terminal: [null, true], constructor: [null, false] });
     assert.strictEqual(d.querySelectorAll('pre[title]').length, 0);
     assert.ok(d.querySelector('.evlAiTbl > table'));
+    grant(w, { runCommands: true, runShells: ['bash'] });
+    d.innerHTML = ph.aiMd('```bash\nuptime\n```', conv());
+    assert.strictEqual(d.querySelector('.evlAiCmdNote').textContent, 'Check a command before you run it.');
 });
 
 test('rendering: without marked/DOMPurify the text is escaped with line breaks', { skip: SKIP }, function () {
@@ -1844,4 +1859,415 @@ test('drafts: kept per device in sessionStorage (at most 4000 characters), resto
     await sleep(450);
     assert.strictEqual(w.sessionStorage.getItem(key), null);
     if (ph._aiDog) w.clearInterval(ph._aiDog);
+});
+
+// ---- model choice and Max (v0.8.0) ------------------------------------------------------------------------------
+var MODELS = [{ id: 'qwen3:14b', label: 'qwen3:14b', 'default': true, thinkingLevels: ['low', 'medium', 'high'], thinkingVerified: true },
+              { id: 'gpt-oss:20b', label: 'gpt-oss:20b', 'default': false, thinkingLevels: ['low', 'medium', 'high', 'max'], thinkingVerified: false },
+              { id: 'tiny', label: 'tiny', 'default': false, thinkingLevels: ['low'], thinkingVerified: true }];
+function grantModels(w, gen, extra) { grantGen(w, Object.assign({ models: plainCopy(MODELS), defaultModel: 'qwen3:14b' }, gen || {}), extra); }
+function plainCopy(x) { return JSON.parse(JSON.stringify(x)); }
+function optTexts(doc) { return Array.prototype.map.call(doc.querySelectorAll('#evlAiGenM option'), function (o) { return o.textContent; }); }
+
+test('model choice: a Model list on top of the answer settings (also when thinking and temperature are off, and for Anthropic); levels follow the model; Max where offered', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantModels(w); loadHistory(w);
+    ph.aiToggle(); ph.aiGenToggle();
+    var sel = doc.getElementById('evlAiGenM');
+    assert.ok(sel, 'the model list');
+    assert.strictEqual(doc.querySelector('#evlAiGenPop .evlAiGenF'), sel.parentNode, 'first section');
+    assert.deepStrictEqual(optTexts(doc), ['qwen3:14b (endpoint default)', 'gpt-oss:20b', 'tiny']);
+    assert.deepStrictEqual(Array.prototype.map.call(sel.options, function (o) { return o.value; }), ['0', '1', '2'], 'options carry indexes, not ids');
+    assert.strictEqual(sel.selectedIndex, 0);
+    assert.deepStrictEqual(popBtns(doc), ['Endpoint default', 'Off', 'Low', 'Medium', 'High'], 'no Max for the default model');
+    ph.aiGenThink('high');
+    // another model: its levels, Max among them, its own "not verified"
+    ph.aiGenPick('1');
+    assert.strictEqual(doc.activeElement, doc.getElementById('evlAiGenM'), 'focus stays on the list');
+    assert.deepStrictEqual(popBtns(doc), ['Endpoint default', 'Off', 'Low', 'Medium', 'High', 'Max']);
+    assert.match(doc.getElementById('evlAiGenPop').textContent, /Not verified for this model/);
+    assert.strictEqual(doc.querySelector('#evlAiGenPop [data-k=thhigh]').getAttribute('aria-pressed'), 'true', 'a level it takes stays');
+    ph.aiGenThink('max');
+    assert.strictEqual(doc.querySelector('#evlAiHd .evlAiGenTag').textContent, 'gpt-oss:20b · thinking: max', 'the header names the model that differs');
+    // a model without that level: the level goes back to the endpoint's
+    ph.aiGenPick('2');
+    assert.deepStrictEqual(plain(ph.aiGenGet()), { model: 'tiny' });
+    assert.strictEqual(doc.querySelector('#evlAiGenPop [data-k=thdef]').getAttribute('aria-pressed'), 'true');
+    assert.deepStrictEqual(Array.prototype.map.call(doc.querySelectorAll('#evlAiGenPop .evlAiGenSeg button'), function (x) { return x.disabled; }), [false, true, false, true, true]);
+    assert.strictEqual(ph.aiGenThink('high'), false, 'refused for this model');
+    // the default model again: no model in the tag
+    ph.aiGenPick('0');
+    assert.strictEqual(doc.querySelector('#evlAiHd .evlAiGenTag'), null);
+    ph.aiGenPick('1'); ph.aiGenThink('max'); ph.aiGenClose(false);
+    ph.aiAsk('Why did it restart?');
+    assert.deepStrictEqual(plain(sentOf(w, 'aiStart').pop().gen), { model: 'gpt-oss:20b', thinking: 'max' });
+    // thinking and temperature turned off by the admin: only the model list
+    var w2 = makeDom(), doc2 = w2.document;
+    grantModels(w2, { enabled: false }); loadHistory(w2);
+    w2.ph.aiToggle();
+    assert.ok(doc2.getElementById('evlAiGenBtn'), 'the button for the model alone');
+    w2.ph.aiGenToggle();
+    assert.ok(doc2.getElementById('evlAiGenM'));
+    assert.strictEqual(doc2.querySelector('#evlAiGenPop .evlAiGenSeg'), null);
+    assert.strictEqual(doc2.getElementById('evlAiGenT'), null);
+    w2.ph.aiGenPick('1'); w2.ph.aiGenThink('max'); w2.ph.aiGenClose(false);
+    w2.ph.aiAsk('Q?');
+    assert.deepStrictEqual(plain(sentOf(w2, 'aiStart').pop().gen), { model: 'gpt-oss:20b' });
+    // Anthropic: no thinking, no temperature, the model only
+    var w3 = makeDom(), doc3 = w3.document;
+    grantModels(w3, { thinkingLevels: null, temperature: false, models: MODELS.map(function (m) { return Object.assign({}, m, { thinkingLevels: null }); }) }); loadHistory(w3);
+    w3.ph.aiToggle(); w3.ph.aiGenToggle();
+    assert.ok(doc3.getElementById('evlAiGenM'));
+    assert.strictEqual(doc3.querySelector('#evlAiGenPop .evlAiGenSeg'), null);
+    assert.strictEqual(doc3.getElementById('evlAiGenT'), null);
+    // only the endpoint's own model listed: nothing to choose
+    var w4 = makeDom();
+    grantModels(w4, { thinkingLevels: null, temperature: false, models: [MODELS[0]] }); loadHistory(w4);
+    w4.ph.aiToggle();
+    assert.strictEqual(w4.document.getElementById('evlAiGenBtn'), null);
+    // an endpoint that offers Max without a model choice
+    var w5 = makeDom();
+    grantGen(w5, { thinkingLevels: ['off', 'low', 'medium', 'high', 'max'] }); loadHistory(w5);
+    w5.ph.aiToggle(); w5.ph.aiGenToggle();
+    assert.deepStrictEqual(popBtns(w5.document), ['Endpoint default', 'Off', 'Low', 'Medium', 'High', 'Max']);
+    assert.strictEqual(w5.document.getElementById('evlAiGenM'), null);
+    w5.ph.aiGenThink('max');
+    assert.strictEqual(w5.document.querySelector('#evlAiHd .evlAiGenTag').textContent, 'Thinking: max');
+});
+
+test('model choice: kept per chat and sent with aiSend; a model no longer offered falls back with a note; New chat resets; restored from a saved chat', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantModels(w); loadHistory(w);
+    ph.aiToggle();
+    ph.aiGenToggle(); ph.aiGenPick('1'); ph.aiGenClose(false);
+    ph.aiAsk('First?');
+    var s = sentOf(w, 'aiStart').pop();
+    assert.strictEqual(s.gen.model, 'gpt-oss:20b');
+    // the server answers with the endpoint's model: a note in the chat, the chat's setting follows
+    ph.onAiStarted(null, { nodeid: NODE, reqId: s.reqId, convId: 'cvM', mode: 'ask', model: 'qwen3:14b', endpointName: 'gpu-01.lan',
+        modelFallback: { requested: 'gpt-oss:20b', model: 'qwen3:14b', message: 'gpt-oss:20b is no longer offered; this chat uses qwen3:14b.' } });
+    var c = ph.st.ai.convs[ph.st.ai.chat];
+    assert.match(doc.getElementById('evlAiHd').textContent, /gpt-oss:20b is no longer offered; this chat uses qwen3:14b\./);
+    assert.strictEqual(c.gen.model, 'qwen3:14b');
+    assert.strictEqual(doc.querySelector('#evlAiHd .evlAiGenTag'), null);
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvM', turn: 1, text: 'Ok.', citations: {}, usage: {}, followups: [] });
+    // picked again and sent with the next question; the header names the model that answers
+    ph.aiGenToggle(); ph.aiGenPick('1');
+    assert.match(doc.getElementById('evlAiGenPop').textContent, /Another model gets the earlier answers of this chat as text\./);
+    ph.aiGenClose(false);
+    ph.aiAsk('Second?');
+    assert.deepStrictEqual(plain(sentOf(w, 'aiSend').pop().gen), { model: 'gpt-oss:20b' });
+    assert.match(doc.querySelector('#evlAiHd .evlAiSub').textContent, /^gpt-oss:20b on gpu-01\.lan/);
+    // the server falls back before that turn (aiSend): a note without the server's message is worded here
+    ph.onAiModelFallback(null, { nodeid: NODE, convId: 'cvM', requested: 'gpt-oss:20b', model: 'qwen3:14b' });
+    assert.match(doc.getElementById('evlAiHd').textContent, /The model gpt-oss:20b is no longer offered\. This chat uses qwen3:14b now\./);
+    assert.strictEqual(c.gen.model, 'qwen3:14b');
+    ph.onAiModelFallback(null, { nodeid: 'node/d/other', convId: 'cvM', requested: 'x', model: 'y', message: 'other device' });
+    assert.ok(doc.getElementById('evlAiHd').textContent.indexOf('other device') < 0);
+    // New chat: the endpoint's model again
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvM', turn: 2, text: 'Ok.', citations: {}, usage: {}, followups: [] });
+    ph.aiNewChat();
+    ph.aiAsk('Fresh?');
+    assert.deepStrictEqual(plain(sentOf(w, 'aiStart').pop().gen), {});
+    // a saved chat brings its model back and sends it when it continues
+    var w2 = makeDom(), ph2 = w2.ph, doc2 = w2.document;
+    grantModels(w2); loadHistory(w2);
+    ph2.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'Why did it restart?', updated: Date.now(), count: 2 }], explains: [] });
+    ph2.aiHistoryOpen(CH1);
+    ph2.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: Object.assign(chatItem(), { gen: { model: 'gpt-oss:20b', thinking: 'max' } }) });
+    ph2.aiToggle();
+    assert.strictEqual(doc2.querySelector('#evlAiHd .evlAiGenTag').textContent, 'gpt-oss:20b · thinking: max');
+    ph2.aiGenToggle();
+    assert.strictEqual(doc2.getElementById('evlAiGenM').selectedIndex, 1);
+    ph2.aiGenClose(false);
+    ph2.aiAsk('Again?');
+    assert.deepStrictEqual(plain(sentOf(w2, 'aiStart').pop().gen), { model: 'gpt-oss:20b', thinking: 'max' });
+    // a saved model the endpoint no longer lists is not sent (the server keeps the chat's and falls back)
+    var w3 = makeDom();
+    grantModels(w3); loadHistory(w3);
+    w3.ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'x', updated: Date.now(), count: 2 }], explains: [] });
+    w3.ph.aiHistoryOpen(CH1);
+    w3.ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: Object.assign(chatItem(), { gen: { model: 'gone:1b', thinking: 'max' } }) });
+    assert.deepStrictEqual(plain(w3.ph.st.ai.convs[w3.ph.st.ai.chat].gen), {});
+});
+
+// ---- run suggested commands (v0.8.0) ----------------------------------------------------------------------------
+var RUN_ANSWER = 'Check the disk:\n\n```powershell\nGet-PhysicalDisk -FriendlyName hostPC01\n```\n\nOr:\n\n```bash\nuptime\n```\n\n```json\n{"a":1}\n```\n\n```cmd\nnet use \\\\srv /user:x [secret]\n```';
+function grantRun(w, extra) { grantSaved(w, Object.assign({ runCommands: true, runShells: ['cmd', 'powershell'], runAsUser: true }, extra || {})); }
+function runBtns(doc) { return Array.prototype.slice.call(doc.querySelectorAll('#evlAiLog .evlAiRunBtn')); }
+function runChat(w, text) {
+    var c = liveChat(w, 'How do I check the disk?', text || RUN_ANSWER);
+    w.ph.aiToggle(); if (!w.ph.st.ai.open) w.ph.aiToggle();
+    return c;
+}
+
+test('run: a Run button next to Copy where the permission and the shell fit the device; the note says to check the command', { skip: SKIP }, function () {
+    var w = makeDom(), doc = w.document;
+    grantRun(w); loadHistory(w);
+    var c = runChat(w);
+    var bs = runBtns(doc);
+    assert.deepStrictEqual(bs.map(function (b) { return b.closest('.evlAiCodeW').getAttribute('data-sh'); }), ['powershell', 'cmd'], 'bash does not run on Windows: Copy only');
+    assert.deepStrictEqual(bs.map(function (b) { return b.getAttribute('data-run'); }), [c.id + '-1-0', c.id + '-1-2']);
+    bs.forEach(function (b) {
+        assert.strictEqual(b.previousElementSibling.textContent, 'Copy');
+        assert.strictEqual(b.textContent, 'Run…');
+        assert.ok(b.querySelector('svg'), 'the run icon');
+        assert.match(b.getAttribute('onclick'), /^return pluginHandler\.eventlog\.aiCmdOpen\('c\d+-1-\d',this\)$/);
+    });
+    var bashW = doc.querySelectorAll('#evlAiLog .evlAiCodeW')[1];
+    assert.strictEqual(bashW.querySelectorAll('button').length, 1, 'Copy only');
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiCmdNote').textContent, 'Check a command before you run it.');
+    // a re-render keeps them, once each
+    w.ph.aiRenderPanel();
+    assert.strictEqual(runBtns(doc).length, 2);
+    // Linux: bash only
+    var w2 = makeDom();
+    grantRun(w2, { runShells: ['bash'], runAsUser: false }); loadHistory(w2);
+    runChat(w2);
+    assert.deepStrictEqual(runBtns(w2.document).map(function (b) { return b.closest('.evlAiCodeW').getAttribute('data-sh'); }), ['bash']);
+    // without the permission (or without shells): no Run, the copy note
+    [{ runCommands: false }, { runShells: null }].forEach(function (x) {
+        var w3 = makeDom();
+        grantRun(w3, x); loadHistory(w3);
+        runChat(w3);
+        assert.strictEqual(runBtns(w3.document).length, 0, JSON.stringify(x));
+        if (x.runCommands === false) assert.strictEqual(w3.document.querySelector('#evlAiLog .evlAiCmdNote').textContent, 'Commands are suggestions. Copy one to run it in Terminal.');
+    });
+    // the device is offline: shown, but disabled with the reason
+    var w4 = makeDom();
+    w4.eval('currentNode.conn = 0;');
+    grantRun(w4); loadHistory(w4);
+    runChat(w4);
+    assert.ok(runBtns(w4.document).every(function (b) { return b.disabled && b.title == 'The device is offline'; }));
+    // a change of the permission rebuilds the tab
+    var k1 = w.ph.elAccKey();
+    grantRun(w, { runAsUser: false });
+    assert.notStrictEqual(w.ph.elAccKey(), k1);
+});
+
+test('run: the diagnosis\' next steps get Run for their shell', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantRun(w); loadHistory(w);
+    runDiagnosis(w);
+    var ds = diagStructured();
+    ds.nextSteps.push({ text: 'On Linux.', command: { shell: 'bash', text: 'uptime' } });
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cv4', turn: 1, text: '', citations: { E1: REC, E2: REC2 }, usage: {}, structured: ds, chatId: DCH });
+    var ws = doc.querySelectorAll('#evlAiLog .evlNext .evlAiCodeW');
+    assert.strictEqual(ws.length, 2);
+    assert.strictEqual(ws[0].querySelectorAll('.evlAiRunBtn').length, 1);
+    assert.strictEqual(ws[1].querySelectorAll('.evlAiRunBtn').length, 0);
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlNext + .evlAiCmdNote').textContent, 'Check a command before you run it.');
+    ph.aiCmdOpen(runBtns(doc)[0].getAttribute('data-run'), runBtns(doc)[0]);
+    assert.strictEqual(doc.getElementById('evlCmdTx').value, 'Get-PhysicalDisk');
+    ph.aiDlgCancel();
+});
+
+test('run: the confirm dialog shows the device, the shell, the command to edit and Run as; [secret] blocks Run until edited; Esc closes and focus returns', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantRun(w); loadHistory(w);
+    var c = runChat(w);
+    var b0 = runBtns(doc)[0];
+    ph.aiCmdOpen(b0.getAttribute('data-run'), b0);
+    var box = doc.querySelector('#evlAiDlg .evlDlgBox');
+    assert.ok(box && box.getAttribute('role') == 'dialog' && box.getAttribute('aria-modal') == 'true');
+    assert.strictEqual(doc.getElementById('evlAiDlg').parentNode, doc.body);
+    assert.strictEqual(doc.getElementById('evlCmdT').textContent, 'Run on FIN-LT-0142');
+    assert.strictEqual(doc.querySelector('#evlAiDlg .evlCmdL').textContent, 'PowerShell');
+    assert.strictEqual(doc.getElementById('evlCmdW').textContent, 'Runs on the device with the agent\'s rights. Check the command first.');
+    var ta = doc.getElementById('evlCmdTx');
+    assert.strictEqual(ta.value, 'Get-PhysicalDisk -FriendlyName PC01', 'pseudonym markers become the real value, as Copy does');
+    assert.deepStrictEqual(Array.prototype.map.call(doc.querySelectorAll('#evlCmdAs option'), function (o) { return o.textContent; }), ['Agent (SYSTEM)', 'Logged-in user']);
+    assert.strictEqual(doc.getElementById('evlCmdGo').disabled, false);
+    assert.strictEqual(doc.getElementById('evlCmdWhy').hidden, true);
+    await sleep(5);
+    assert.strictEqual(doc.activeElement, ta, 'focus in the command');
+    // Esc: closed, focus back on Run
+    ph.aiDlgKey({ key: 'Escape', preventDefault: function () { } });
+    assert.strictEqual(doc.getElementById('evlAiDlg'), null);
+    assert.strictEqual(doc.activeElement, b0);
+    assert.strictEqual(sentOf(w, 'aiCmdRun').length, 0);
+    // [secret]: the dialog opens, Run waits for an edit and says why
+    var b1 = runBtns(doc)[1];
+    ph.aiCmdOpen(b1.getAttribute('data-run'), b1);
+    assert.strictEqual(doc.querySelector('#evlAiDlg .evlCmdL').textContent, 'Command Prompt');
+    assert.strictEqual(doc.getElementById('evlCmdGo').disabled, true);
+    assert.strictEqual(doc.getElementById('evlCmdWhy').hidden, false);
+    assert.match(doc.getElementById('evlCmdWhy').textContent, /\[secret\].*Replace it with the real value first\./);
+    ph.aiCmdGo();
+    assert.strictEqual(sentOf(w, 'aiCmdRun').length, 0, 'not sent');
+    doc.getElementById('evlCmdTx').value = 'net use \\\\srv /user:x Hunter2';
+    ph.aiCmdInput(doc.getElementById('evlCmdTx'));
+    assert.strictEqual(doc.getElementById('evlCmdGo').disabled, false);
+    doc.getElementById('evlCmdTx').value = '   ';
+    ph.aiCmdInput(doc.getElementById('evlCmdTx'));
+    assert.strictEqual(doc.getElementById('evlCmdGo').disabled, true, 'empty');
+    ph.aiDlgCancel();
+    assert.strictEqual(doc.activeElement, b1);
+    // Tab stays inside the dialog
+    ph.aiCmdOpen(b0.getAttribute('data-run'), b0);
+    assert.ok(Array.prototype.some.call(doc.querySelectorAll('#evlAiDlg textarea, #evlAiDlg select'), function (x) { return x; }));
+    ph.aiDlgCancel();
+    // without Run as (not Windows, or not offered)
+    var w2 = makeDom();
+    grantRun(w2, { runAsUser: false }); loadHistory(w2);
+    runChat(w2);
+    var bb = runBtns(w2.document)[0];
+    w2.ph.aiCmdOpen(bb.getAttribute('data-run'), bb);
+    assert.strictEqual(w2.document.getElementById('evlCmdAs'), null);
+    w2.ph.aiCmdGo();
+    assert.strictEqual(sentOf(w2, 'aiCmdRun').pop().runAsUser, 0);
+    // a key that is not ours does nothing
+    assert.strictEqual(ph.aiCmdOpen('x\');alert(1);//', null), false);
+    assert.strictEqual(doc.getElementById('evlAiDlg'), null);
+    void c;
+});
+
+test('run: Run sends aiCmdRun, the block shows it running; the result is escaped text with status, duration and truncation; errors; the watchdog', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantRun(w); loadHistory(w);
+    var c = runChat(w);
+    var key = runBtns(doc)[0].getAttribute('data-run');
+    ph.aiCmdOpen(key, runBtns(doc)[0]);
+    doc.getElementById('evlCmdTx').value = 'Get-PhysicalDisk | Format-List';
+    doc.getElementById('evlCmdAs').value = '1';
+    ph.aiCmdGo();
+    assert.strictEqual(doc.getElementById('evlAiDlg'), null, 'the dialog closes');
+    var m = sentOf(w, 'aiCmdRun').pop();
+    assert.ok(/^cr/.test(m.reqId));
+    assert.deepStrictEqual([m.nodeid, m.shell, m.text, m.runAsUser, m.proposed, m.convId, m.chatId], [NODE, 'powershell', 'Get-PhysicalDisk | Format-List', 1, 'Get-PhysicalDisk -FriendlyName PC01', 'cvL', undefined]);
+    // running: the button is disabled with the ring, a status under the block
+    var b = doc.querySelector('#evlAiLog [data-run="' + key + '"]');
+    assert.ok(b.disabled && b.textContent == 'Running…' && b.querySelector('.evlAiRing'));
+    var out = doc.querySelector('#evlAiLog [data-runout="' + key + '"]');
+    assert.ok(out.classList.contains('run') && /Running on the device/.test(out.textContent));
+    assert.strictEqual(out.previousElementSibling.classList.contains('evlAiCodeW'), true, 'right under the block');
+    assert.strictEqual(doc.activeElement, out);
+    assert.ok(ph._aiCmdT[m.reqId], 'the watchdog is set');
+    ph.aiCmdOpen(key, b);
+    assert.strictEqual(doc.getElementById('evlAiDlg'), null, 'not twice at a time');
+    // stale or foreign results are dropped
+    ph.onAiCmdResult(null, { nodeid: NODE, reqId: 'crother', ok: true, output: 'x' });
+    ph.onAiCmdResult(null, { nodeid: 'node/d/other', reqId: m.reqId, ok: true, output: 'x' });
+    assert.ok(doc.querySelector('#evlAiLog [data-runout="' + key + '"]').classList.contains('run'));
+    // the result: text only
+    var evil = '<img src=x onerror=alert(1)>\nSerialNumber : <b>1234</b>';
+    ph.onAiCmdResult(null, { nodeid: NODE, reqId: m.reqId, ok: true, runId: 'run_1', output: evil, truncated: true, ms: 1234 });
+    out = doc.querySelector('#evlAiLog [data-runout="' + key + '"]');
+    assert.ok(out.classList.contains('ok'));
+    assert.strictEqual(out.querySelector('pre').textContent, evil);
+    assert.strictEqual(doc.querySelectorAll('#evlAiLog img, #evlAiLog b').length, 0, 'never markup');
+    assert.strictEqual(out.querySelector('.evlAiRunSt').textContent, 'Finished');
+    assert.strictEqual(out.querySelector('.evlAiRunMeta').textContent, 'edited · as the logged-in user · 1.2 s · output truncated');
+    assert.deepStrictEqual(Array.prototype.map.call(out.querySelectorAll('.evlAiRunActs button'), function (x) { return x.textContent; }), ['Copy output', 'Ask about the output']);
+    assert.strictEqual(ph._aiCmdT[m.reqId], undefined, 'the watchdog is cleared');
+    b = doc.querySelector('#evlAiLog [data-run="' + key + '"]');
+    assert.ok(!b.disabled && b.textContent == 'Run…', 'can run again');
+    // collapsible; a re-render keeps the output and its state
+    var tg = out.querySelector('.evlAiRunTg');
+    assert.strictEqual(tg.getAttribute('aria-expanded'), 'true');
+    ph.aiCmdToggle(key);
+    assert.strictEqual(out.querySelector('pre').hidden, true);
+    ph.aiRenderPanel();
+    out = doc.querySelector('#evlAiLog [data-runout="' + key + '"]');
+    assert.strictEqual(out.querySelector('pre').hidden, true);
+    assert.strictEqual(out.querySelector('.evlAiRunTg').getAttribute('aria-expanded'), 'false');
+    ph.aiCmdToggle(key);
+    assert.strictEqual(doc.querySelector('#evlAiLog [data-runout="' + key + '"] pre').hidden, false);
+    ph.aiCmdCopy(key, out.querySelector('.evlAiRunActs button'));
+    // an error: its plain message and the server's
+    var key2 = runBtns(doc)[1].getAttribute('data-run');
+    ph.aiCmdOpen(key2, runBtns(doc)[1]);
+    doc.getElementById('evlCmdTx').value = 'ipconfig /all';
+    ph.aiCmdGo();
+    var m2 = sentOf(w, 'aiCmdRun').pop();
+    assert.strictEqual(m2.proposed, 'net use \\\\srv /user:x [secret]');
+    ph.onAiCmdResult(null, { nodeid: NODE, reqId: m2.reqId, ok: false, error: { code: 'busy', message: 'A command is <i>already</i> running.' } });
+    var o2 = doc.querySelector('#evlAiLog [data-runout="' + key2 + '"]');
+    assert.ok(o2.classList.contains('err') && o2.getAttribute('role') == 'alert');
+    assert.strictEqual(o2.querySelector('.evlAiRunSt').textContent, 'Another command is still running on this device. Try again when it has finished.');
+    assert.strictEqual(o2.querySelector('.evlAiRunMsg').textContent, 'A command is <i>already</i> running.');
+    assert.strictEqual(o2.querySelector('pre'), null);
+    assert.strictEqual(o2.querySelectorAll('.evlAiRunActs button').length, 0, 'nothing to ask about');
+    ['offline', 'timeout', 'denied', 'disabled', 'unsupported', 'badRequest', 'aborted', 'whatever'].forEach(function (code) { assert.ok(ph.aiCmdErrText(code).length > 10, code); });
+    // no result: the watchdog ends it
+    ph.aiCmdOpen(key2, runBtns(doc)[1]);
+    doc.getElementById('evlCmdTx').value = 'ipconfig';
+    ph.aiCmdGo();
+    var m3 = sentOf(w, 'aiCmdRun').pop();
+    ph.aiCmdDog(ph.st.ai, m3.reqId);
+    var o3 = doc.querySelector('#evlAiLog [data-runout="' + key2 + '"]');
+    assert.strictEqual(o3.querySelector('.evlAiRunSt').textContent, 'No result from the server after 150 seconds.');
+    ph.onAiCmdResult(null, { nodeid: NODE, reqId: m3.reqId, ok: true, output: 'late' });
+    assert.ok(doc.querySelector('#evlAiLog [data-runout="' + key2 + '"]').classList.contains('err'), 'a late result is dropped');
+    // refused by the server's permission check (onAccessDenied -> onAiError with the run's reqId)
+    ph.aiCmdOpen(key2, runBtns(doc)[1]);
+    doc.getElementById('evlCmdTx').value = 'ipconfig';
+    ph.aiCmdGo();
+    var m4 = sentOf(w, 'aiCmdRun').pop();
+    ph.onAccessDenied(null, { nodeid: NODE, act: 'aiCmdRun', reqId: m4.reqId });
+    assert.strictEqual(doc.querySelector('#evlAiLog [data-runout="' + key2 + '"] .evlAiRunSt').textContent, 'You may not run commands on this device.');
+    assert.strictEqual(ph.st.ai.convs[ph.st.ai.chat].status, 'done', 'the chat is not touched');
+    void c;
+    Object.keys(ph._aiCmdT || {}).forEach(function (k) { w.clearTimeout(ph._aiCmdT[k]); });
+});
+
+test('run: "Ask about the output" continues the chat on screen with attach { runId }; the question shows what it is about; attachExpired', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantRun(w); loadHistory(w);
+    var c = runChat(w);
+    var key = runBtns(doc)[0].getAttribute('data-run');
+    var runOnce = function (output, runId) {
+        ph.aiCmdOpen(key, doc.querySelector('#evlAiLog [data-run="' + key + '"]'));
+        ph.aiCmdGo();
+        var m = sentOf(w, 'aiCmdRun').pop();
+        ph.onAiCmdResult(null, { nodeid: NODE, reqId: m.reqId, ok: true, runId: runId, output: output, ms: 80 });
+    };
+    runOnce('Healthy', 'run_1');
+    ph.aiCmdAsk(key);
+    var s = sentOf(w, 'aiSend').pop();
+    assert.deepStrictEqual([s.convId, s.text, plain(s.attach)], ['cvL', 'What does this output show?', { runId: 'run_1' }]);
+    var t = c.turns[c.turns.length - 1];
+    assert.deepStrictEqual(plain(t.attach), { shell: 'powershell', cmd: 'Get-PhysicalDisk -FriendlyName PC01' });
+    var chip = doc.querySelector('#evlAiLog .evlAiTurn.last .evlAiQ .evlAiAtt');
+    assert.strictEqual(chip.textContent, 'About the output of PowerShell: Get-PhysicalDisk -FriendlyName PC01');
+    // while that answer runs: no second question from the output
+    assert.ok(doc.querySelector('#evlAiLog [data-ask]').disabled);
+    assert.strictEqual(ph.aiCmdAsk(key), false);
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvL', turn: 2, text: 'It is healthy.', citations: {}, usage: {}, followups: [], attach: { shell: 'powershell', cmd: 'Get-PhysicalDisk -FriendlyName PC01 | Format-List' } });
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiTurn.last .evlAiAtt').textContent, 'About the output of PowerShell: Get-PhysicalDisk -FriendlyName PC01 | Format-List', 'onAiDone names it as stored');
+    // the composer's text is the question when there is one
+    doc.getElementById('evlAiIn').value = 'Is the disk failing?'; ph.aiDraft(doc.getElementById('evlAiIn'));
+    ph.aiCmdAsk(key);
+    s = sentOf(w, 'aiSend').pop();
+    assert.deepStrictEqual([s.text, plain(s.attach)], ['Is the disk failing?', { runId: 'run_1' }]);
+    assert.strictEqual(doc.getElementById('evlAiIn').value, '');
+    // the expired output comes back as an error of that turn
+    ph.onAiError(null, { nodeid: NODE, convId: 'cvL', turn: 3, code: 'attachExpired', message: '' });
+    assert.match(doc.querySelector('#evlAiLog .evlAiTurn.last .evlAiErr').textContent, /no longer kept on the server/);
+    // a chat whose server conversation is gone: a new one starts with it (aiStart with attach)
+    c.closed = true; c.status = 'done';
+    ph.aiCmdAsk(key);
+    var st = sentOf(w, 'aiStart').pop();
+    assert.deepStrictEqual([st.mode, st.input.text, plain(st.attach)], ['ask', 'What does this output show?', { runId: 'run_1' }]);
+    var nc = ph.st.ai.convs[ph.st.ai.chat];
+    assert.ok(nc !== c && nc.turns[0].attach && nc.turns[0].attach.shell == 'powershell');
+    // onAiStarted names it as the server stored it
+    ph.onAiStarted(null, { nodeid: NODE, reqId: st.reqId, convId: 'cvN', mode: 'ask', attach: { shell: 'cmd', cmd: '<b>ipconfig</b> /all\nsecond line' } });
+    chip = doc.querySelector('#evlAiLog .evlAiTurn .evlAiQ .evlAiAtt');
+    assert.strictEqual(chip.textContent, 'About the output of Command Prompt: <b>ipconfig</b> /all …');
+    assert.strictEqual(chip.querySelectorAll('b').length, 0, 'escaped');
+    // a saved chat shows it too
+    var w2 = makeDom(), ph2 = w2.ph, doc2 = w2.document;
+    grantRun(w2); loadHistory(w2);
+    ph2.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'x', updated: Date.now(), count: 2 }], explains: [] });
+    ph2.aiHistoryOpen(CH1);
+    var it = chatItem(); it.messages[1].attach = { shell: 'bash', cmd: 'df -h' };
+    ph2.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: it });
+    ph2.aiToggle(); if (!ph2.st.ai.open) ph2.aiToggle();
+    var chips = doc2.querySelectorAll('#evlAiLog .evlAiAtt');
+    assert.strictEqual(chips.length, 1);
+    assert.strictEqual(chips[0].textContent, 'About the output of Shell: df -h');
+    if (ph._aiDog) w.clearInterval(ph._aiDog);
+    if (ph2._aiDog) w2.clearInterval(ph2._aiDog);
+    Object.keys(ph._aiCmdT || {}).forEach(function (k) { w.clearTimeout(ph._aiCmdT[k]); });
 });

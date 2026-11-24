@@ -17,13 +17,18 @@ function setup(opts) {
     return { ph: ph, plugin: plugin, reached: reached, gp: gp };
 }
 
-test('registers the three permissions, all denied by default', function () {
+test('registers the four permissions, all denied by default', function () {
     var s = setup();
-    assert.deepStrictEqual(Object.keys(s.ph.registered).sort(), ['deviceAssistant', 'deviceHistoryTab', 'deviceLiveTab']);
+    assert.deepStrictEqual(Object.keys(s.ph.registered).sort(), ['deviceAssistant', 'deviceHistoryTab', 'deviceLiveTab', 'deviceRunCommands']);
     Object.keys(s.ph.registered).forEach(function (k) { assert.strictEqual(s.ph.registered[k].default, 'denied'); });
     assert.strictEqual(s.ph.registered.deviceLiveTab.title, 'Event Log: Live view');
     assert.strictEqual(s.ph.registered.deviceHistoryTab.title, 'Event Log: History and Collect now');
     assert.strictEqual(s.ph.registered.deviceAssistant.title, 'Event Log: Assistant');
+    assert.strictEqual(s.ph.registered.deviceRunCommands.title, 'Event Log: Run suggested commands');
+    assert.strictEqual(s.ph.registered.deviceRunCommands.desc, 'Can run a command the assistant suggested, after confirming it. Also needs the Run commands right on the device.');
+    assert.strictEqual(s.plugin.MESHRIGHT_REMOTECOMMAND, 0x00020000);
+    assert.deepStrictEqual(Object.keys(s.plugin._pluginPermissions()).sort(), Object.keys(s.ph.registered).sort());
+    Object.keys(s.ph.registered).forEach(function (k) { assert.strictEqual(s.plugin._pluginPermissions()[k], s.ph.registered[k].title); });
 });
 
 test('a meshid sent by the browser is ignored: the device group comes from the database', async function () {
@@ -269,6 +274,69 @@ test('checkAccess without an Assistant instance: the reason only for users with 
     assert.deepStrictEqual(await access({}, ROOT, true), [false, 'error', true]);
 });
 
+test('aiCmdRun needs deviceRunCommands and both the Run commands and Details rights; never from an agent', async function () {
+    function denied(me) { return me.sent.filter(function (m) { return m.method == 'onAiCmdResult' && m.ok === false && m.error && m.error.code == 'denied' && m.reqId == 'c1'; }).length; }
+    var cmd = { pluginaction: 'aiCmdRun', nodeid: 'node/d/nA', reqId: 'c1', shell: 'powershell', text: 'Get-Date', runAsUser: 0, proposed: null };
+    // only the Assistant permission
+    var s = setupAi({ grants: { 'user/d/alice|deviceAssistant': true } });
+    var me = F.makeSession(ALICE);
+    s.plugin.serveraction(Object.assign({}, cmd), me, s.gp);
+    await F.settle();
+    assert.strictEqual(s.ai.calls.length, 0);
+    assert.ok(me.sent.some(function (m) { return m.method == 'onAccessDenied' && /deviceRunCommands/.test(m.reason) && m.reqId == 'c1'; }));
+    assert.strictEqual(denied(me), 1, 'onAiCmdResult denied');
+    // the permission, but Details only (no Run commands right) / Run commands only (no Details)
+    for (var r of [0x00100000, 0x00020000, 0x00000008]) {
+        var s2 = setupAi({ grants: { 'user/d/alice|deviceAssistant': true, 'user/d/alice|deviceRunCommands': true }, rights: { 'mesh/d/A': r } });
+        var me2 = F.makeSession(ALICE);
+        s2.plugin.serveraction(Object.assign({}, cmd, { _rights: 0xFFFFFFFF }), me2, s2.gp);
+        await F.settle();
+        assert.strictEqual(s2.ai.calls.length, 0, 'rights 0x' + r.toString(16));
+        assert.ok(me2.sent.some(function (m) { return m.method == 'onAccessDenied' && /0x120000/.test(m.reason); }));
+        assert.strictEqual(denied(me2), 1);
+        assert.match(me2.sent.filter(function (m) { return m.method == 'onAiCmdResult'; })[0].error.message, /Run commands right/);
+    }
+    // both rights (from the database) pass to the Assistant, which checks deviceAssistant itself
+    var s3 = setupAi({ grants: { 'user/d/alice|deviceRunCommands': true }, rights: { 'mesh/d/A': 0x00120000 } });
+    var me3 = F.makeSession(ALICE);
+    s3.plugin.serveraction(Object.assign({}, cmd), me3, s3.gp);
+    await F.settle();
+    assert.deepStrictEqual(s3.ai.calls.map(function (c) { return [c.act, c.rights]; }), [['aiCmdRun', 0x00120000]]);
+    // full device rights pass too
+    var s4 = setupAi({ grants: { 'user/d/alice|deviceRunCommands': true } });
+    s4.plugin.serveraction(Object.assign({}, cmd), F.makeSession(ALICE), s4.gp);
+    await F.settle();
+    assert.strictEqual(s4.ai.calls.length, 1);
+    // an agent connection never reaches it
+    var agent = F.makeAgent('node/d/nA', 'mesh/d/A');
+    s4.plugin.serveraction(Object.assign({}, cmd), agent, s4.gp);
+    await F.settle();
+    assert.strictEqual(s4.ai.calls.length, 1);
+    assert.strictEqual(agent.sent.length, 0);
+    // without an Assistant instance: a result with code disabled
+    var s5 = setupAi({ noAi: true, grants: { 'user/d/alice|deviceRunCommands': true } });
+    var me5 = F.makeSession(ALICE);
+    s5.plugin.serveraction(Object.assign({}, cmd), me5, s5.gp);
+    await F.settle();
+    assert.deepStrictEqual(me5.sent.map(function (m) { return [m.method, m.ok, m.error && m.error.code, m.reqId]; }), [['onAiCmdResult', false, 'disabled', 'c1']]);
+});
+
+test('checkAccess: the run-command flags default to off and come from the Assistant', async function () {
+    var s = setupAi({ noAi: true, grants: { 'user/d/alice|deviceRunCommands': true } });
+    var me = F.makeSession(ALICE);
+    s.plugin.serveraction({ pluginaction: 'checkAccess', nodeid: 'node/d/nA' }, me, s.gp);
+    await F.settle();
+    var a = me.sent.filter(function (m) { return m.method == 'onAccess'; })[0];
+    assert.deepStrictEqual([a.runCommands, a.runShells, a.runAsUser], [false, [], false]);
+    var s2 = setupAi();
+    s2.ai.accessInfo = function () { return Promise.resolve({ assistant: true, runCommands: true, runShells: ['bash'], runAsUser: false }); };
+    var me2 = F.makeSession(ALICE);
+    s2.plugin.serveraction({ pluginaction: 'checkAccess', nodeid: 'node/d/nA' }, me2, s2.gp);
+    await F.settle();
+    var a2 = me2.sent.filter(function (m) { return m.method == 'onAccess'; })[0];
+    assert.deepStrictEqual([a2.runCommands, a2.runShells, a2.runAsUser], [true, ['bash'], false]);
+});
+
 test('reauthorize re-checks rights, permission and the Details right', async function () {
     var gp = F.makeWebserver(F.makeNodes(), { 'mesh/d/A': 0x00100000, 'mesh/d/B': 0x8 });
     var s = setupAi({ grants: { 'user/d/alice|deviceAssistant': true } });
@@ -292,13 +360,17 @@ test('reauthorize re-checks rights, permission and the Details right', async fun
     assert.strictEqual(r.ok, true);
 });
 
-test('hook_processAgentData forwards only software replies', function () {
+test('hook_processAgentData forwards only software replies and runcommands / console messages', function () {
     var s = setupAi();
     var agent = F.makeAgent('node/d/nA', 'mesh/d/A');
     s.plugin.hook_processAgentData({ action: 'msg' }, agent, s.gp);
+    s.plugin.hook_processAgentData({ action: 'msg', type: 'tunnel' }, agent, s.gp);
+    s.plugin.hook_processAgentData({ action: 'coreinfo', type: 'runcommands' }, agent, s.gp);
     s.plugin.hook_processAgentData(null, agent, s.gp);
     s.plugin.hook_processAgentData({ action: 'software', sessionid: 'eventlogai:1' }, agent, s.gp);
-    assert.deepStrictEqual(s.ai.agentData, ['software']);
+    s.plugin.hook_processAgentData({ action: 'msg', type: 'runcommands', sessionid: 'eventlogai:1' }, agent, s.gp);
+    s.plugin.hook_processAgentData({ action: 'msg', type: 'console', value: 'x' }, agent, s.gp);
+    assert.deepStrictEqual(s.ai.agentData, ['software', 'msg', 'msg']);
     s.ai.onAgentData = function () { throw new Error('boom'); };
     s.plugin.hook_processAgentData({ action: 'software' }, agent, s.gp);   // never throws into MeshCentral
     s.plugin.ai = null;
