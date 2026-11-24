@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+
+## [0.8.0] - 2026-11-24
 ### Added
 - Assistant: *Run…* next to *Copy* on suggested commands and diagnosis steps, after an editable confirmation (on Windows with *Run as* agent or logged-in user); the output shows under the command and *Ask about the output* sends it to the Assistant as device data. New permission **Event Log: Run suggested commands** (denied by default; also needs the Run commands right). Each run is a MeshCentral device event and an audit entry
 - Assistant: users can choose the model per chat from a list the administrator sets per endpoint
