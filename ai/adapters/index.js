@@ -5,9 +5,12 @@
 //   format                                   the format id; raw replay blocks are tagged with it
 //   buildRequest(ep, transcript, tools, opts) -> { url, path, headers, body(object) }
 //       ep: { baseUrl, model, apiKey|null, maxOutputTokens, numCtx, ollamaNative,
-//             thinking, temperature, topP, topK, seed }   generation settings, null = not sent (server default);
-//             openai-chat: reasoning_effort (off -> 'none'), temperature, top_p, top_k, seed (Ollama native: think
-//             false/true and options.*); openai-responses: reasoning.effort, temperature, top_p; anthropic: none
+//             thinking, thinkingMap, ollamaThinkLevels, temperature, topP, topK, seed }   generation settings, null = not
+//             sent (server default); thinking is a level (off|low|medium|high|max) sent as thinkingMap[level]
+//             (common.requestThinking; no map: off -> 'none', max not sent; numbers are sent as numbers);
+//             openai-chat: reasoning_effort, temperature, top_p, top_k, seed (Ollama native: think false for
+//             none/minimal, else the level string when ollamaThinkLevels, else true, and options.*);
+//             openai-responses: reasoning.effort, temperature, top_p; anthropic: none
 //       transcript: { system, items: [ {role:'user',text} | {role:'assistant',text,calls:[{id,name,args,argsText}],raw}
 //                                    | {role:'tool',results:[{callId,name,content,isError}]} ] }
 //       raw (assistant items): { format, items:[provider-native blocks] } as returned by llm.stream; replayed
@@ -24,7 +27,8 @@
 //       a 400 naming a generation setting the request carried
 //   listModels(ep, deps) -> Promise<[{ id, ctx?, tools? }]>
 //   probe(ep, deps) -> Promise<{ ok, tools: true|false|null, ctx: number|null, server: string|null, detail, code?,
-//                                thinking?: { supported, levels, serverDefault, verified, detail, fixed? },
+//                                thinking?: { supported, levels, serverDefault, verified, detail, fixed?, accepted?,
+//                                             reasoned?, proposed?, ollamaLevels? },
 //                                genDefaults?: { temperature, topP, topK, seed, maxTokens } }>
 //       deps: { request(opts) } = ai/http.js request bound to the endpoint's pinned lookup / proxy agent.
 

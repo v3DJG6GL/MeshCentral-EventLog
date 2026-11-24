@@ -1,7 +1,8 @@
 'use strict';
 // Anthropic Messages API (anthropic-version 2026-10-21).
 // - temperature / top_p / top_k are never sent (400 on this API version), and thinking cannot be set: the
-//   endpoint's generation settings are ignored for this format. Thinking blocks stream as {t:'thinking'} counts.
+//   endpoint's generation settings (and its thinking map) are ignored for this format. Thinking blocks stream as
+//   {t:'thinking'} counts.
 // - tool_choice: only {type:'none'} is sent (when tools are offered and opts.toolChoice is 'none');
 //   'auto' is the default and is left out. Forced 'any'/'tool' are rejected by current models and never used.
 // - assistant turns are replayed from raw content blocks unchanged (thinking blocks with signatures,

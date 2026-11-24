@@ -36,7 +36,7 @@ async function show(ep, deps) {
     if (typeof j.parameters === 'string') { const m = /(?:^|\n)\s*num_ctx\s+(\d+)/.exec(j.parameters); if (m) numCtx = C.num(m[1]); }
     const details = C.isObj(j.details) ? j.details : {};
     const thinks = caps ? caps.indexOf('thinking') >= 0 : null;
-    const thinking = caps ? { supported: thinks, levels: thinks ? C.THINK_LEVELS.slice() : [], serverDefault: null, verified: false, detail: 'reported by Ollama' } : null;
+    const thinking = caps ? { supported: thinks, levels: thinks ? C.THINK_LEVELS.filter(function (l) { return C.DEFAULT_THINKING_MAP[l] != null; }) : [], serverDefault: null, verified: false, detail: 'reported by Ollama' } : null;
     return { capabilities: caps || [], tools: caps ? caps.indexOf('tools') >= 0 : null, ctx: ctx, numCtx: numCtx, family: details.family || arch || null, thinking: thinking, genDefaults: modelfileDefaults(j.parameters) };
 }
 

@@ -18,9 +18,9 @@
 //   remove(userid, nodeid, kind, key)      -> Promise<bool>
 //   saveChatTurn({ userid, nodeid, chatId, question, done, steps, endpointName, model, cont, type, window, range, gen })
 //                                          -> Promise<bool>   type 'diagnosis' (with window '24h'|'7d'|'restart' and
-//                                             range) on the first message of a diagnosis chat; gen { thinking?,
-//                                             temperature? } = the chat's answer settings (doc.gen, absent = the
-//                                             endpoint's; ai/index.js validated them)
+//                                             range) on the first message of a diagnosis chat; gen { model?,
+//                                             thinking?, temperature? } = the chat's model and answer settings
+//                                             (doc.gen, absent = the endpoint's; ai/index.js validated them)
 //   setFollowups(userid, nodeid, chatId, followups, expect) -> Promise<{ ok, code? }>   replaces the suggested
 //                                             follow-up questions of the chat's last message; expect { count?, q? }:
 //                                             the chat must still have that many messages and that last question
@@ -50,7 +50,7 @@ const MAX_CITES = 60, MAX_CITE_MSG = 4000, MAX_TEXT = 200000, MAX_Q = 4000, MAX_
 const WINDOWS = ['24h', '7d', 'restart'];
 const CHAT_ID_RE = /^ch[0-9a-f]{24}$/;
 const KINDS = ['chat', 'diagnosis', 'explain'];
-const THINK = ['off', 'low', 'medium', 'high'];
+const THINK = ['off', 'low', 'medium', 'high', 'max'];
 
 function isObj(v) { return v != null && typeof v === 'object' && !Array.isArray(v); }
 function size(v) { try { return Buffer.byteLength(JSON.stringify(v), 'utf8'); } catch (e) { return Infinity; } }
@@ -63,10 +63,11 @@ function titleOf(q) {
     return t.length > 80 ? t.slice(0, 79).trimEnd() + '…' : (t || 'Chat');
 }
 
-// the answer settings of a chat as stored: { thinking?, temperature? }, null when none is set
+// the answer settings of a chat as stored: { model?, thinking?, temperature? }, null when none is set
 function genOf(g) {
     if (!isObj(g)) return null;
     const o = {};
+    if (typeof g.model === 'string' && g.model && g.model.length <= 200 && !/[\u0000-\u001f\u007f]/.test(g.model)) o.model = g.model;
     if (THINK.indexOf(g.thinking) >= 0) o.thinking = g.thinking;
     if (typeof g.temperature === 'number' && Number.isFinite(g.temperature) && g.temperature >= 0 && g.temperature <= 2) o.temperature = Math.round(g.temperature * 100) / 100;
     return Object.keys(o).length ? o : null;

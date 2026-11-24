@@ -161,7 +161,13 @@ function makeStore(o) {
         settings: defaultSettings(o.settings), endpoints: {}, acks: new Set(), audits: [], caps: [], quirks: [],
         getEndpoint: function (id) { return Promise.resolve(st.endpoints[id] ? JSON.parse(JSON.stringify(st.endpoints[id])) : null); },
         resolveKey: function (ep) { return ep && ep.key ? 'sk-test-KEY123' : null; },
-        setCaps: function (id, caps) { st.caps.push({ id: id, caps: caps }); if (st.endpoints[id]) st.endpoints[id].caps = caps; return Promise.resolve(); },
+        setCaps: function (id, caps, model) {
+            st.caps.push({ id: id, caps: caps, model: model || null });
+            const e = st.endpoints[id];
+            if (e && (model == null || model === e.model)) e.caps = caps;
+            else if (e) e.capsByModel = (e.capsByModel || []).filter(function (x) { return x.model !== model; }).concat([{ model: model, caps: caps }]);
+            return Promise.resolve();
+        },
         setQuirks: function (id, q) { st.quirks.push({ id: id, q: q }); return Promise.resolve(); },
         getSettings: function () { return Promise.resolve(JSON.parse(JSON.stringify(st.settings))); },
         getAck: function (u, e) { return Promise.resolve(st.acks.has(u + ':' + e)); },

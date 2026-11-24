@@ -583,7 +583,11 @@
         ['meshEvents', 'MeshCentral device events'], ['notes', 'Device notes'], ['software', 'Installed software (asks the agent live; needs the Software right)']
       ];
       var EL_AI_STEPS = { resolve: 'Resolve address', connect: 'Connect', auth: 'API key accepted', model: 'Model available', tools: 'Tool calls', context: 'Context size', thinking: 'Thinking', generation: 'Generation defaults' };
-      var EL_AI_LEVELS = [['off', 'Off'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High']];
+      var EL_AI_LEVELS = [['off', 'Off'], ['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['max', 'Max']];
+      // what a thinking level sends (ai/adapters/common.js): a request value, a whole number 1-100, or null (not offered)
+      var EL_AI_TVALS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+      var EL_AI_TDEF = { off: 'none', low: 'low', medium: 'medium', high: 'high', max: null };
+      var EL_AI_MAX_MODELS = 30;
 
       function elAiIsOn() { return !!(aiAdmin && aiAdmin.full && aiAdmin.available); }
       function elAiFmtNum(n) { n = Number(n); return isFinite(n) ? n.toLocaleString() : ''; }
@@ -920,12 +924,16 @@
         var defWord = null;
         EL_AI_LEVELS.forEach(function(l) { if (l[0] === def) defWord = l[1]; });
         sel.options[0].textContent = defWord ? defWord + ' (server default)' : 'Server default';
-        var levels = (th && Array.isArray(th.levels)) ? th.levels : null;
+        // a level is offered when the endpoint model's thinking map gives it a value the server did not refuse
+        var levels = (th && Array.isArray(th.levels)) ? th.levels : null, acc = (th && Array.isArray(th.accepted)) ? th.accepted : null;
+        var map = (elAi.edit && elAi.edit.map) || EL_AI_TDEF;
         for (var i = 1; i < sel.options.length; i++) {
-          var o = sel.options[i], off = !!(levels && levels.indexOf(o.value) < 0);
-          o.disabled = off;
-          if (off) o.title = (th && th.supported === false && !levels.length) ? 'The server does not take a thinking setting (found by Test connection)' : 'The server does not accept this level (found by Test connection)';
-          else o.removeAttribute('title');
+          var o = sel.options[i], v = map[o.value], why = null;
+          if (v == null) why = 'No thinking value is set for this level (see Models and thinking)';
+          else if (acc) { if (!elAiAccepted(acc, v)) why = 'The server does not accept this level (found by Test connection)'; }
+          else if (levels && levels.indexOf(o.value) < 0 && v === EL_AI_TDEF[o.value]) why = (th && th.supported === false && !levels.length) ? 'The server does not take a thinking setting (found by Test connection)' : 'The server does not accept this level (found by Test connection)';
+          o.disabled = !!why;
+          if (why) o.title = why; else o.removeAttribute('title');
         }
         var anth = (fk.format == 'anthropic'), resp = (fk.format == 'openai-responses');
         sel.disabled = anth;
@@ -971,7 +979,14 @@
         Q('elAiMaxOut').value = ep ? num(ep.maxOutputTokens) : '';
         Q('elAiTimeout').value = (ep && Number(ep.timeoutSec) !== 120) ? num(ep.timeoutSec) : '';   // 120 s is the default an empty field stores
         Q('elAiCtx').value = ep ? num(ep.contextTokens) : '';
-        Q('elAiThinking').value = (ep && ['off', 'low', 'medium', 'high'].indexOf(ep.thinking) >= 0) ? ep.thinking : '';
+        Q('elAiThinking').value = (ep && ['off', 'low', 'medium', 'high', 'max'].indexOf(ep.thinking) >= 0) ? ep.thinking : '';
+        // models users may choose and the thinking maps; caps found per listed model (same server type and address)
+        elAi.edit.map = elAiMapNorm(ep && ep.thinkingMap);
+        elAi.edit.um = elAiUmNorm(ep && ep.userModels);
+        elAi.edit.modelCaps = {};
+        ((ep && Array.isArray(ep.capsByModel)) ? ep.capsByModel : []).forEach(function(x) { if (x && typeof x.model == 'string' && x.caps) elAi.edit.modelCaps[x.model] = x.caps; });
+        Q('elAiUserModels').checked = elAi.edit.um.enabled;
+        Q('elAiUmNew').value = ''; setStatus('elAiUmStatus', '', '');
         Q('elAiTemp').value = ep ? num(ep.temperature) : '';
         Q('elAiTopP').value = ep ? num(ep.topP) : '';
         Q('elAiTopK').value = ep ? num(ep.topK) : '';
@@ -983,6 +998,7 @@
         elAiCount('elAiEpExtraCount', Q('elAiEpExtra').value.length, EL_AI_EXTRA_MAX);
         elAi.edit.capsFor = ep ? elAiFormTarget(true) : null;
         elAi.edit.modelsFor = null;
+        elAi.edit.modelCapsFor = ep ? elAiFormTarget(false) : null;
         Q('elAiTestOut').hidden = true; Q('elAiTestOut').textContent = '';
         setStatus('elAiFormStatus', '', ''); setStatus('elAiModelsStatus', '', '');
         elAiKeyState();
@@ -1043,6 +1059,9 @@
           else if (/[\s\u0000-\u001f\u007f]/.test(key)) { elAiFieldError(Q('elAiKey'), 'The API key must not contain spaces or line breaks.'); errs.push(Q('elAiKey')); }
         }
         if (all && model === '') { elAiFieldError(Q('elAiModel'), 'Enter a model name, or use Fetch models.'); errs.push(Q('elAiModel')); }
+        var maps = all ? elAiReadMaps(errs) : null;
+        var th = Q('elAiThinking');
+        if (all && maps && !th.disabled && th.value && maps.map[th.value] == null) { elAiFieldError(th, 'This level has no thinking value; set one under Models and thinking, or pick another level.'); errs.push(th); }
         var numCtx = all ? elAiReadInt('elAiNumCtx', 1024, 4194304, true, errs) : null;
         var maxOut = all ? elAiReadInt('elAiMaxOut', 64, 128000, true, errs) : null;
         var timeout = all ? elAiReadInt('elAiTimeout', 10, 900, true, errs) : null;
@@ -1061,6 +1080,7 @@
           thinking: (Q('elAiThinking').disabled || !Q('elAiThinking').value) ? null : Q('elAiThinking').value,
           temperature: temp, topP: topP, topK: topK, seed: seed
         };
+        if (maps) { ep.thinkingMap = maps.map; ep.userModels = maps.userModels; }
         if (elAi.edit && elAi.edit.id) ep.id = elAi.edit.id;
         var out = { endpoint: ep, keyAction: elAiKeyAction() };
         if (out.keyAction == 'set') out.key = Q('elAiKey').value.trim();
@@ -1084,9 +1104,11 @@
         elAi.edit.sentTarget[forTest ? 'test' : 'models'] = elAiFormTarget(forTest);
         // a saved endpoint tested unchanged is sent by id only: the server then records the result as its last test
         var stored = (forTest && elAi.edit && elAi.edit.id) ? elAi.endpoints.filter(function(x) { return x.id === elAi.edit.id; })[0] : null;
-        if (stored && d.keyAction == 'keep' && ['name', 'format', 'preset', 'baseUrl', 'model', 'contextTokens', 'numCtx', 'maxOutputTokens', 'timeoutSec', 'toolMode', 'allowLinkLocal', 'thinking', 'temperature', 'topP', 'topK', 'seed'].every(function(k) {
+        if (stored && d.keyAction == 'keep' && ['name', 'format', 'preset', 'baseUrl', 'model', 'contextTokens', 'numCtx', 'maxOutputTokens', 'timeoutSec', 'toolMode', 'allowLinkLocal', 'thinking', 'temperature', 'topP', 'topK', 'seed', 'thinkingMap', 'userModels'].every(function(k) {
               var a = d.endpoint[k], b = stored[k];
               if (k == 'allowLinkLocal') return !!a === !!b;
+              if (k == 'thinkingMap') return JSON.stringify(elAiMapNorm(a)) === JSON.stringify(elAiMapNorm(b));
+              if (k == 'userModels') return JSON.stringify(elAiUmNorm(a)) === JSON.stringify(elAiUmNorm(b));
               if (k == 'baseUrl') return String(a || '').replace(/\/+$/, '') === String(b || '').replace(/\/+$/, '');
               return (a == null || a === '' ? null : a) === (b == null || b === '' ? null : b) || (k == 'timeoutSec' && a == null && b == 120);
             })) return { id: stored.id };
@@ -1101,9 +1123,22 @@
       function elAiTest() {
         var p = elAiDraftPayload(true);
         if (p == null) { setStatus('elAiFormStatus', 'err', 'Check the marked fields.'); return false; }
+        elAi.edit.testModel = null;
         Q('elAiTestOut').hidden = true;
         setStatus('elAiFormStatus', 'pending', 'Testing the connection\u2026', 'elAiTestBtn');
         elAiSend('test', 'aiAdminTest', p, 40000, function() { setStatus('elAiFormStatus', 'err', '\u2717 No answer from the server within 40 seconds.', 'elAiTestBtn'); });   // the server gives up after 30 s and reports the failing step
+        return false;
+      }
+      // Test of one listed model: the same steps; its caps (accepted thinking values, context) go with that row
+      function elAiTestModel(id) {
+        var p = elAiDraftPayload(true);
+        if (p == null) { setStatus('elAiFormStatus', 'err', 'Check the marked fields.'); return false; }
+        p.model = id;
+        elAi.edit.testModel = id;
+        elAi.edit.sentModelTarget = elAiFormTarget(false);
+        Q('elAiTestOut').hidden = true;
+        setStatus('elAiFormStatus', 'pending', 'Testing the model ' + id + '\u2026', 'elAiTestBtn');
+        elAiSend('test', 'aiAdminTest', p, 40000, function() { setStatus('elAiFormStatus', 'err', '\u2717 No answer from the server within 40 seconds.', 'elAiTestBtn'); });
         return false;
       }
       function elAiFetchModels() {
@@ -1123,13 +1158,15 @@
         if (ctx) facts.push('Context: ' + elAiFmtNum(ctx) + ' tokens');
         if (caps && caps.server && /ollama/i.test(String(caps.server))) facts.push('Server: Ollama');
         box.textContent = facts.join(' \u00B7 ');
+        elAiUmRender();
         elAiLimitHints();
       }
       function elAiRenderTest(msg) {
         var out = Q('elAiTestOut');
         out.textContent = '';
         var h = document.createElement('div'); h.className = msg.ok ? 'elAiOk' : 'elAiBad';
-        h.textContent = msg.ok ? '\u2713 The connection works.' : '\u2717 The connection test failed.';
+        var mdl = (typeof msg.model == 'string' && msg.model) ? msg.model : null;
+        h.textContent = mdl ? (msg.ok ? '\u2713 The model ' + mdl + ' works.' : '\u2717 The test of the model ' + mdl + ' failed.') : (msg.ok ? '\u2713 The connection works.' : '\u2717 The connection test failed.');
         out.appendChild(h);
         var ul = document.createElement('ul');
         (Array.isArray(msg.steps) ? msg.steps : []).forEach(function(s) {
@@ -1232,7 +1269,7 @@
           inp.addEventListener('input', function() { elAi.starters[os][i] = inp.value; elAiStartState(os); });
           var mk = function(cls, label, svg, fn, disabled) {
             var b = document.createElement('button'); b.type = 'button'; b.className = 'elAiIconBtn ' + cls; b.setAttribute('aria-label', label); b.title = label; b.disabled = !!disabled;
-            b.innerHTML = '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="' + svg + '"/></svg>';
+            b.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' + svg + '"/></svg>';
             b.addEventListener('click', fn);
             return b;
           };
@@ -1567,7 +1604,7 @@
       // ---- collapsible parts: closed until opened; the open state is remembered per browser ----
       // System prompt, Starter questions, Full prompt preview and the endpoint editor's Advanced options. Each header is a
       // button (aria-expanded / aria-controls) with a one-line summary of what is set.
-      var EL_AI_COLL = ['prompt', 'starters', 'preview', 'adv'];
+      var EL_AI_COLL = ['prompt', 'starters', 'preview', 'models', 'adv'];
       function elAiCollKey(k) { return 'evl_admin_open_' + k; }
       function elAiCollIsOpen(k) { var b = Q('elAiColl_' + k); return !!b && b.getAttribute('aria-expanded') == 'true'; }
       function elAiCollSet(k, open, remember) {
@@ -1597,6 +1634,7 @@
       // the header's one-line state: what is set now (unsaved edits included) and whether it is saved
       function elAiCollSummary(k) {
         if (k == 'adv') { elAiAdvSummary(); return; }
+        if (k == 'models') { elAiUmSummary(); return; }
         var box = Q('elAiCollSum_' + k); if (box == null) return;
         var items = [];   // [text, tag class]; class null = plain text
         var s = elAi.settings;
@@ -1839,7 +1877,12 @@
       });
       parent.pluginHandler['eventlog'].aiAdminTestResult = elAiHandler(function(msg) {
         if (elAiTake(msg) == null || elAi.edit == null) return;
-        if (msg.caps && typeof msg.caps == 'object') { elAi.edit.caps = msg.caps; elAi.edit.capsFor = elAi.edit.sentTarget && elAi.edit.sentTarget.test; }
+        var e = elAi.edit;
+        if (typeof msg.model == 'string' && msg.model) {
+          // a listed model's caps belong to its row (same server type and address)
+          if (e.modelCapsFor !== e.sentModelTarget) { e.modelCaps = {}; e.modelCapsFor = e.sentModelTarget; }
+          if (msg.caps && typeof msg.caps == 'object') e.modelCaps[msg.model] = msg.caps;
+        } else if (msg.caps && typeof msg.caps == 'object') { e.caps = msg.caps; e.capsFor = e.sentTarget && e.sentTarget.test; }
         setStatus('elAiFormStatus', msg.ok ? 'ok' : 'err', msg.ok ? '\u2713 Test passed.' : '\u2717 Test failed; see the steps above.', 'elAiTestBtn');
         elAiRenderTest(msg);
         elAiServerNet('test', msg.network);
@@ -2224,6 +2267,167 @@
         box.textContent = parts.join(' ');
       }
 
+      // ---- endpoint editor: models users may choose, thinking map per model ----
+      function elAiIsTVal(v) { return EL_AI_TVALS.indexOf(v) >= 0 || (typeof v == 'number' && Math.floor(v) === v && v >= 1 && v <= 100); }
+      function elAiMapNorm(m) {
+        var o = {};
+        EL_AI_LEVELS.forEach(function(l) { var v = (m && typeof m == 'object' && Object.prototype.hasOwnProperty.call(m, l[0])) ? m[l[0]] : EL_AI_TDEF[l[0]]; o[l[0]] = (v === null || elAiIsTVal(v)) ? v : EL_AI_TDEF[l[0]]; });
+        return o;
+      }
+      function elAiUmNorm(u) {
+        var list = (u && Array.isArray(u.models)) ? u.models : [];
+        return { enabled: !!(u && u.enabled === true), models: list.filter(function(m) { return m && typeof m.id == 'string' && m.id; }).map(function(m) { return { id: m.id, map: elAiMapNorm(m.thinkingMap || m.map) }; }) };
+      }
+      function elAiAccepted(acc, v) { return typeof v == 'number' ? acc.some(function(x) { return typeof x == 'number'; }) : acc.indexOf(v) >= 0; }
+      // caps of a row: null id = the endpoint's model (elAiFormCaps), else what a test of that listed model found
+      function elAiRowCaps(id) {
+        var e = elAi.edit; if (!e) return null;
+        if (id == null) return elAiFormCaps();
+        return (e.modelCaps && e.modelCapsFor === elAiFormTarget(false)) ? (e.modelCaps[id] || null) : null;
+      }
+      function elAiMapSame(a, b) { return JSON.stringify(elAiMapNorm(a)) === JSON.stringify(elAiMapNorm(b)); }
+      function elAiUmRows() {
+        var e = elAi.edit; if (!e) return [];
+        var rows = [{ id: null, name: Q('elAiModel').value.trim(), map: e.map }];
+        e.um.models.forEach(function(m) { rows.push({ id: m.id, name: m.id, map: m.map }); });
+        return rows;
+      }
+      function elAiUmRender(focus) {
+        var tb = Q('elAiUmRows'), e = elAi.edit; if (tb == null || !e || !e.um) return;
+        var anth = (elAiFormKind().format == 'anthropic'), on = Q('elAiUserModels').checked;
+        tb.textContent = '';
+        elAiUmRows().forEach(function(r, ri) {
+          var tr = document.createElement('tr'); if (r.id != null && !on) tr.className = 'off';
+          var rowName = r.name || 'the endpoint\u2019s model';
+          var nm = document.createElement('td'); nm.className = 'elAiMapName';
+          var t = document.createElement('span'); t.textContent = r.name || '(no model yet)'; nm.appendChild(t);
+          if (r.id == null) nm.appendChild(elAiTag('Default'));
+          tr.appendChild(nm);
+          var caps = elAiRowCaps(r.id), T = (caps && caps.thinking) || null, acc = (T && Array.isArray(T.accepted)) ? T.accepted : null;
+          EL_AI_LEVELS.forEach(function(l) {
+            var td = document.createElement('td'), cur = r.map[l[0]];
+            var sel = document.createElement('select'); sel.className = 'elAiMapSel'; sel.id = 'elAiMapS_' + ri + '_' + l[0];
+            sel.setAttribute('aria-label', l[1] + ': thinking value for ' + rowName);
+            var opt = function(text, value, v) {
+              var o = new Option(text, value);
+              if (acc && v !== undefined) { var ok = elAiAccepted(acc, v); o.textContent = text + (ok ? ' \u2713' : ' \u2717'); o.title = ok ? 'Accepted by the server in the last test' : 'Refused by the server in the last test'; }
+              sel.appendChild(o);
+            };
+            opt('\u2014', '');
+            EL_AI_TVALS.forEach(function(v) { opt(v, v, v); });
+            opt('number', 'n', 50);
+            sel.options[0].title = 'Not offered';
+            sel.value = (cur == null) ? '' : (typeof cur == 'number' ? 'n' : String(cur));
+            var num = document.createElement('input'); num.type = 'number'; num.min = '1'; num.max = '100'; num.step = '1'; num.className = 'elAiMapNum'; num.id = 'elAiMapN_' + ri + '_' + l[0];
+            num.setAttribute('aria-label', l[1] + ': number for ' + rowName);
+            num.hidden = (typeof cur != 'number'); num.value = (typeof cur == 'number') ? String(cur) : '50';
+            sel.disabled = num.disabled = anth;
+            sel.addEventListener('change', function() {
+              num.hidden = (sel.value != 'n');
+              r.map[l[0]] = (sel.value === '') ? null : (sel.value == 'n') ? Number(num.value) : sel.value;
+              if (!num.hidden) num.focus();
+              elAiUmChanged();
+            });
+            num.addEventListener('input', function() { r.map[l[0]] = Number(String(num.value).trim() === '' ? NaN : num.value); elAiUmChanged(); });
+            td.appendChild(sel); td.appendChild(num);
+            tr.appendChild(td);
+          });
+          var act = document.createElement('td'); act.className = 'elAiMapAct';
+          var tb2 = document.createElement('button'); tb2.type = 'button'; tb2.className = 'elQuiet elAiMapTest'; tb2.textContent = 'Test';
+          tb2.setAttribute('aria-label', 'Test ' + rowName);
+          tb2.addEventListener('click', function() { if (r.id == null) elAiTest(); else elAiTestModel(r.id); });
+          act.appendChild(tb2);
+          if (T && T.proposed && !anth) {
+            var ub = document.createElement('button'); ub.type = 'button'; ub.className = 'elQuiet elAiMapUse'; ub.textContent = 'Use tested values';
+            ub.setAttribute('aria-label', 'Use the tested thinking values for ' + rowName);
+            ub.disabled = elAiMapSame(r.map, T.proposed);
+            ub.addEventListener('click', function() {
+              var p = elAiMapNorm(T.proposed);
+              Object.keys(p).forEach(function(k) { r.map[k] = p[k]; });
+              elAiUmRender({ row: ri, cls: 'elAiMapTest' });
+              elAiUmChanged();
+              setStatus('elAiUmStatus', 'ok', '\u2713 Tested values set for ' + rowName + '; save the endpoint to keep them.');
+            });
+            act.appendChild(ub);
+          }
+          if (r.id != null) {
+            var rb = document.createElement('button'); rb.type = 'button'; rb.className = 'elAiIconBtn rm elAiMapRm';
+            rb.setAttribute('aria-label', 'Remove ' + r.id); rb.title = 'Remove ' + r.id;
+            rb.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg>';
+            rb.addEventListener('click', function() { elAiUmRemove(ri - 1); });
+            act.appendChild(rb);
+          }
+          tr.appendChild(act);
+          tb.appendChild(tr);
+        });
+        Q('elAiUmAdd').disabled = e.um.models.length >= EL_AI_MAX_MODELS;
+        var note = Q('elAiMapNote'), txt = '';
+        if (anth) txt = 'The Anthropic Messages API takes no thinking setting: only the model can be chosen.';
+        else if (!on && e.um.models.length) txt = 'The listed models are kept but not offered to users while the choice is off.';
+        note.textContent = txt; note.hidden = !txt;
+        if (focus) {
+          var row = tb.children[focus.row] || tb.children[tb.children.length - 1];
+          var f = row ? row.querySelector('.' + focus.cls) : null;
+          if (!f || f.disabled) f = (row && row.querySelector('.elAiMapTest')) || Q('elAiUmNew');
+          if (focus.cls == 'add') f = Q('elAiUmNew');
+          if (f) f.focus();
+        }
+        elAiUmSummary();
+      }
+      function elAiUmChanged() { elAiGenHints(); elAiUmSummary(); }
+      function elAiUmToggle() { if (elAi.edit && elAi.edit.um) { elAi.edit.um.enabled = Q('elAiUserModels').checked; elAiUmRender(); } }
+      function elAiUmAdd() {
+        var e = elAi.edit; if (!e || !e.um) return false;
+        var i = Q('elAiUmNew'), id = i.value.trim(), msg = null;
+        elAiClearErrors(Q('elAiUmAddRow'));
+        if (!id) msg = 'Enter a model name, or pick one after Fetch models.';
+        else if (id.length > 200 || /[\u0000-\u001f\u007f]/.test(id)) msg = 'Model names have at most 200 characters and no control characters.';
+        else if (id === Q('elAiModel').value.trim()) msg = 'This is the endpoint\u2019s model; it is always available.';
+        else if (e.um.models.some(function(m) { return m.id === id; })) msg = 'This model is already listed.';
+        else if (e.um.models.length >= EL_AI_MAX_MODELS) msg = 'At most ' + EL_AI_MAX_MODELS + ' models can be listed.';
+        if (msg) { elAiFieldError(i, msg); i.focus(); return false; }
+        e.um.models.push({ id: id, map: elAiMapNorm(null) });
+        i.value = '';
+        elAiUmRender({ cls: 'add' });
+        setStatus('elAiUmStatus', 'ok', '\u2713 Added ' + id + '; save the endpoint to keep it.');
+        return false;
+      }
+      function elAiUmRemove(i) {
+        var e = elAi.edit; if (!e || !e.um || !e.um.models[i]) return;
+        var id = e.um.models[i].id;
+        e.um.models.splice(i, 1);
+        elAiUmRender({ row: i + 1, cls: 'elAiMapRm' });
+        setStatus('elAiUmStatus', 'ok', '\u2713 Removed ' + id + '; save the endpoint to keep the change.');
+      }
+      // the maps of the form for a draft: { map, userModels } (null with inline errors for numbers out of range)
+      function elAiReadMaps(errs) {
+        var e = elAi.edit; if (!e || !e.um) return null;
+        var bad = false;
+        elAiUmRows().forEach(function(r, ri) {
+          EL_AI_LEVELS.forEach(function(l) {
+            var v = r.map[l[0]];
+            if (typeof v == 'number' && !elAiIsTVal(v)) { var n = Q('elAiMapN_' + ri + '_' + l[0]); if (n) { elAiFieldError(n, 'Enter a whole number from 1 to 100.'); errs.push(n); } bad = true; }
+          });
+        });
+        if (bad) return null;
+        return {
+          map: elAiMapNorm(e.map),
+          userModels: { enabled: Q('elAiUserModels').checked, models: e.um.models.map(function(m) { return { id: m.id, thinkingMap: elAiMapNorm(m.map) }; }) }
+        };
+      }
+      function elAiUmSummary() {
+        var box = Q('elAiCollSum_models'); if (box == null) return;
+        var e = elAi.edit;
+        if (!e || !e.um) { box.textContent = ''; return; }
+        var n = e.um.models.length, parts = [];
+        parts.push(Q('elAiUserModels').checked ? 'Users choose from ' + (n + 1) + (n ? ' models.' : ' model (add more below).') : 'Users get the endpoint\u2019s model.');
+        if (elAiFormKind().format != 'anthropic') {
+          var std = elAiMapSame(e.map, EL_AI_TDEF) && e.um.models.every(function(m) { return elAiMapSame(m.map, EL_AI_TDEF); });
+          parts.push(std ? 'Thinking values: standard.' : 'Thinking values: set per model.');
+        }
+        box.textContent = parts.join(' ');
+      }
+
       function elLayoutInit() {
         var any = function() { elBarUpdate(); };
         document.addEventListener('input', any);
@@ -2234,6 +2438,7 @@
         });
         Q('elAiEpForm').addEventListener('input', elAiAdvSummary);
         Q('elAiEpForm').addEventListener('change', elAiAdvSummary);
+        Q('elAiUmNew').addEventListener('keydown', function(e) { if (e.key == 'Enter') { e.preventDefault(); elAiUmAdd(); } });
         Q('elaiEndpointId').addEventListener('change', function() { elAi.cfgChosen = Q('elaiEndpointId').value; });
         Q('elAsFilter').addEventListener('input', function(e) { e.stopPropagation(); elAsFilter(); });
         ['elAsGroups', 'elAsDevices'].forEach(function(id) { Q(id + 'All').addEventListener('change', function(e) { e.stopPropagation(); elAsSelectAll(id, Q(id + 'All').checked); }); });
@@ -2493,6 +2698,18 @@
     .elAiStartRow { white-space: nowrap; }
     #eventLogAdmin input.elAiStartIn { width: calc(100% - 114px); min-width: 120px; white-space: normal; }
     #eventLogAdmin button.elAiIconBtn { padding: 0; width: 32px; min-height: 32px; margin-left: 4px; line-height: 0; color: var(--muted); }
+    .elAiMapTbl th, .elAiMapTbl td { padding: 6px 4px; vertical-align: middle; }
+    .elAiMapTbl th:first-child, .elAiMapTbl td:first-child { padding-left: 0; }
+    .elAiMapTbl th:last-child, .elAiMapTbl td:last-child { padding-right: 0; }
+    #eventLogAdmin .elAiMapTbl select { font-size: 13px; padding-left: 6px; padding-right: 2px; font-variant-numeric: tabular-nums; }
+    #eventLogAdmin .elAiMapTbl input.elAiMapNum { display: block; width: 4.8em; margin-top: 4px; font-size: 13px; font-variant-numeric: tabular-nums; }
+    #eventLogAdmin .elAiMapTbl input.elAiMapNum[hidden] { display: none; }
+    .elAiMapName { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; min-width: 110px; max-width: 24ch; }
+    .elAiMapName .elAiTag { margin-left: 6px; font-family: var(--font); }
+    .elAiMapTbl tr.off .elAiMapName > span:first-child { color: var(--muted); }
+    .elAiMapAct { text-align: right; min-width: 8.5em; }
+    #eventLogAdmin .elAiMapAct button.elQuiet { min-height: 28px; padding: 3px 6px; font-size: 13px; }
+    #eventLogAdmin .elAiMapAct button.elAiIconBtn { vertical-align: middle; }
     #eventLogAdmin button.elAiIconBtn:hover:not(:disabled) { color: var(--ink); }
     #eventLogAdmin button.elAiIconBtn.rm:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); }
     .elAiStartNone { list-style: none; margin-left: -1.9em !important; font-size: 13px; }
@@ -2855,6 +3072,24 @@
                 </div>
 
                 <div class="coll">
+                  <h4 class="coll-h"><button type="button" class="coll-btn" id="elAiColl_models" aria-expanded="false" aria-controls="elAiModelsBody"><svg class="elAiChev" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="coll-t" id="elAiModelsT">Models and thinking</span><span class="coll-s" id="elAiCollSum_models"></span></button></h4>
+                  <div id="elAiModelsBody" class="coll-body" data-coll="models" hidden>
+                    <div><label class="ck"><input type="checkbox" id="elAiUserModels" aria-describedby="elAiUserModelsHelp" onchange="elAiUmToggle();"><span>Users can choose the model</span></label>
+                      <small id="elAiUserModelsHelp" class="elAiHelp">Users pick one of the models below per chat. The endpoint&rsquo;s model is the default and always available. Every model uses this endpoint&rsquo;s address, API key and settings.</small></div>
+                    <div class="elScroll"><table id="elAiUmTbl" class="elAiTbl elAiMapTbl" aria-describedby="elAiMapHelp">
+                      <caption class="elSr">Models and the thinking value each level sends</caption>
+                      <thead><tr><th scope="col">Model</th><th scope="col">Off</th><th scope="col">Low</th><th scope="col">Medium</th><th scope="col">High</th><th scope="col">Max</th><th scope="col"><span class="elSr">Actions</span></th></tr></thead>
+                      <tbody id="elAiUmRows"></tbody>
+                    </table></div>
+                    <div class="inl" id="elAiUmAddRow"><input type="text" id="elAiUmNew" class="w-m mono-in" list="elAiModelList" spellcheck="false" autocomplete="off" maxlength="200" aria-label="Model to add" placeholder="Model name">
+                      <button type="button" id="elAiUmAdd" onclick="return elAiUmAdd();">Add model</button>
+                      <span id="elAiUmStatus" class="elSaveStatus" role="status" aria-live="polite"></span></div>
+                    <small id="elAiMapNote" class="elAiHelp elAiGenNote" hidden></small>
+                    <small id="elAiMapHelp" class="elAiHelp">Each level the user picks sends the value set here; &mdash; means the level is not offered. Numbers (1&ndash;100) are sent as numbers. After Test, &check; marks the values the server accepted and &cross; those it refused; Use tested values takes over what was accepted. Fetch models fills the list of names.</small>
+                  </div>
+                </div>
+
+                <div class="coll">
                   <h4 class="coll-h"><button type="button" class="coll-btn" id="elAiColl_adv" aria-expanded="false" aria-controls="elAiAdvBody"><svg class="elAiChev" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3l5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="coll-t" id="elAiAdvT">Advanced options</span><span class="coll-s" id="elAiCollSum_adv"></span></button></h4>
                   <div id="elAiAdvBody" class="coll-body" data-coll="adv" hidden>
                     <div class="elAiGrid">
@@ -2875,7 +3110,7 @@
                       <span class="elAiLbl" id="elAiGenL">Generation</span>
                       <div class="elAiLimits elAiGen" role="group" aria-labelledby="elAiGenL">
                         <label>Thinking <select id="elAiThinking" aria-describedby="elAiGenHelp elAiGenNote">
-                            <option value="">Server default</option><option value="off">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option>
+                            <option value="">Server default</option><option value="off">Off</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="max">Max</option>
                           </select></label>
                         <label>Temperature <input type="number" id="elAiTemp" min="0" max="2" step="0.05" placeholder="server default" aria-describedby="elAiGenHelp elAiGenNote"></label>
                         <label>Top-p <input type="number" id="elAiTopP" min="0" max="1" step="0.01" placeholder="server default" aria-describedby="elAiGenHelp elAiGenNote"></label>

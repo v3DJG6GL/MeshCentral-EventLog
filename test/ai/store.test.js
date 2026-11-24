@@ -491,3 +491,78 @@ test('concurrent setCaps / setLastTest / setQuirks do not lose updates', async f
     assert.deepStrictEqual(got.quirks, { a: true, b: true });
 });
 
+
+// ---- models users may choose, thinking maps, caps per model ----
+test('endpoints: thinking map and listed models are validated; the default map and an absent list need no migration', async function () {
+    const v = function (x) { return storeMod.validateEndpoint(Object.assign({}, BASE, x)); };
+    let o = v({});
+    assert.deepStrictEqual([o.thinkingMap, o.userModels], [null, { enabled: false, models: [] }]);
+    // the default map itself is stored as null; numbers may come as text; missing levels keep the default value
+    o = v({ thinkingMap: { off: 'none', low: 'low', medium: 'medium', high: 'high', max: null } });
+    assert.strictEqual(o.thinkingMap, null);
+    o = v({ thinkingMap: { off: 'minimal', low: '20', medium: 70, high: 'XHIGH', max: '99' }, thinking: 'max' });
+    assert.deepStrictEqual(o.thinkingMap, { off: 'minimal', low: 20, medium: 70, high: 'xhigh', max: 99 });
+    assert.strictEqual(o.thinking, 'max');
+    o = v({ thinkingMap: { low: null } });
+    assert.deepStrictEqual(o.thinkingMap, { off: 'none', low: null, medium: 'medium', high: 'high', max: null });
+    for (const bad of [{ off: 'huge' }, { low: 0 }, { low: 101 }, { low: 2.5 }, { high: true }, 'none']) {
+        assert.throws(function () { v({ thinkingMap: bad }); }, /Thinking values must be none, minimal, low, medium, high, xhigh, max or a whole number from 1 to 100|The thinking map must list/, JSON.stringify(bad));
+    }
+    // a thinking setting needs a value in the map
+    assert.throws(function () { v({ thinkingMap: { low: null }, thinking: 'low' }); }, /Thinking low is not offered by the thinking map/);
+    // listed models: strings or { id, thinkingMap }; the endpoint's model and duplicates dropped; at most 30
+    o = v({ userModels: { enabled: true, models: ['qwen3.8-flash-next', { id: ' deepseek-v4.1-flash ', thinkingMap: { max: 100 } }, 'llama3.1:8b', 'qwen3.8-flash-next'] } });
+    assert.deepStrictEqual(o.userModels, { enabled: true, models: [{ id: 'qwen3.8-flash-next', thinkingMap: null }, { id: 'deepseek-v4.1-flash', thinkingMap: { off: 'none', low: 'low', medium: 'medium', high: 'high', max: 100 } }] });
+    assert.strictEqual(v({ userModels: { enabled: 'yes', models: [] } }).userModels.enabled, false);
+    assert.throws(function () { v({ userModels: { enabled: true, models: ['a\nb'] } }); }, /Listed model names must be 1 to 200 characters/);
+    assert.throws(function () { v({ userModels: { enabled: true, models: ['x'.repeat(201)] } }); }, /Listed model names/);
+    assert.throws(function () { v({ userModels: { enabled: true, models: [''] } }); }, /Listed model names/);
+    assert.throws(function () { v({ userModels: { enabled: true, models: [42] } }); }, /needs a name/);
+    assert.throws(function () { v({ userModels: { models: 'a,b' } }); }, /The model list is not valid/);
+    const many = []; for (let i = 0; i < 31; i++) many.push('m' + i);
+    assert.throws(function () { v({ userModels: { enabled: true, models: many } }); }, /At most 30 models/);
+    assert.strictEqual(v({ userModels: { enabled: true, models: many.slice(0, 30) } }).userModels.models.length, 30);
+    // Anthropic: model choice only, no thinking maps
+    o = v({ format: 'anthropic', thinkingMap: { max: 'max' }, userModels: { enabled: true, models: [{ id: 'claude-b', thinkingMap: { max: 'max' } }] } });
+    assert.deepStrictEqual([o.thinkingMap, o.userModels.models[0].thinkingMap], [null, null]);
+    // an endpoint stored before these fields: publicEndpoint fills them
+    const { store, db } = setup();
+    const ep = await store.saveEndpoint(BASE, {});
+    const d = db.docs.get(ep.id); delete d.thinkingMap; delete d.userModels; delete d.capsByModel;
+    const pub = store.publicEndpoint(await store.getEndpoint(ep.id));
+    assert.deepStrictEqual([pub.thinkingMap, pub.userModels, pub.capsByModel], [null, { enabled: false, models: [] }, []]);
+    assert.deepStrictEqual(storeMod.allowedModels(await store.getEndpoint(ep.id)), ['llama3.1:8b']);
+});
+
+test('endpoints: caps per listed model (model ids with dots), kept for models still in use, dropped on a new address', async function () {
+    const { store, db } = setup();
+    const L = { enabled: true, models: [{ id: 'qwen3.8-flash-next' }, { id: 'hy4-flash' }] };
+    let ep = await store.saveEndpoint(Object.assign({}, BASE, { userModels: L }), {});
+    await store.setCaps(ep.id, { tools: true, ctx: 1000, at: 1 });
+    await store.setCaps(ep.id, { tools: false, ctx: 2000, at: 2 }, 'qwen3.8-flash-next');
+    await store.setCaps(ep.id, { tools: true, ctx: 3000, at: 3 }, 'hy4-flash');
+    await store.setCaps(ep.id, { tools: true, ctx: 9, at: 4 }, 'not-listed');
+    ep = await store.getEndpoint(ep.id);
+    assert.deepStrictEqual(ep.capsByModel.map(function (e) { return e.model + ':' + e.caps.ctx; }), ['qwen3.8-flash-next:2000', 'hy4-flash:3000']);
+    assert.strictEqual(storeMod.capsFor(ep, 'qwen3.8-flash-next').ctx, 2000);
+    assert.strictEqual(storeMod.capsFor(ep, 'llama3.1:8b').ctx, 1000);
+    assert.strictEqual(storeMod.capsFor(ep, 'not-listed'), null);
+    (function walk(v) { if (v && typeof v === 'object') for (const k of Object.keys(v)) { assert.ok(k.indexOf('.') < 0, 'key with a dot: ' + k); walk(v[k]); } })(db.docs.get(ep.id));
+    // listed models are allowed only while the choice is on
+    assert.deepStrictEqual(storeMod.allowedModels(ep), ['llama3.1:8b', 'qwen3.8-flash-next', 'hy4-flash']);
+    assert.strictEqual(storeMod.isAllowedModel(Object.assign({}, ep, { userModels: { enabled: false, models: L.models } }), 'hy4-flash'), false);
+    // a model taken off the list loses its caps; the old default joins the list and keeps its caps; the new default
+    // (listed before) takes its caps along
+    ep = await store.saveEndpoint(Object.assign({}, BASE, { id: ep.id, model: 'qwen3.8-flash-next', userModels: { enabled: true, models: [{ id: 'llama3.1:8b' }] } }), {});
+    assert.strictEqual(ep.caps.ctx, 2000);
+    assert.deepStrictEqual(ep.capsByModel, [{ model: 'llama3.1:8b', caps: { tools: true, ctx: 1000, at: 1 } }]);
+    assert.strictEqual(ep.lastTest, null, 'the default model changed');
+    // a new address drops them all
+    ep = await store.saveEndpoint(Object.assign({}, BASE, { id: ep.id, model: 'qwen3.8-flash-next', baseUrl: 'http://127.0.0.1:8000/v1', userModels: { enabled: true, models: [{ id: 'llama3.1:8b' }] } }), {});
+    assert.deepStrictEqual([ep.caps, ep.capsByModel], [null, []]);
+    // per-model thinking maps
+    ep = await store.saveEndpoint(Object.assign({}, BASE, { id: ep.id, thinkingMap: { max: 'xhigh' }, userModels: { enabled: true, models: [{ id: 'inkling-2-mini', thinkingMap: { off: null, low: 20, medium: 70, high: 90, max: 99 } }] } }), {});
+    assert.deepStrictEqual(storeMod.modelThinkingMap(ep, 'llama3.1:8b').max, 'xhigh');
+    assert.deepStrictEqual(storeMod.modelThinkingMap(ep, 'inkling-2-mini'), { off: null, low: 20, medium: 70, high: 90, max: 99 });
+    assert.strictEqual(storeMod.modelThinkingMap(ep, 'other'), null);
+});

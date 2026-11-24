@@ -652,9 +652,10 @@ test('test: thinking probe, server rejects reasoning_effort -> not supported, ot
     assert.strictEqual(r.ok, true, JSON.stringify(r.steps));
     assert.strictEqual(step(r, 'thinking').ok, null);
     assert.strictEqual(step(r, 'thinking').detail, 'Not supported (the server rejected reasoning_effort)');
-    assert.deepStrictEqual(r.caps.thinking, { supported: false, levels: [], serverDefault: null, verified: false, detail: 'the server rejected reasoning_effort' });
+    assert.deepStrictEqual(r.caps.thinking, { supported: false, levels: [], serverDefault: null, verified: false, detail: 'the server rejected reasoning_effort', accepted: [], reasoned: [], proposed: { off: null, low: null, medium: null, high: null, max: null } });
     const probes = mock.requests.filter(function (x) { return x.path === '/v1/chat/completions' && 'reasoning_effort' in (x.body || {}); });
-    assert.deepStrictEqual(probes.map(function (x) { return x.body.reasoning_effort; }).sort(), ['high', 'none']);
+    assert.deepStrictEqual(probes.map(function (x) { return String(x.body.reasoning_effort); }).sort(), ['50', 'high', 'low', 'max', 'medium', 'minimal', 'none', 'xhigh']);
+    assert.strictEqual(probes.find(function (x) { return x.body.reasoning_effort === 50; }) != null, true, 'a number is sent as a number');
     assert.ok(probes.every(function (x) { return !x.body.tools && x.body.max_tokens <= 32 && x.body.stream === false; }), 'tiny requests without tools');
 });
 
@@ -669,8 +670,9 @@ test('test: thinking probe, reasoning only with high; /props server defaults; Ap
     const r = await t.call({ pluginaction: 'aiAdminTest', id: saved.endpoint.id });
     assert.strictEqual(r.ok, true, JSON.stringify(r.steps));
     assert.strictEqual(step(r, 'thinking').ok, true);
-    assert.strictEqual(step(r, 'thinking').detail, 'Supported: off, low, medium, high · server default: high (checked with two short requests)');
-    assert.deepStrictEqual(r.caps.thinking.levels, ['off', 'low', 'medium', 'high']);
+    assert.strictEqual(step(r, 'thinking').detail, 'Supported: off, low, medium, high, max · server default: high (checked with short requests); accepted values: none, minimal, low, medium, high, xhigh, max, 50');
+    assert.deepStrictEqual(r.caps.thinking.levels, ['off', 'low', 'medium', 'high', 'max']);
+    assert.deepStrictEqual(r.caps.thinking.reasoned, ['high']);
     assert.strictEqual(r.caps.thinking.verified, true);
     assert.deepStrictEqual(r.caps.genDefaults, { temperature: 1, topP: 0.95, topK: 20, seed: -1, maxTokens: -1 });
     const g = step(r, 'generation');
@@ -691,12 +693,13 @@ test('test: thinking cannot be switched off when only "none" is rejected', async
     const t = setup();
     mock.always('/v1/models', { json: { data: [{ id: 'm1' }] } });
     chatRoute(function (b) {
-        if (b.reasoning_effort === 'none') return { status: 400, json: { error: { message: "Unsupported value: 'reasoning_effort' does not support 'none' with this model." } } };
+        if (b.reasoning_effort === 'none' || b.reasoning_effort === 'minimal') return { status: 400, json: { error: { message: "Unsupported value: 'reasoning_effort' does not support '" + b.reasoning_effort + "' with this model." } } };
         if (b.reasoning_effort) return { json: { choices: [{ index: 0, message: { content: 'OK' }, finish_reason: 'stop' }], usage: { prompt_tokens: 3, completion_tokens: 20, completion_tokens_details: { reasoning_tokens: 19 } } } };
     });
     const r = await t.call({ pluginaction: 'aiAdminTest', draft: chatEp({ thinking: 'off' }) });
-    assert.deepStrictEqual(r.caps.thinking.levels, ['low', 'medium', 'high']);
-    assert.match(step(r, 'thinking').detail, /^Supported: low, medium, high \(thinking cannot be switched off.*this endpoint’s setting “off” is not among them$/);
+    assert.deepStrictEqual(r.caps.thinking.levels, ['low', 'medium', 'high', 'max']);
+    assert.deepStrictEqual(r.caps.thinking.proposed, { off: null, low: 'low', medium: 'medium', high: 'high', max: 'max' });
+    assert.match(step(r, 'thinking').detail, /^Supported: low, medium, high, max \(thinking cannot be switched off.*this endpoint’s setting “off” is not among them$/);
     // the endpoint's own setting is then rejected by the settings check: the test fails on that step
     assert.strictEqual(r.ok, false);
     assert.strictEqual(step(r, 'generation').ok, false);
@@ -735,7 +738,8 @@ test('test: Ollama thinking capability and model file defaults; Fetch models car
     const r = await t.call({ pluginaction: 'aiAdminTest', draft: { name: 'O', format: 'openai-chat', preset: 'ollama', baseUrl: mock.base, model: 'qwen3:8b' } });
     assert.strictEqual(r.ok, true, JSON.stringify(r.steps));
     assert.strictEqual(r.caps.thinking.supported, true);
-    assert.strictEqual(step(r, 'thinking').detail, 'Supported: off, low, medium, high (reported by Ollama)');
+    assert.strictEqual(step(r, 'thinking').detail, 'Supported: off, low, medium, high (reported by Ollama; thinking on or off only)');
+    assert.strictEqual(r.caps.thinking.ollamaLevels, false);
     assert.deepStrictEqual(r.caps.genDefaults, { temperature: 0.6, topP: 0.95, topK: 20, seed: -1, maxTokens: -1 });
     assert.match(step(r, 'generation').lines[1], /context 4,096/, 'Ollama default context applies');
     assert.ok(!mock.requests.some(function (x) { return x.path === '/v1/chat/completions'; }), 'no chat request needed for Ollama');
@@ -747,6 +751,109 @@ test('test: Ollama thinking capability and model file defaults; Fetch models car
     mock.always('/props', { json: { default_generation_settings: { params: { temperature: 0.7, top_k: 40, seed: 5 } } } });
     const m2 = await t.call({ pluginaction: 'aiAdminModels', draft: chatEp({ model: '' }) });
     assert.deepStrictEqual(m2.genDefaults, { temperature: 0.7, topP: null, topK: 40, seed: 5, maxTokens: null });
+});
+
+// fake servers shaped like real ones: what each takes as reasoning_effort (400 otherwise); reasoned: values that think
+function thinkServer(accepts, reasoned) {
+    chatRoute(function (b) {
+        if (!('reasoning_effort' in b)) return null;
+        const v = b.reasoning_effort;
+        if (!accepts(v)) return { status: 400, json: { error: { message: "Invalid value for 'reasoning_effort': " + JSON.stringify(v) } } };
+        const r = reasoned ? reasoned(v) : false;
+        return { json: { choices: [{ index: 0, message: Object.assign({ role: 'assistant', content: 'OK' }, r ? { reasoning_content: 'hm' } : {}), finish_reason: 'stop' }] } };
+    });
+}
+test('test: the thinking probe proposes a map per server (refused numbers, xhigh as max, refused high, all accepted)', async function () {
+    const t = setup();
+    const probe = async function () { const r = await t.call({ pluginaction: 'aiAdminTest', draft: chatEp() }); assert.strictEqual(r.ok, true, JSON.stringify(r.steps)); return r.caps.thinking; };
+    mock.always('/v1/models', { json: { data: [{ id: 'm1' }] } });
+    // strings only, no "max" (qwen-like: xhigh is its top level)
+    thinkServer(function (v) { return typeof v === 'string' && v !== 'max'; }, function (v) { return v !== 'none' && v !== 'minimal'; });
+    let th = await probe();
+    assert.deepStrictEqual(th.accepted, ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
+    assert.deepStrictEqual(th.reasoned, ['low', 'medium', 'high', 'xhigh']);
+    assert.deepStrictEqual(th.proposed, { off: 'none', low: 'low', medium: 'medium', high: 'high', max: 'xhigh' });
+    assert.deepStrictEqual([th.levels, th.supported, th.verified], [['off', 'low', 'medium', 'high', 'max'], true, true]);
+    // everything, numbers too (deepseek-like: maps the names to its own steps)
+    mock.reset(); mock.always('/v1/models', { json: { data: [{ id: 'm1' }] } });
+    thinkServer(function () { return true; }, function (v) { return v !== 'none' && v !== 'minimal'; });
+    th = await probe();
+    assert.deepStrictEqual(th.accepted, ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 50]);
+    assert.deepStrictEqual(th.proposed, { off: 'none', low: 'low', medium: 'medium', high: 'high', max: 'max' });
+    // no "none", no "high" (off through minimal; high not offered)
+    mock.reset(); mock.always('/v1/models', { json: { data: [{ id: 'm1' }] } });
+    thinkServer(function (v) { return v !== 'none' && v !== 'high' && typeof v === 'string'; });
+    th = await probe();
+    assert.deepStrictEqual(th.proposed, { off: 'minimal', low: 'low', medium: 'medium', high: null, max: 'max' });
+    assert.deepStrictEqual(th.levels, ['off', 'low', 'medium', 'max']);
+    assert.strictEqual(th.supported, null, 'accepted; no reasoning seen');
+    // a model that thinks a little even at "none" (inkling-like): supported, not verified
+    mock.reset(); mock.always('/v1/models', { json: { data: [{ id: 'm1' }] } });
+    thinkServer(function () { return true; }, function () { return true; });
+    th = await probe();
+    assert.deepStrictEqual([th.supported, th.verified], [true, false]);
+    assert.match(th.detail, /"off" may have no effect/);
+    // the Responses API: reasoning.effort, the same verdict
+    mock.reset();
+    mock.always('/v1/models/r1', { json: { id: 'r1' } });
+    mock.always('/v1/responses', function (rec) {
+        const e = rec.body && rec.body.reasoning ? rec.body.reasoning.effort : undefined;
+        if (typeof e === 'number' || e === 'minimal') return { status: 400, json: { error: { message: 'Unsupported value: ' + e } } };
+        return { json: { id: 'x', status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'OK' }] }], usage: { input_tokens: 1, output_tokens: 1, output_tokens_details: { reasoning_tokens: e && e !== 'none' ? 5 : 0 } } } };
+    });
+    const rr = await t.call({ pluginaction: 'aiAdminTest', draft: { name: 'R', format: 'openai-responses', baseUrl: mock.base, model: 'r1' } });
+    assert.strictEqual(rr.ok, true, JSON.stringify(rr.steps));
+    assert.deepStrictEqual(rr.caps.thinking.accepted, ['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+    assert.deepStrictEqual(rr.caps.thinking.proposed, { off: 'none', low: 'low', medium: 'medium', high: 'high', max: 'max' });
+    assert.strictEqual(rr.caps.thinking.verified, true);
+});
+
+test('test: a listed model is tested on its own (its caps stored for it, lastTest kept); unlisted models refused', async function () {
+    const t = setup();
+    mock.always('/v1/models', { json: { data: [{ id: 'm1' }, { id: 'qwen3.8-flash-next', max_model_len: 65536 }] } });
+    chatRoute(function () { return null; });
+    const saved = await t.call({ pluginaction: 'aiAdminSaveEndpoint', endpoint: chatEp({ thinking: 'high', userModels: { enabled: true, models: [{ id: 'qwen3.8-flash-next', thinkingMap: { high: 'xhigh', max: 'max' } }] } }) });
+    assert.ok(saved.endpoint, JSON.stringify(saved));
+    const base = await t.call({ pluginaction: 'aiAdminTest', id: saved.endpoint.id });
+    assert.strictEqual(base.model, null);
+    mock.requests.length = 0;
+    const r = await t.call({ pluginaction: 'aiAdminTest', id: saved.endpoint.id, model: 'qwen3.8-flash-next' });
+    assert.strictEqual(r.ok, true, JSON.stringify(r.steps));
+    assert.strictEqual(r.model, 'qwen3.8-flash-next');
+    assert.strictEqual(r.caps.ctx, 65536);
+    assert.match(step(r, 'model').detail, /^Model qwen3\.8-flash-next/);
+    const chats = mock.requests.filter(function (x) { return x.path === '/v1/chat/completions'; });
+    assert.ok(chats.length && chats.every(function (x) { return x.body.model === 'qwen3.8-flash-next'; }));
+    // the endpoint's thinking setting goes through the model's map in the settings check
+    assert.ok(chats.some(function (x) { return x.body.reasoning_effort === 'xhigh' && x.body.max_tokens === 16; }), 'settings check sends high as xhigh');
+    assert.match(step(r, 'generation').lines[1], /thinking high \(sent as xhigh\)/);
+    const ep = await t.store.getEndpoint(saved.endpoint.id);
+    assert.strictEqual(ep.capsByModel[0].model, 'qwen3.8-flash-next');
+    assert.strictEqual(ep.capsByModel[0].caps.ctx, 65536);
+    assert.ok(ep.capsByModel[0].caps.thinking.proposed);
+    assert.strictEqual(ep.lastTest.detail, step(base, 'model').detail, 'the endpoint\u2019s last test stays');
+    // not listed
+    const bad = await t.call({ pluginaction: 'aiAdminTest', id: saved.endpoint.id, model: 'other' });
+    assert.deepStrictEqual([bad.ok, bad.steps[0].detail], [false, 'This model is not in the endpoint\u2019s list']);
+    // a draft lists its own models
+    const d = await t.call({ pluginaction: 'aiAdminTest', draft: chatEp({ userModels: { enabled: false, models: ['draft-model'] } }), model: 'draft-model' });
+    assert.strictEqual(d.model, 'draft-model');
+});
+
+test('test: Ollama takes thinking levels when think:"high" is accepted; Max is then proposed', async function () {
+    const t = setup();
+    mock.always('/api/version', { json: { version: '0.13.0' } });
+    mock.always('/api/show', { json: { capabilities: ['completion', 'tools', 'thinking'], model_info: { 'general.architecture': 'gptoss', 'gptoss.context_length': 131072 } } });
+    mock.always('/v1/models', { json: { data: [{ id: 'gpt-oss:20b' }] } });
+    mock.always('/api/chat', { json: { model: 'gpt-oss:20b', message: { role: 'assistant', content: 'OK', thinking: 'hm' }, done: true } });
+    const r = await t.call({ pluginaction: 'aiAdminTest', draft: { name: 'O', format: 'openai-chat', preset: 'ollama', baseUrl: mock.base, model: 'gpt-oss:20b' } });
+    assert.strictEqual(r.ok, true, JSON.stringify(r.steps));
+    assert.strictEqual(r.caps.thinking.ollamaLevels, true);
+    assert.deepStrictEqual(r.caps.thinking.proposed, { off: 'none', low: 'low', medium: 'medium', high: 'high', max: 'max' });
+    assert.deepStrictEqual(r.caps.thinking.levels, ['off', 'low', 'medium', 'high', 'max']);
+    const ask = mock.requests.filter(function (x) { return x.path === '/api/chat'; });
+    assert.deepStrictEqual([ask.length, ask[0].body.think, ask[0].body.stream], [1, 'high', false]);
+    assert.strictEqual(step(r, 'thinking').detail, 'Supported: off, low, medium, high, max (reported by Ollama; takes thinking levels)');
 });
 
 test('saved results: counts in aiAdminData, stats, purge of all users (audited), starters factory lists; unavailable without a store', async function () {

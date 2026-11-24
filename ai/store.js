@@ -8,14 +8,23 @@
 //
 // Endpoints (settings store, id 'aiEndpoint:<12 hex>', type 'aiEndpoint'):
 //   { id, name, format, preset, baseUrl, model, key, contextTokens, numCtx, maxOutputTokens, timeoutSec, toolMode,
-//     allowLinkLocal, extraInstructions (<= 4000 chars, '' = none), thinking, temperature, topP, topK, seed,
-//     network, caps, quirks, lastTest, updated }
-//   Generation settings, null = the server's default (only set values are sent): thinking 'off'|'low'|'medium'|'high',
+//     allowLinkLocal, extraInstructions (<= 4000 chars, '' = none), thinking, thinkingMap, temperature, topP, topK, seed,
+//     userModels, network, caps, capsByModel, quirks, lastTest, updated }
+//   Generation settings, null = the server's default (only set values are sent): thinking 'off'|'low'|'medium'|'high'|'max',
 //   temperature 0..2, topP 0..1 (both rounded to 2 decimals and clamped), topK 1..1000 and seed 0..2^31-1 (whole
 //   numbers; topK clamped, a seed outside the range is refused). The Anthropic format takes none of them (all null);
 //   the Responses API has no top-k or seed (null). caps (from Test connection) may carry
 //   thinking { supported, levels, serverDefault, verified, detail } and genDefaults { temperature, topP, topK, seed
 //   (-1 random), maxTokens (-1 until done) }.
+//   thinkingMap (the endpoint's model): null = the default map { off:'none', low:'low', medium:'medium', high:'high',
+//   max:null }, else { off, low, medium, high, max } with values 'none'|'minimal'|'low'|'medium'|'high'|'xhigh'|'max',
+//   a whole number 1..100 or null (the level is not offered); what a thinking level sends (adapters/common.js).
+//   A thinking setting whose level the map does not offer is refused. A map equal to the default is stored as null.
+//   userModels { enabled (false), models: [{ id, thinkingMap }] } (at most 30, ids checked like model, duplicates and
+//   the endpoint's own model dropped): the models users may pick per chat; the endpoint's model is the default and
+//   always allowed. capsByModel [{ model, caps }]: what Test connection / a conversation found for a listed model (an
+//   array: model ids may contain dots, which the database refuses as keys); caps belongs to the endpoint's model.
+//   Anthropic: no thinking maps (null).
 //   key: null | { v, iv, ct, tag, last4 } (AES-GCM, AAD = endpoint id) | { env: 'VAR' }
 //   listEndpoints() -> Promise<[ep]> (sorted by name)      getEndpoint(id) -> Promise<ep|null>
 //   saveEndpoint(input, { keyAction:'keep'|'set'|'remove', key }) -> Promise<ep>
@@ -23,12 +32,15 @@
 //       failed, so network is null) is attached as the non-enumerable property ep.warning.
 //       keyAction 'keep' keeps the stored key even when the address (host) changes: the admin edits both fields
 //       in one form and re-entering a key for every address fix would only invite pasting keys around. A change
-//       of address, model or format clears caps/quirks/lastTest (they described the old target) and the
-//       preview acknowledgements for the endpoint (users confirm again what is sent where).
+//       of address, model or format clears quirks/lastTest (they described the old target), a change of address the
+//       preview acknowledgements for the endpoint (users confirm again what is sent where). A change of address or
+//       format drops caps and capsByModel; otherwise the caps found per model stay with the models still in use (a
+//       listed model that becomes the endpoint's model takes its caps along), the others are dropped.
 //   deleteEndpoint(id) -> Promise<true>  rejects Error{code:'inUse', sets:[names]} while a config set uses it
 //   publicEndpoint(ep) -> copy without `key`, plus hasKey and keyHint ('…abcd' | 'env:VAR' | '')
 //   resolveKey(ep) -> plaintext | null (never throws)
-//   setCaps(id, caps) / setQuirks(id, quirks) (merged) / setLastTest(id, r) -> Promise<ep|null>
+//   setCaps(id, caps, model?) (model other than the endpoint's: into capsByModel, only for a listed model) /
+//   setQuirks(id, quirks) (merged) / setLastTest(id, r) -> Promise<ep|null>
 //   setNetwork(id, network) -> Promise<ep|null> (the verdict of a later address check of the saved endpoint)
 //   validateEndpoint(input, opts?) -> fields (sync syntax check, throws Error{code:'invalid'}), used for drafts too;
 //       opts.draft: the name is optional (Test connection / Fetch models), opts.noModel: the model is optional too
@@ -47,6 +59,8 @@
 //   chatGen { enabled (default true) }: users may change thinking and temperature per chat (ai/index.js).
 //   The stored document also carries sv (SETTINGS_VERSION, server-side only); an older document is migrated once
 //   on load (old defaults -> new defaults) and saved again; a failed save is logged and does not fail the load.
+// Pure helpers: allowedModels(ep) -> [ids] (the endpoint's model, then the list when userModels.enabled),
+//   isAllowedModel(ep, id), modelThinkingMap(ep, model) -> map|null, capsFor(ep, model) -> caps|null.
 // Acknowledgements: getAck(userid, epId) -> Promise<bool>, setAck(userid, epId) -> Promise<bool>.
 // Audit: auditAdd(rec) -> Promise<bool> (never rejects; adds time; userid/nodeid copied from user/node strings;
 //   keys with '.' or a leading '$' dropped, steps[*].args stringified; transcript dropped unless
@@ -55,6 +69,7 @@
 
 const crypto = require('crypto');
 const prompts = require('./prompts.js');
+const C = require('./adapters/common.js');
 
 const FORMATS = ['openai-chat', 'openai-responses', 'anthropic'];
 const PRESETS = ['ollama', 'vllm', 'lmstudio', 'llamacpp', 'localai', 'custom'];
@@ -68,7 +83,8 @@ const INT_FIELDS = {
     timeoutSec: { min: 10, max: 900, label: 'Timeout' }
 };
 const MAX_TRANSCRIPT = 256 * 1024;
-const THINKING = ['off', 'low', 'medium', 'high'];
+const THINKING = C.THINK_LEVELS;
+const MAX_USER_MODELS = 30;
 const GEN_FIELDS = ['thinking', 'temperature', 'topP', 'topK', 'seed'];
 const SEED_MAX = 2147483647;
 
@@ -271,8 +287,9 @@ function validateEndpoint(input, opts) {
 
     const model = typeof input.model === 'string' ? input.model.trim() : '';
     if (!model && opts.noModel !== true) throw invalid('Model is required');
-    if (model.length > 200 || /[\u0000-\u001f\u007f]/.test(model)) throw invalid('Model must be at most 200 characters without control characters');
+    if (model && badModelId(model)) throw invalid('Model must be at most 200 characters without control characters');
     out.model = model;
+    out.userModels = validateUserModels(input.userModels, model, format);
 
     for (const k of Object.keys(INT_FIELDS)) {
         const f = INT_FIELDS[k], v = input[k];
@@ -291,9 +308,45 @@ function validateEndpoint(input, opts) {
     return out;
 }
 
+function badModelId(id) { return !id || id.length > 200 || /[\u0000-\u001f\u007f]/.test(id); }
+// a thinking map from the admin page (see the header): null for the default map; numbers may come as text ('50')
+function validateThinkingMap(m) {
+    if (m == null || m === '') return null;
+    if (!isObj(m)) throw invalid('The thinking map must list a value per level');
+    const out = {};
+    for (const l of THINKING) {
+        let v = m[l];
+        if (v === undefined) { out[l] = C.DEFAULT_THINKING_MAP[l]; continue; }
+        if (v === null || v === '') { out[l] = null; continue; }
+        if (typeof v === 'string') v = /^\s*\d+\s*$/.test(v) ? Number(v) : v.trim().toLowerCase();
+        if (!C.isThinkValue(v)) throw invalid('Thinking values must be none, minimal, low, medium, high, xhigh, max or a whole number from 1 to 100');
+        out[l] = v;
+    }
+    return THINKING.every(function (l) { return out[l] === C.DEFAULT_THINKING_MAP[l]; }) ? null : out;
+}
+// the models users may choose (see the header)
+function validateUserModels(u, model, format) {
+    if (u == null) return { enabled: false, models: [] };
+    if (!isObj(u)) throw invalid('The model list is not valid');
+    const list = u.models == null ? [] : u.models;
+    if (!Array.isArray(list)) throw invalid('The model list is not valid');
+    const out = [], seen = new Set([model]);
+    for (const x of list) {
+        const e = typeof x === 'string' ? { id: x } : x;
+        if (!isObj(e)) throw invalid('Each listed model needs a name');
+        const id = typeof e.id === 'string' ? e.id.trim() : '';
+        if (badModelId(id)) throw invalid('Listed model names must be 1 to 200 characters without control characters');
+        if (seen.has(id)) continue;
+        seen.add(id);
+        out.push({ id: id, thinkingMap: format === 'anthropic' ? null : validateThinkingMap(e.thinkingMap) });
+    }
+    if (out.length > MAX_USER_MODELS) throw invalid('At most ' + MAX_USER_MODELS + ' models can be listed');
+    return { enabled: u.enabled === true, models: out };
+}
+
 // the generation settings of an endpoint form (see the header); throws Error{code:'invalid'} for values that are not numbers
 function validateGen(input, format) {
-    const out = { thinking: null, temperature: null, topP: null, topK: null, seed: null };
+    const out = { thinking: null, thinkingMap: null, temperature: null, topP: null, topK: null, seed: null };
     const numIn = function (k, label) {
         const v = input[k];
         if (v == null || v === '') return null;
@@ -302,8 +355,10 @@ function validateGen(input, format) {
         return n;
     };
     const t = input.thinking;
-    if (t != null && t !== '' && THINKING.indexOf(t) < 0) throw invalid('Thinking must be off, low, medium or high');
+    if (t != null && t !== '' && THINKING.indexOf(t) < 0) throw invalid('Thinking must be off, low, medium, high or max');
     out.thinking = t == null || t === '' ? null : t;
+    out.thinkingMap = validateThinkingMap(input.thinkingMap);
+    if (out.thinking && format !== 'anthropic' && C.thinkingMap(out.thinkingMap)[out.thinking] == null) throw invalid('Thinking ' + out.thinking + ' is not offered by the thinking map; give it a value there or pick another level');
     const r2 = function (n) { return Math.round(n * 100) / 100; };
     let n = numIn('temperature', 'Temperature');
     if (n != null) out.temperature = r2(Math.min(2, Math.max(0, n)));
@@ -316,9 +371,34 @@ function validateGen(input, format) {
         if (!Number.isInteger(n) || n < 0 || n > SEED_MAX) throw invalid('Seed must be a whole number from 0 to ' + SEED_MAX);
         out.seed = n;
     }
-    if (format === 'anthropic') for (const k of GEN_FIELDS) out[k] = null;
+    if (format === 'anthropic') { for (const k of GEN_FIELDS) out[k] = null; out.thinkingMap = null; }
     else if (format === 'openai-responses') { out.topK = null; out.seed = null; }
     return out;
+}
+
+// ---- models users may choose (pure) ----
+function listedModels(ep) {
+    const u = ep && isObj(ep.userModels) && Array.isArray(ep.userModels.models) ? ep.userModels.models : [];
+    return u.filter(function (m) { return isObj(m) && typeof m.id === 'string' && m.id; }).map(function (m) { return m.id; });
+}
+function allowedModels(ep) {
+    if (!ep || typeof ep.model !== 'string') return [];
+    const out = [ep.model];
+    if (isObj(ep.userModels) && ep.userModels.enabled === true) for (const id of listedModels(ep)) if (out.indexOf(id) < 0) out.push(id);
+    return out;
+}
+function isAllowedModel(ep, id) { return typeof id === 'string' && allowedModels(ep).indexOf(id) >= 0; }
+function modelThinkingMap(ep, model) {
+    if (!ep) return null;
+    if (model == null || model === ep.model) return isObj(ep.thinkingMap) ? ep.thinkingMap : null;
+    const m = (isObj(ep.userModels) && Array.isArray(ep.userModels.models) ? ep.userModels.models : []).find(function (x) { return isObj(x) && x.id === model; });
+    return m && isObj(m.thinkingMap) ? m.thinkingMap : null;
+}
+function capsFor(ep, model) {
+    if (!ep) return null;
+    if (model == null || model === ep.model) return isObj(ep.caps) ? ep.caps : null;
+    const e = (Array.isArray(ep.capsByModel) ? ep.capsByModel : []).find(function (x) { return isObj(x) && x.model === model; });
+    return e && isObj(e.caps) ? e.caps : null;
 }
 
 function isDnsError(msg) { return /^DNS lookup|did not resolve/i.test(String(msg || '')); }
@@ -428,11 +508,19 @@ function create(opts) {
             if (all.some(function (e) { return e.id !== wantId && String(e.name).toLowerCase() === lname; })) throw invalid('Another endpoint already uses this name');
             const id = existing ? existing.id : 'aiEndpoint:' + crypto.randomBytes(6).toString('hex');
             const key = computeKey(id, kopts.keyAction, kopts.key, existing);
-            const target = existing && (existing.baseUrl !== f.baseUrl || existing.model !== f.model || existing.format !== f.format);
+            const addr = existing && (existing.baseUrl !== f.baseUrl || existing.format !== f.format);
+            const target = existing && (addr || existing.model !== f.model);
             const keep = existing && !target;
+            // caps found per model stay with the models still in use; a new address or format drops them all
+            const pool = new Map();
+            if (existing && !addr) {
+                for (const e of Array.isArray(existing.capsByModel) ? existing.capsByModel : []) if (isObj(e) && typeof e.model === 'string' && isObj(e.caps)) pool.set(e.model, e.caps);
+                if (isObj(existing.caps)) pool.set(existing.model, existing.caps);
+            }
             const ep = Object.assign({ id: id }, f, {
                 key: key, network: network,
-                caps: keep ? (existing.caps || null) : null,
+                caps: pool.get(f.model) || null,
+                capsByModel: f.userModels.models.filter(function (m) { return pool.has(m.id); }).map(function (m) { return { model: m.id, caps: pool.get(m.id) }; }),
                 quirks: keep ? (existing.quirks || null) : null,
                 lastTest: keep ? (existing.lastTest || null) : null,
                 updated: Date.now()
@@ -469,6 +557,9 @@ function create(opts) {
         const k = ep.key;
         if (typeof o.extraInstructions !== 'string') o.extraInstructions = '';
         for (const g of GEN_FIELDS) if (o[g] === undefined) o[g] = null;   // endpoints saved before these settings existed
+        if (o.thinkingMap === undefined) o.thinkingMap = null;
+        if (!isObj(o.userModels)) o.userModels = { enabled: false, models: [] };
+        if (!Array.isArray(o.capsByModel)) o.capsByModel = [];
         o.hasKey = !!(k && (k.env || k.ct));
         o.keyHint = !k ? '' : (typeof k.env === 'string' ? 'env:' + k.env : (k.last4 ? '…' + k.last4 : ''));
         return o;
@@ -486,7 +577,16 @@ function create(opts) {
             return putEndpoint(ep);
         });
     }
-    function setCaps(id, caps) { return patch(id, function (ep) { ep.caps = isObj(caps) ? sanitize(caps, 0) : null; }); }
+    function setCaps(id, caps, model) {
+        return patch(id, function (ep) {
+            const c = isObj(caps) ? sanitize(caps, 0) : null;
+            if (model == null || model === ep.model) { ep.caps = c; return; }
+            if (listedModels(ep).indexOf(model) < 0) return;
+            const list = (Array.isArray(ep.capsByModel) ? ep.capsByModel : []).filter(function (e) { return isObj(e) && e.model !== model; });
+            if (c) list.push({ model: model, caps: c });
+            ep.capsByModel = list;
+        });
+    }
     function setNetwork(id, network) { return patch(id, function (ep) { if (['loopback', 'private', 'public'].indexOf(network) >= 0) ep.network = network; }); }
     function setQuirks(id, quirks) { return patch(id, function (ep) { ep.quirks = Object.assign({}, ep.quirks || {}, isObj(quirks) ? sanitize(quirks, 0) : {}); }); }
     function setLastTest(id, r) {
@@ -607,4 +707,4 @@ function create(opts) {
     };
 }
 
-module.exports = { create, validateEndpoint, sanitize, mergeSettings, startersFor, DEFAULTS, STARTERS, STARTER_OS, SETTINGS_VERSION, FORMATS, PRESETS, TOOL_MODES, ID_RE };
+module.exports = { create, validateEndpoint, sanitize, mergeSettings, startersFor, allowedModels, isAllowedModel, listedModels, modelThinkingMap, capsFor, MAX_USER_MODELS, DEFAULTS, STARTERS, STARTER_OS, SETTINGS_VERSION, FORMATS, PRESETS, TOOL_MODES, ID_RE };

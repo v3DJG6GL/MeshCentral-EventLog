@@ -3,8 +3,9 @@
 //
 // runTurn(S, userText, deps) -> Promise<void>   never rejects; every outcome ends in onAiDone or onAiError + audit
 //   S        session (ai/session.js) with mode, transcript, redactor, refs, toolMode ('tools'|'summary'), toolModeAuto,
-//            ep (no key), window?, os, nonce, answers[], suspicious:Set, reqId?, genEff? { thinking, temperature }
-//            (the settings in effect for this turn, written to the audit record)
+//            ep (no key), model? (the chat's model, else ep.model; for the audit record), window?, os, nonce, answers[],
+//            suspicious:Set, reqId?, genEff? { thinking, temperature } (the settings in effect for this turn, written to
+//            the audit record)
 //   userText the user message for the model, already composed and redacted by the caller
 //   deps: {
 //     llm, adapter, store, settings, log, now,
@@ -39,7 +40,8 @@
 // counts the model calls of the turn, chars the reasoning characters of that call so far): a count only, never the
 // reasoning text, and nothing once the call's answer text has started.
 // Transcript items are append-only within a turn (provider-native raw blocks replay verbatim); a failed or
-// cancelled turn is rolled back as a whole so the next question starts from the last good state.
+// cancelled turn is rolled back as a whole so the next question starts from the last good state. When a chat
+// changes its model, ai/index.js drops the raw blocks of the earlier answers (they replay as text and calls).
 
 const prompts = require('./prompts.js');
 const citations = require('./citations.js');
@@ -465,7 +467,7 @@ async function turn(S, userText, deps) {
     try {
         const rec = {
             time: t0, userid: S.userid, username: S.username || null, nodeid: S.nodeid, nodename: (S.node && S.node.name) || null,
-            endpointId: S.ep.id || null, endpointName: S.ep.name || null, host: hostOf(S.ep.baseUrl), model: S.ep.model || null, format: S.ep.format || null,
+            endpointId: S.ep.id || null, endpointName: S.ep.name || null, host: hostOf(S.ep.baseUrl), model: S.model || S.ep.model || null, format: S.ep.format || null,
             mode: S.mode, convId: S.convId, turn: turnNo, toolMode: S.toolMode,
             steps: steps.filter(function (s) { return s.note == null; }).map(function (s) { return { tool: s.tool, args: s.args, ms: s.ms, items: s.items, bytes: s.bytes, status: s.status === 'running' ? 'error' : s.status }; }),
             rounds: rounds + (result === 'answered' ? 1 : 0), bytesSent: bytesSent, bytesRecv: bytesRecv,

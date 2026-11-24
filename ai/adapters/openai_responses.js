@@ -43,7 +43,8 @@ function buildRequest(ep, transcript, tools, opts) {
     const g = C.genOf(ep);
     if (g.temperature != null) body.temperature = g.temperature;
     if (g.topP != null) body.top_p = g.topP;
-    if (g.thinking) body.reasoning = { effort: C.effortOf(g.thinking) };
+    const th = C.requestThinking(ep, g.thinking);
+    if (th != null) body.reasoning = { effort: th };       // the thinking map's value: a string or a number
     if (tools.length) {
         // strict defaults to true in the Responses API, which would reject schemas with optional properties
         body.tools = tools.map(function (t) { return { type: 'function', name: t.name, description: t.description || '', parameters: t.parameters || { type: 'object', properties: {} }, strict: false }; });
@@ -174,11 +175,10 @@ function reasoned(json) {
     return (Array.isArray(json.output) ? json.output : []).some(function (it) { return C.isObj(it) && it.type === 'reasoning'; });
 }
 
-// Thinking levels: two tiny requests with reasoning.effort 'none' and 'high' (see openai_chat.probeThinking).
+// Thinking values: tiny requests with reasoning.effort none ... max and 50 (see openai_chat.probeThinking).
 async function probeThinking(ep, deps) {
-    const out = { supported: null, levels: null, serverDefault: null, verified: false, detail: '' };
-    const one = async function (level) {
-        const req = buildRequest(Object.assign({}, ep, { maxOutputTokens: 32, thinking: level, temperature: null, topP: null }), { system: '', items: [{ role: 'user', text: 'Reply with OK.' }] }, [], { stream: false });
+    const one = async function (value) {
+        const req = buildRequest(Object.assign({}, ep, { maxOutputTokens: 32, thinking: 'high', thinkingMap: { high: value }, temperature: null, topP: null }), { system: '', items: [{ role: 'user', text: 'Reply with OK.' }] }, [], { stream: false });
         let res;
         try { res = await C.call(deps, { url: req.url, method: 'POST', headers: req.headers, body: req.body, totalTimeoutMs: 60000, idleTimeoutMs: 60000 }); }
         catch (e) { return { error: e.message || 'request failed' }; }
@@ -186,17 +186,7 @@ async function probeThinking(ep, deps) {
         if (res.status === 400 || res.status === 422) return { rejected: true };
         return { error: C.errorMessage(res.bodyText).message || ('HTTP ' + res.status) };
     };
-    const r = await Promise.all([one('off'), one('high')]);
-    const off = r[0], high = r[1];
-    if (off.error || high.error) { out.detail = 'Could not check: ' + String(off.error || high.error).slice(0, 160); return out; }
-    if (off.rejected && high.rejected) { out.supported = false; out.levels = []; out.detail = 'the server rejected reasoning.effort'; return out; }
-    if (off.rejected) { out.supported = true; out.levels = ['low', 'medium', 'high']; out.verified = !!high.reasoned; out.detail = 'thinking cannot be switched off (the server rejected reasoning.effort "none")'; return out; }
-    if (high.rejected) { out.supported = false; out.levels = ['off']; out.detail = 'the server accepts reasoning.effort "none" only'; return out; }
-    out.levels = C.THINK_LEVELS.slice();
-    if (high.reasoned && !off.reasoned) { out.supported = true; out.verified = true; out.detail = 'checked with two short requests'; }
-    else if (high.reasoned) { out.supported = true; out.detail = 'the model reasoned with both settings; "off" may have no effect'; }
-    else out.detail = 'accepted; effect not verifiable';
-    return out;
+    return C.probeThinkingValues(one, 'reasoning.effort');
 }
 
 async function probe(ep, deps) {

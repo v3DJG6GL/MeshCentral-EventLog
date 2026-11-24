@@ -63,8 +63,10 @@ function buildRequest(ep, transcript, tools, opts) {
         if (g.topK != null) options.top_k = g.topK;
         if (g.seed != null) options.seed = g.seed;
         if (Object.keys(options).length) body.options = options;
-        // think: false for off, true for any level (Ollama's levels only work with a few models)
-        if (g.thinking) body.think = g.thinking !== 'off';
+        // think: false for none/minimal; the level string when the server takes levels (ep.ollamaThinkLevels, found by
+        // Test connection), else true
+        const th = C.ollamaThink(C.requestThinking(ep, g.thinking), ep.ollamaThinkLevels === true);
+        if (th != null) body.think = th;
         return { url: url, path: C.pathOf(url), headers: Object.assign({ 'content-type': 'application/json', accept: 'application/x-ndjson' }, authHeaders(ep)), body: body };
     }
     const url = C.joinUrl(ep.baseUrl, '/chat/completions');
@@ -77,7 +79,8 @@ function buildRequest(ep, transcript, tools, opts) {
     if (g.topP != null) body.top_p = g.topP;
     if (g.topK != null) body.top_k = g.topK;                // not in the OpenAI API; vLLM, llama.cpp, LM Studio, Ollama accept it
     if (g.seed != null) body.seed = g.seed;
-    if (g.thinking) body.reasoning_effort = C.effortOf(g.thinking);
+    const th = C.requestThinking(ep, g.thinking);
+    if (th != null) body.reasoning_effort = th;     // the thinking map's value: a string or a number
     if (tools.length) {
         body.tools = chatTools(tools);
         if (opts.toolChoice === 'none') body.tool_choice = 'none';
@@ -249,6 +252,7 @@ async function probe(ep, deps) {
                 out.tools = s.tools; out.ctx = s.ctx;
                 out.ollama = { version: ver, capabilities: s.capabilities, modelCtx: s.ctx, numCtx: s.numCtx };
                 out.thinking = s.thinking; out.genDefaults = s.genDefaults;
+                if (s.thinking && s.thinking.supported) out.thinking = await probeOllamaLevels(ep, deps, s.thinking);
             } catch (e) {
                 out.code = e.code === 'badRequest' || e.code === 'model' ? 'model' : e.code;
                 out.detail = out.code === 'model' ? 'Model "' + ep.model + '" was not found on this Ollama server' : 'Model details unavailable: ' + e.message;
@@ -327,44 +331,42 @@ function reasoned(json) {
     return !!(u && Number(u.reasoning_tokens) > 0);
 }
 
-// Thinking levels, checked with two tiny requests (no tools): reasoning_effort 'none' and 'high'.
-//   -> { supported: true|false|null, levels: [..]|[]|null, serverDefault, verified, detail }
-//   both rejected (400/422)          -> supported false, levels [] (the server takes no reasoning_effort)
-//   'none' rejected, 'high' accepted -> levels low/medium/high (thinking cannot be switched off)
-//   reasoning only with 'high'       -> supported, all levels, verified
-//   accepted, no difference          -> supported null, all levels accepted, not verified
+// Thinking values, checked with tiny requests (no tools, two at a time): reasoning_effort none, minimal, low, medium,
+// high, xhigh, max and 50 (see common.probeThinkingValues for the verdict and the proposed map).
+//   -> { supported: true|false|null, levels: [..]|[]|null, serverDefault, verified, detail, accepted, reasoned, proposed }
 async function probeThinking(ep, deps, pr) {
-    const out = { supported: null, levels: null, serverDefault: (pr && pr.effort) || null, verified: false, detail: '' };
-    const one = async function (effort) {
-        let q = Object.assign({}, ep.quirks || {});
+    const q = Object.assign({}, ep.quirks || {});    // max_tokens / stream_options quirks learned by one request help the next
+    const one = async function (value) {
         for (let i = 0; i < 2; i++) {
-            const req = buildRequest(Object.assign({}, ep, { ollamaNative: false, maxOutputTokens: 32, quirks: q, thinking: effort === 'none' ? 'off' : effort, temperature: null, topP: null, topK: null, seed: null }),
+            const req = buildRequest(Object.assign({}, ep, { ollamaNative: false, maxOutputTokens: 32, quirks: Object.assign({}, q), thinking: 'high', thinkingMap: { high: value }, temperature: null, topP: null, topK: null, seed: null }),
                 { system: '', items: [{ role: 'user', text: 'Reply with OK.' }] }, [], { stream: false });
             let res;
             try { res = await C.call(deps, { url: req.url, method: 'POST', headers: req.headers, body: req.body, totalTimeoutMs: 60000, idleTimeoutMs: 60000 }); }
             catch (e) { return { error: e.message || 'request failed' }; }
             if (res.status < 400) { const j = C.safeJson(res.bodyText); return { ok: true, reasoned: reasoned(j) }; }
             const quirk = detectQuirk(res.status, res.bodyText, req.body, ep);
-            if (quirk && !q[quirk]) { q[quirk] = true; continue; }
+            if (quirk && i === 0) { q[quirk] = true; continue; }
             if (res.status === 400 || res.status === 422) return { rejected: true, message: C.errorMessage(res.bodyText).message || ('HTTP ' + res.status) };
             return { error: C.errorMessage(res.bodyText).message || ('HTTP ' + res.status) };
         }
         return { error: 'request failed' };
     };
-    const r = await Promise.all([one('none'), one('high')]);
-    const off = r[0], high = r[1];
-    if (off.error || high.error) { out.detail = 'Could not check: ' + String(off.error || high.error).slice(0, 160); return out; }
-    if (off.rejected && high.rejected) { out.supported = false; out.levels = []; out.detail = 'the server rejected reasoning_effort'; return out; }
-    if (off.rejected) {
-        out.supported = true; out.levels = ['low', 'medium', 'high']; out.verified = !!high.reasoned;
-        out.detail = 'thinking cannot be switched off (the server rejected reasoning_effort "none")';
-        return out;
-    }
-    if (high.rejected) { out.supported = false; out.levels = ['off']; out.detail = 'the server accepts reasoning_effort "none" only'; return out; }
-    out.levels = C.THINK_LEVELS.slice();
-    if (high.reasoned && !off.reasoned) { out.supported = true; out.verified = true; out.detail = 'checked with two short requests'; }
-    else if (high.reasoned && off.reasoned) { out.supported = true; out.detail = 'the model reasoned with both settings; "off" may have no effect'; }
-    else { out.detail = 'accepted; effect not verifiable'; if (pr && pr.templateThinks === false) out.supported = false; }
+    return C.probeThinkingValues(one, 'reasoning_effort', { serverDefault: (pr && pr.effort) || null, templateThinks: pr ? pr.templateThinks : null });
+}
+
+// Ollama: does the native API take thinking levels (think: "high", gpt-oss style) or only true/false? One tiny
+// request decides. -> the /api/show verdict plus ollamaLevels and the proposed map (levels add max).
+async function probeOllamaLevels(ep, deps, thinking) {
+    const out = Object.assign({}, thinking, { ollamaLevels: false, accepted: null, reasoned: null });
+    try {
+        const url = C.ollamaRoot(ep.baseUrl) + '/api/chat';
+        const res = await C.call(deps, { url: url, method: 'POST', headers: Object.assign({ 'content-type': 'application/json' }, authHeaders(ep)),
+            body: { model: ep.model, messages: [{ role: 'user', content: 'Reply with OK.' }], stream: false, think: 'high', options: { num_predict: 16 } }, totalTimeoutMs: 60000, idleTimeoutMs: 60000 });
+        out.ollamaLevels = res.status < 400;
+    } catch (e) { out.ollamaLevels = false; }
+    out.proposed = Object.assign({}, C.DEFAULT_THINKING_MAP, out.ollamaLevels ? { max: 'max' } : {});
+    out.levels = C.THINK_LEVELS.filter(function (l) { return out.proposed[l] != null; });
+    out.detail = out.ollamaLevels ? 'reported by Ollama; takes thinking levels' : 'reported by Ollama; thinking on or off only';
     return out;
 }
 
@@ -399,4 +401,4 @@ function detectQuirk(status, bodyText, sentBody, ep) {
     return null;
 }
 
-module.exports = { format: FORMAT, buildRequest, createParser, parseNonStream, classifyError, detectQuirk, rejectedSetting, sentSettings, listModels, probe, props, probeThinking, _buildMessages: buildMessages };
+module.exports = { format: FORMAT, buildRequest, createParser, parseNonStream, classifyError, detectQuirk, rejectedSetting, sentSettings, listModels, probe, props, probeThinking, probeOllamaLevels, _buildMessages: buildMessages };

@@ -17,15 +17,19 @@
 //   aiAdminPreviewPrompt {mode, os:'windows'|'linux'|'macos', draft:{prompts?, extraInstructions?, endpointExtra?}}
 //                         -> aiAdminPromptPreview { text, warnings, tokens } (sample device, window, nonce, all tools;
 //                            missing draft fields use the saved settings)
-//   aiAdminTest {id|draft}-> aiAdminTestResult { ok, steps:[{name,ok,ms,detail,lines?}], network, caps }
+//   aiAdminTest {id|draft, model?} -> aiAdminTestResult { ok, steps:[{name,ok,ms,detail,lines?}], network, caps, model }
+//       model: test one of the endpoint's listed models (userModels.models) instead of its own model; the result's
+//       caps are stored for that model (capsByModel) and lastTest is left alone.
 //       steps resolve, connect, auth, model, tools, context, thinking, generation; a step that could not run has
 //       ok:null and detail 'Skipped'; thinking and generation are informational (ok:null) unless verified.
-//       thinking: the levels the server accepts (OpenAI-compatible formats: two tiny requests with reasoning effort
-//       'none' and 'high'; Ollama: the model's capabilities; Anthropic: cannot be set). generation: lines[0] the
+//       thinking: the values the server accepts (OpenAI-compatible formats: tiny requests with reasoning effort none,
+//       minimal, low, medium, high, xhigh, max and 50; Ollama: the model's capabilities plus one think:"high" request
+//       for levels; Anthropic: cannot be set). generation: lines[0] the
 //       server's defaults (/props, Ollama's model file), lines[1] what the Assistant applies (budget.applied plus
 //       the endpoint's own settings); when the endpoint sets any of them, one tiny request carries them all and, if
 //       the server rejects it, each one alone: a rejected setting fails the step and the test (lines[2]).
-//       caps gains thinking { supported, levels, serverDefault, verified, detail, fixed? } and genDefaults.
+//       caps gains thinking { supported, levels, serverDefault, verified, detail, fixed?, accepted?, reasoned?,
+//       proposed? (a thinking map from what was accepted; the admin saves it explicitly), ollamaLevels? } and genDefaults.
 //       Only a test of a saved endpoint ({id} without draft) stores caps, lastTest and network. The auth step
 //       has noKey:true when no API key is configured.
 //   A save that leaves the endpoint without caps (new, or address/model/format changed) tests it in the background
@@ -48,10 +52,10 @@
 const prompts = require('./prompts.js');
 const budget = require('./budget.js');
 const C = require('./adapters/common.js');
-const { STARTERS, STARTER_OS } = require('./store.js');
+const { STARTERS, STARTER_OS, listedModels, modelThinkingMap } = require('./store.js');
 
 const OVERALL_MS = 30000;
-const LEVEL_WORD = { off: 'off', low: 'low', medium: 'medium', high: 'high' };
+const LEVEL_WORD = { off: 'off', low: 'low', medium: 'medium', high: 'high', max: 'max' };
 const GEN_KEYS = ['thinking', 'temperature', 'topP', 'topK', 'seed'];
 const MAX_INFLIGHT = 4;
 const MAX_SHOW = 20;
@@ -115,7 +119,14 @@ function create(o) {
     }
 
     function adapterEp(ep, apiKey) {
-        return { baseUrl: ep.baseUrl, model: ep.model, apiKey: apiKey || null, maxOutputTokens: 16, numCtx: ep.numCtx || null, ollamaNative: false, quirks: ep.quirks || undefined };
+        return { baseUrl: ep.baseUrl, model: ep.model, apiKey: apiKey || null, maxOutputTokens: 16, numCtx: ep.numCtx || null, ollamaNative: false, quirks: ep.quirks || undefined, thinkingMap: ep.thinkingMap || null };
+    }
+    // the endpoint as one of its listed models: that model and its thinking map; throws for a model not listed
+    function forModel(ep, model) {
+        if (model == null || model === '' || model === ep.model) return { ep: ep, model: null };
+        const id = typeof model === 'string' ? model.trim() : '';
+        if (!id || listedModels(ep).indexOf(id) < 0) throw mkErr('invalid', 'This model is not in the endpoint\u2019s list');
+        return { ep: Object.assign({}, ep, { model: id, thinkingMap: modelThinkingMap(ep, id) }), model: id };
     }
 
     // a failure before the server answered at all (refused, unreachable, TLS, connect timeout): the next
@@ -203,7 +214,9 @@ function create(o) {
         const authStep = function (ok, detail) { add('auth', ok, 0, detail); if (!key) steps[steps.length - 1].noKey = true; };
         const skip = function (names) { for (const n of names) add(n, null, 0, 'Skipped'); };
         const tgt = await resolveTarget(command);
-        const ep = tgt.ep, key = tgt.apiKey;
+        const fm = forModel(tgt.ep, command.model);
+        tgt.model = fm.model;
+        const ep = fm.ep, key = tgt.apiKey;
         const adapter = adapters.get(ep.format);
         if (!adapter) throw mkErr('invalid', 'Unknown API format');
 
@@ -311,11 +324,16 @@ function create(o) {
         }
         if (!isObj(t)) return { supported: null, levels: null, serverDefault: null, verified: false, detail: 'not checked' };
         const lv = Array.isArray(t.levels) ? C.THINK_LEVELS.filter(function (l) { return t.levels.indexOf(l) >= 0; }) : null;
-        return {
+        const vals = function (a) { return Array.isArray(a) ? C.PROBE_THINK_VALUES.filter(function (v) { return a.indexOf(v) >= 0; }) : null; };
+        const out = {
             supported: t.supported === true ? true : t.supported === false ? false : null, levels: lv,
             serverDefault: C.THINK_LEVELS.indexOf(t.serverDefault) >= 0 ? t.serverDefault : null,
             verified: t.verified === true, detail: String(t.detail || '').slice(0, 200)
         };
+        if (Array.isArray(t.accepted)) { out.accepted = vals(t.accepted); out.reasoned = vals(t.reasoned) || []; }
+        if (isObj(t.proposed)) out.proposed = C.thinkingMap(t.proposed);
+        if (t.ollamaLevels === true || t.ollamaLevels === false) out.ollamaLevels = t.ollamaLevels;
+        return out;
     }
     function cleanDefaults(g) {
         if (!isObj(g)) return null;
@@ -334,7 +352,13 @@ function create(o) {
         else if (t.supported === true) s = 'Supported: ' + (t.levels || C.THINK_LEVELS).join(', ') + def + why;
         else if (t.levels && t.levels.length) s = 'Accepted; effect not verifiable' + def + (t.detail && !/^accepted/i.test(t.detail) ? why : '');
         else s = t.detail ? t.detail.charAt(0).toUpperCase() + t.detail.slice(1) : 'Unknown';
-        if (ep && ep.thinking && Array.isArray(t.levels) && t.levels.indexOf(ep.thinking) < 0) s += '; this endpoint\u2019s setting \u201c' + ep.thinking + '\u201d is not among them';
+        if (Array.isArray(t.accepted) && t.accepted.length) s += '; accepted values: ' + t.accepted.join(', ');
+        if (ep && ep.thinking) {
+            const v = C.requestThinking(ep, ep.thinking);
+            const refused = Array.isArray(t.accepted) ? v != null && t.accepted.indexOf(v) < 0 && !(typeof v === 'number' && t.accepted.some(function (x) { return typeof x === 'number'; }))
+                : Array.isArray(t.levels) && t.levels.indexOf(ep.thinking) < 0;
+            if (refused) s += '; this endpoint\u2019s setting \u201c' + ep.thinking + '\u201d is not among them';
+        }
         return s;
     }
     function fmtInt(n) { return Number(n).toLocaleString('en-US'); }
@@ -356,7 +380,8 @@ function create(o) {
         if (ep.format === 'anthropic') p.push('thinking and sampling set by the model');
         else {
             const sd = caps && caps.thinking && caps.thinking.serverDefault;
-            p.push('thinking ' + (ep.thinking ? LEVEL_WORD[ep.thinking] : 'server default' + (sd ? ' (' + LEVEL_WORD[sd] + ')' : '')));
+            const tv = ep.thinking ? C.requestThinking(ep, ep.thinking) : null;
+            p.push('thinking ' + (ep.thinking ? LEVEL_WORD[ep.thinking] + (tv != null && tv !== ep.thinking && !(ep.thinking === 'off' && tv === 'none') ? ' (sent as ' + tv + ')' : '') : 'server default' + (sd ? ' (' + LEVEL_WORD[sd] + ')' : '')));
             p.push('temperature ' + (ep.temperature != null ? fmtDec(ep.temperature) : 'server default'));
             p.push('top-p ' + (ep.topP != null ? fmtDec(ep.topP) : 'server default'));
             if (ep.format !== 'openai-responses') {
@@ -405,8 +430,9 @@ function create(o) {
     // caps, network and lastTest of a test of a saved endpoint
     async function storeTestResult(r) {
         try {
-            if (r.caps) await store.setCaps(r.tgt.id, r.caps);
+            if (r.caps) await store.setCaps(r.tgt.id, r.caps, r.tgt.model || null);
             if (r.network) await store.setNetwork(r.tgt.id, r.network);
+            if (r.tgt.model) return;     // a listed model's test: the endpoint's last test stays
             const failed = r.steps.find(function (s) { return s.ok === false && s.name !== 'tools' && s.name !== 'thinking'; });
             await store.setLastTest(r.tgt.id, { ok: r.ok, at: Date.now(), ms: r.ms, detail: failed ? failed.detail : (r.steps.find(function (s) { return s.name === 'model'; }) || {}).detail });
         } catch (e) { warn('could not store the test result (' + errText(e) + ')'); }
@@ -423,7 +449,7 @@ function create(o) {
             return;
         }
         if (r.tgt.saved) await storeTestResult(r);
-        safeSend(myparent, { method: 'aiAdminTestResult', reqId: reqId, ok: r.ok, steps: r.steps, network: r.network, caps: r.caps });
+        safeSend(myparent, { method: 'aiAdminTestResult', reqId: reqId, ok: r.ok, steps: r.steps, network: r.network, caps: r.caps, model: r.tgt.model || null });
     }
 
     // After a save that left the endpoint without caps (new, or address/model/format changed): test it in the

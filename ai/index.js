@@ -52,11 +52,13 @@
 //     off before any question is asked for once more with 1500 output tokens; the reply is read leniently
 //     (prompts.readFollowups). A reply without any text fails with code noAnswer; one without questions is an empty list.
 //   Answer settings per chat (settings.chatGen.enabled): aiStart / aiSend take gen { thinking?, temperature? }, checked
-//     against the endpoint (thinking: a level it supports; temperature 0..2, 2 decimals; anything else is ignored)
+//     against the chat's model (thinking: a level it offers; temperature 0..2, 2 decimals; anything else is ignored)
 //     and applied on top of the endpoint's generation settings for the conversation's requests; kept with the saved
-//     chat (doc.gen), and used again when the chat is continued without gen. accessInfo carries chatGen { enabled,
-//     thinkingLevels: [..] | null (none to choose), thinkingVerified, temperature (bool), endpointThinking,
-//     endpointTemperature }.
+//     chat (doc.gen), and used again when the chat is continued without gen. accessInfo carries chatGen (see
+//     chatGenInfo below for its shape).
+//   Model per chat (ep.userModels.enabled, independent of chatGen): gen.model picks one of the allowed models; it is
+//     used for the requests, caps and context, the audit record, the saved chat (doc.gen.model) and Suggest
+//     questions. A changed model replays the earlier answers as plain text (no raw provider blocks).
 // onAgentData(command, agentObj) -> bool   agent 'software' replies for get_installed_software
 // close()                                   aborts every conversation (plugin reload / shutdown)
 
@@ -97,7 +99,8 @@ const DEFAULT_SETTINGS = {
     categories: { deviceSummary: true, network: false, storedEvents: true, meshEvents: false, notes: false, software: false },
     history: { enabled: true, retentionDays: 30 }, starters: { windows: null, linux: null, macos: null }, chatGen: { enabled: true }
 };
-const THINK_LEVELS = ['off', 'low', 'medium', 'high'];
+const C = require('./adapters/common.js');
+const THINK_LEVELS = C.THINK_LEVELS;
 const ANDROID_NOTE = 'Event logs are not available on Android devices: the MeshCentral Android agent cannot run the plugin\'s collector, ' +
     'and Android lets an app read other apps\' logs only with the READ_LOGS permission (granted over adb or root).';
 const FU_SYSTEM = 'Suggest up to 3 short follow-up questions a technician might ask next about this device, in the language of the conversation. ' +
@@ -118,32 +121,73 @@ function normSettings(s) {
     o.chatGen.enabled = o.chatGen.enabled !== false;
     return o;
 }
-// What the browser may offer for changing thinking and temperature in a chat on this endpoint. Thinking levels come
-// from what Test connection found (caps.thinking); unknown: all levels, not verified. None for the Anthropic format
-// (it takes no generation settings) or an endpoint that takes no thinking setting.
+// ---- answer settings and model choice per chat (accessInfo.chatGen; the device page builds its popover from it) ----
+// chatGenInfo(settings, ep) ->
+//   { enabled,                 settings.chatGen.enabled: users may change thinking and temperature per chat
+//     thinkingLevels,          [off|low|medium|high|max] the endpoint's model offers, null = none to choose
+//     thinkingVerified,        Test connection saw the model reason (the levels are not only "accepted")
+//     temperature,             false for the Anthropic format
+//     endpointThinking, endpointTemperature,   the endpoint's own settings (null = the server's default)
+//     models?,                 only with ep.userModels.enabled: [{ id, label, default, thinkingLevels, thinkingVerified }],
+//                              the endpoint's model first (default: true), then the listed ones; the levels apply
+//                              while that model is picked. The model choice does not depend on enabled (that only
+//                              governs thinking and temperature) and is offered for the Anthropic format too
+//                              (thinkingLevels null there).
+//     defaultModel? }          the endpoint's model (with models)
+// A model's levels: those its thinking map gives a value, minus the values Test connection found refused for that
+// model (caps.thinking.accepted; older results: caps.thinking.levels); unknown -> all mapped levels, not verified.
+// aiStart / aiSend take gen { model?, thinking?, temperature? } (genIn): thinking and temperature replace the chat's
+// settings as before; model is kept from the chat (aiSend: the conversation's, aiStart with chatId: the saved chat's)
+// unless gen names one. A model that is not (or no longer) allowed falls back to the endpoint's model:
+// onAiStarted.modelFallback / onAiModelFallback { nodeid, convId, requested, model, message }. onAiStarted.model is
+// the model the chat uses; the saved chat keeps it in doc.gen.model.
+function acceptedValue(accepted, v) { return typeof v === 'number' ? accepted.some(function (x) { return typeof x === 'number'; }) : accepted.indexOf(v) >= 0; }
+function thinkingFor(ep, model) {
+    if (!ep || ep.format === 'anthropic') return { levels: null, verified: false, map: null, T: null };
+    const map = C.thinkingMap(storeMod.modelThinkingMap(ep, model));
+    const caps = storeMod.capsFor(ep, model);
+    const T = isObj(caps) && isObj(caps.thinking) ? caps.thinking : null;
+    let levels = THINK_LEVELS.filter(function (l) { return map[l] != null; }), verified = false;
+    if (T && T.supported === false) levels = [];
+    else if (T && Array.isArray(T.accepted)) { levels = levels.filter(function (l) { return acceptedValue(T.accepted, map[l]); }); verified = T.supported === true; }
+    else if (T && Array.isArray(T.levels) && T.levels.length) {
+        // an older test result names levels of the default map; a level the admin mapped to another value is kept
+        levels = levels.filter(function (l) { return T.levels.indexOf(l) >= 0 || map[l] !== C.DEFAULT_THINKING_MAP[l]; });
+        verified = T.supported === true;
+    }
+    return { levels: levels.length ? levels : null, verified: !!(levels.length && verified), map: map, T: T };
+}
 function chatGenInfo(settings, ep) {
     const enabled = !!(settings && settings.chatGen && settings.chatGen.enabled !== false);
     ep = ep || {};
     const anth = ep.format === 'anthropic';
-    const T = isObj(ep.caps) && isObj(ep.caps.thinking) ? ep.caps.thinking : null;
-    let levels = null, verified = false;
-    if (!anth) {
-        if (T && T.supported === false) levels = null;
-        else if (T && Array.isArray(T.levels) && T.levels.length) { levels = THINK_LEVELS.filter(function (l) { return T.levels.indexOf(l) >= 0; }); verified = T.supported === true; }
-        else levels = THINK_LEVELS.slice();
-        if (levels && !levels.length) levels = null;
-    }
+    const t = thinkingFor(ep, ep.model);
     const num = function (v) { return typeof v === 'number' && Number.isFinite(v) ? v : null; };
-    return {
-        enabled: enabled, thinkingLevels: levels, thinkingVerified: !!(levels && verified), temperature: !anth,
+    const out = {
+        enabled: enabled, thinkingLevels: t.levels, thinkingVerified: t.verified, temperature: !anth,
         endpointThinking: anth || THINK_LEVELS.indexOf(ep.thinking) < 0 ? null : ep.thinking, endpointTemperature: anth ? null : num(ep.temperature)
     };
+    if (isObj(ep.userModels) && ep.userModels.enabled === true && typeof ep.model === 'string') {
+        out.models = storeMod.allowedModels(ep).map(function (id) {
+            const m = thinkingFor(ep, id);
+            return { id: id, label: id, default: id === ep.model, thinkingLevels: m.levels, thinkingVerified: m.verified };
+        });
+        out.defaultModel = ep.model;
+    }
+    return out;
 }
-// a chat's answer settings from the browser (or a saved chat), checked against chatGenInfo: { thinking?, temperature? }
+// a chat's answer settings from the browser (or a saved chat), checked against chatGenInfo: { model?, thinking?,
+// temperature? }; thinking against the levels of the model given (else the endpoint's model)
 function genIn(raw, info) {
     const out = {};
-    if (!isObj(raw) || !info || !info.enabled) return out;
-    if (typeof raw.thinking === 'string' && Array.isArray(info.thinkingLevels) && info.thinkingLevels.indexOf(raw.thinking) >= 0) out.thinking = raw.thinking;
+    if (!isObj(raw) || !info) return out;
+    let levels = info.thinkingLevels;
+    if (Array.isArray(info.models) && typeof raw.model === 'string') {
+        const m = info.models.find(function (x) { return x.id === raw.model; });
+        if (m) { out.model = m.id; levels = m.thinkingLevels; }
+    }
+    if (!info.enabled) return out;
+    if (typeof raw.thinking === 'string' && Array.isArray(levels) && levels.indexOf(raw.thinking) >= 0) out.thinking = raw.thinking;
     if (info.temperature && typeof raw.temperature === 'number' && Number.isFinite(raw.temperature) && raw.temperature >= 0 && raw.temperature <= 2) out.temperature = Math.round(raw.temperature * 100) / 100;
     return out;
 }
@@ -391,12 +435,13 @@ function create(o) {
             }
         };
     }
+    // the caps of the conversation's model (S.model, else the endpoint's): read, refreshed when older than a day
     async function resolveCaps(S, key) {
-        const ep = S.ep;
-        let caps = isObj(ep.caps) ? ep.caps : null;
+        const ep = S.ep, model = S.model || ep.model;
+        let caps = storeMod.capsFor(ep, model);
         const fresh = caps && Number(caps.at) > now() - CAPS_MAX_AGE;
         if (fresh) return caps;
-        const epK = { baseUrl: ep.baseUrl, model: ep.model, apiKey: key || null };
+        const epK = { baseUrl: ep.baseUrl, model: model, apiKey: key || null };
         // non-Ollama servers: tool support is assumed (a refusal switches to summary mode once); a context size an
         // earlier connection test detected is kept
         const prev = caps || {};
@@ -414,15 +459,47 @@ function create(o) {
                     try {
                         const s = await adapters.ollama.show(epK, deps);
                         caps.tools = s.tools; caps.ctx = s.ctx || null; caps.numCtx = s.numCtx || null;
-                        if (s.thinking) caps.thinking = s.thinking;
+                        // what Test connection found about thinking levels stays while the model can still think
+                        if (s.thinking) caps.thinking = s.thinking.supported && isObj(prev.thinking) && prev.thinking.ollamaLevels != null
+                            ? Object.assign({}, s.thinking, { ollamaLevels: prev.thinking.ollamaLevels, levels: prev.thinking.levels, proposed: prev.thinking.proposed, detail: prev.thinking.detail }) : s.thinking;
                         if (s.genDefaults) caps.genDefaults = s.genDefaults;
                     } catch (e) { }
                 }
             }
         } catch (e) { }
-        try { Promise.resolve(store.setCaps(ep.id, caps)).catch(function () { }); } catch (e) { }
-        ep.caps = caps;
+        try { Promise.resolve(store.setCaps(ep.id, caps, model)).catch(function () { }); } catch (e) { }
+        putCaps(ep, model, caps);
         return caps;
+    }
+    // the session's copy of the endpoint gets the caps of a model too
+    function putCaps(ep, model, caps) {
+        if (model == null || model === ep.model) { ep.caps = caps; return; }
+        const list = (Array.isArray(ep.capsByModel) ? ep.capsByModel : []).filter(function (e) { return isObj(e) && e.model !== model; });
+        list.push({ model: model, caps: caps });
+        ep.capsByModel = list;
+    }
+    // The model of a chat: the one asked for when allowed; otherwise the endpoint's, with a fallback note when a model
+    // was asked for that is not (or no longer) allowed.
+    function pickModel(ep, gen, wanted) {
+        const model = gen && typeof gen.model === 'string' ? gen.model : ep.model;
+        if (typeof wanted === 'string' && wanted && wanted !== model && !storeMod.isAllowedModel(ep, wanted)) {
+            const w = wanted.slice(0, 200);
+            return { model: ep.model, fallback: { requested: w, model: ep.model, message: 'The model ' + w + ' is no longer available; this chat continues with ' + ep.model + '.' } };
+        }
+        return { model: model, fallback: null };
+    }
+    // A conversation changes its model: the caps and context of the new one apply, and the earlier answers are replayed
+    // as plain text (raw provider blocks such as reasoning items with encrypted_content belong to the old model).
+    async function switchModel(S, model) {
+        if (!model || model === S.model) return;
+        S.model = model;
+        for (const it of S.transcript.items) if (it && it.role === 'assistant' && it.raw) it.raw = null;
+        const caps = await resolveCaps(S, await Promise.resolve(store.resolveKey(S.ep)).catch(function () { return null; }));
+        S.budget = contextFor(S, caps, S.settings);
+        if (S.toolModeAuto && S.toolMode === 'tools' && caps && caps.tools === false) {
+            S.toolMode = 'summary';
+            S.transcript.system = systemPrompt(S, []);
+        }
     }
     // the same numbers the admin page shows under "Applied by the Assistant" (budget.applied)
     function contextFor(S, caps, settings) {
@@ -547,7 +624,7 @@ function create(o) {
     // previous one for that event. Saving never affects the turn; a failure is only logged.
     function saveResult(S, done, info) {
         if (!history || !S.historyOn) return;
-        const base = { userid: S.userid, nodeid: S.nodeid, done: done, steps: (info && info.steps) || [], endpointName: S.ep.name || '', model: S.ep.model || '' };
+        const base = { userid: S.userid, nodeid: S.nodeid, done: done, steps: (info && info.steps) || [], endpointName: S.ep.name || '', model: S.model || S.ep.model || '' };
         let p = null;
         if (S.mode === 'ask') {
             if (!S.chatId) return;
@@ -650,9 +727,13 @@ function create(o) {
             try { const cur = await store.getEndpoint(S.ep.id); key = await store.resolveKey(cur || S.ep); } catch (e) { key = null; }
             const adapter = adapters.get(S.ep.format);
             if (!adapter) { sendS(S, 'onAiError', { reqId: S.reqId, code: 'model', message: 'Unknown API format', retryable: false }); return; }
-            const epBase = { id: S.ep.id, baseUrl: S.ep.baseUrl, model: S.ep.model, maxOutputTokens: S.budget.maxOutput, numCtx: Number(S.ep.numCtx) > 0 ? Number(S.ep.numCtx) : null, ollamaNative: S.budget.ollamaNative, quirks: S.ep.quirks || null, format: S.ep.format };
+            const model = S.model || S.ep.model, mcaps = storeMod.capsFor(S.ep, model);
+            const epBase = { id: S.ep.id, baseUrl: S.ep.baseUrl, model: model, maxOutputTokens: S.budget.maxOutput, numCtx: Number(S.ep.numCtx) > 0 ? Number(S.ep.numCtx) : null, ollamaNative: S.budget.ollamaNative, quirks: S.ep.quirks || null, format: S.ep.format };
             // generation settings (null = the server's default; the adapters send only what is set, Anthropic none)
             for (const k of ['thinking', 'temperature', 'topP', 'topK', 'seed']) epBase[k] = S.ep[k] == null ? null : S.ep[k];
+            // what a thinking level sends for this model (its thinking map); Ollama: levels or only on/off
+            epBase.thinkingMap = storeMod.modelThinkingMap(S.ep, model);
+            epBase.ollamaThinkLevels = !!(mcaps && isObj(mcaps.thinking) && mcaps.thinking.ollamaLevels === true);
             // the chat's answer settings on top (the adapters map them like the endpoint's; Anthropic takes none)
             Object.assign(epBase, effectiveGen(S.ep, S.gen));
             S.genEff = { thinking: epBase.thinking, temperature: epBase.temperature };
@@ -670,9 +751,9 @@ function create(o) {
                 buildDigest: function (tokens) { return digest.build({ tools: S.tools, mode: S.mode, input: S.digestInput, budgetTokens: tokens, nonce: S.nonce, now: now }); },
                 systemPrompt: function (names) { return systemPrompt(S, names); },
                 onToolsUnsupported: function () {
-                    const caps = Object.assign({}, S.ep.caps || {}, { tools: false, at: now() });
-                    S.ep.caps = caps;
-                    try { Promise.resolve(store.setCaps(S.ep.id, caps)).catch(function () { }); } catch (e) { }
+                    const caps = Object.assign({}, storeMod.capsFor(S.ep, model) || {}, { tools: false, at: now() });
+                    putCaps(S.ep, model, caps);
+                    try { Promise.resolve(store.setCaps(S.ep.id, caps, model)).catch(function () { }); } catch (e) { }
                 }
             });
             key = null;
@@ -761,8 +842,13 @@ function create(o) {
         });
         if (!opened.ok) return fail('busy', 'Too many conversations are open', true);
         const S = opened.S;
-        // the chat's answer settings: as sent, else those of the saved chat that continues
-        S.gen = genIn(isObj(command.gen) ? command.gen : (prior && isObj(prior.gen) ? prior.gen : null), chatGenInfo(settings, ep));
+        // the chat's answer settings: as sent, else those of the saved chat that continues; its model stays unless gen
+        // names one (one that is no longer allowed: the endpoint's model, with a note)
+        const cg = isObj(command.gen) ? command.gen : null, pg = prior && isObj(prior.gen) ? prior.gen : null;
+        const wanted = cg && typeof cg.model === 'string' ? cg.model : (pg && typeof pg.model === 'string' ? pg.model : null);
+        S.gen = genIn(Object.assign({}, cg || pg || {}, { model: wanted }), chatGenInfo(settings, ep));
+        const pm = pickModel(ep, S.gen, wanted);
+        S.model = pm.model;
         try {
             const caps = await resolveCaps(S, await Promise.resolve(store.resolveKey(ep)).catch(function () { return null; }));
             S.toolModeAuto = !(ep.toolMode === 'summary' || ep.toolMode === 'tools');
@@ -777,7 +863,9 @@ function create(o) {
             if (prior) await buildRecap(S, prior);
             const firstText = await compose(S);
             if (S.closed) return;
-            sendS(S, 'onAiStarted', { reqId: reqId, mode: mode, endpointName: str(ep.name, 120) || '', model: str(ep.model, 200) || '', network: network, redacted: redacted, toolMode: S.toolMode, notes: S.budget.notes, chatId: chatId, continued: !!prior });
+            const started = { reqId: reqId, mode: mode, endpointName: str(ep.name, 120) || '', model: str(S.model, 200) || '', network: network, redacted: redacted, toolMode: S.toolMode, notes: S.budget.notes, chatId: chatId, continued: !!prior };
+            if (pm.fallback) started.modelFallback = pm.fallback;
+            sendS(S, 'onAiStarted', started);
             let needPreview = false;
             if (network === 'public' && settings.previewPolicy !== 'never') {
                 if (settings.previewPolicy === 'every') needPreview = true;
@@ -836,8 +924,20 @@ function create(o) {
         // the answer settings may have changed since the last question (and the admin may have turned them off)
         let curSettings = S.settings;
         try { curSettings = normSettings(await store.getSettings()); } catch (e) { curSettings = S.settings; }
+        // the models users may pick may have changed too (same endpoint target only)
+        try {
+            const cur = await store.getEndpoint(S.ep.id);
+            if (cur && cur.baseUrl === S.ep.baseUrl && cur.format === S.ep.format && cur.model === S.ep.model) {
+                S.ep.userModels = cur.userModels; S.ep.thinkingMap = cur.thinkingMap;
+            }
+        } catch (e) { }
         const cgi = chatGenInfo(curSettings, S.ep);
-        S.gen = genIn(isObj(command.gen) ? command.gen : S.gen, cgi);
+        const cg = isObj(command.gen) ? command.gen : null;
+        const wanted = cg && typeof cg.model === 'string' ? cg.model : (S.model || S.ep.model);
+        S.gen = genIn(Object.assign({}, cg || S.gen || {}, { model: wanted }), cgi);
+        const pm = pickModel(S.ep, S.gen, wanted);
+        if (pm.fallback) sendS(S, 'onAiModelFallback', pm.fallback);
+        if (pm.model !== S.model) await switchModel(S, pm.model);
         if (S.mode === 'diagnose') {   // follow-up questions in a diagnosis chat: the Ask task, the same model session
             S.mode = 'ask';
             S.transcript.system = systemPrompt(S, S.toolMode === 'tools' ? S.tools.names : []);
@@ -954,14 +1054,15 @@ function create(o) {
         if (q.remaining && q.remaining.tokens != null && q.remaining.tokens <= 0) return fail('quota', 'Your daily Assistant limit is used up');
         fuRunning.add(key);
         try {
-            let R, pairs, ep, net, gen, expect = null, turn = 0, budgetA, caps;
+            let R, pairs, ep, net, gen, model, expect = null, turn = 0, budgetA, caps;
             if (S) {
                 if (!S.answers.length) return fail('invalid', 'There is no answer yet');
                 R = S.redactor; pairs = S.answers.slice(-3); ep = S.ep; net = S.net; gen = S.gen;
+                model = S.model || ep.model;
                 turn = S.turn;
                 const L = S.log || [];
                 if (chatId && L.length === S.answers.length && L.length) expect = { q: L[L.length - 1].q };
-                caps = isObj(ep.caps) ? ep.caps : null;
+                caps = storeMod.capsFor(ep, model);
                 budgetA = S.budget || null;
             } else {
                 if (!history || closed) return fail('notFound', 'This chat is no longer saved');
@@ -979,9 +1080,10 @@ function create(o) {
                 const https = /^https:/i.test(String(ep.baseUrl));
                 net = { lookup: check.lookup || undefined, agent: (https && check.network === 'public') ? (function () { const w = webserver(); return w ? w.httpsProxyAgent : undefined; })() : undefined, network: check.network };
                 gen = genIn(prior.gen, chatGenInfo(settings, ep));
+                model = pickModel(ep, gen, prior.gen && prior.gen.model).model;
                 turn = msgs.length;
                 expect = { count: msgs.length, q: String(msgs[msgs.length - 1].q || '') };
-                caps = await resolveCaps({ ep: ep, net: net }, await Promise.resolve(store.resolveKey(g.ep)).catch(function () { return null; }));
+                caps = await resolveCaps({ ep: ep, net: net, model: model }, await Promise.resolve(store.resolveKey(g.ep)).catch(function () { return null; }));
             }
             const adapter = adapters.get(ep.format);
             if (!adapter) return fail('model', 'Unknown API format');
@@ -991,13 +1093,15 @@ function create(o) {
             // thinking off for this short request unless the endpoint is known not to take "off" (a 400 naming the
             // setting: once more without it); else the chat's settings
             const eff = effectiveGen(ep, gen);
-            const T = isObj(caps) && isObj(caps.thinking) ? caps.thinking : null;
-            const offRefused = !!(T && (Array.isArray(T.levels) ? T.levels.indexOf('off') < 0 : T.supported === false));
+            const tf = thinkingFor(ep, model);     // resolveCaps put the model's caps into ep
+            const T = tf.T;
+            const offRefused = tf.map == null || tf.map.off == null || !!(T && (Array.isArray(T.accepted) ? !acceptedValue(T.accepted, tf.map.off) : Array.isArray(T.levels) ? T.levels.indexOf('off') < 0 : T.supported === false));
             const canOff = ep.format !== 'anthropic' && !offRefused;
             if (canOff) eff.thinking = 'off';
             const thinksAnyway = eff.thinking != null && eff.thinking !== 'off';
             const epCall = {
-                id: ep.id, baseUrl: ep.baseUrl, model: ep.model, format: ep.format, quirks: ep.quirks || null, apiKey: apiKey,
+                id: ep.id, baseUrl: ep.baseUrl, model: model, format: ep.format, quirks: ep.quirks || null, apiKey: apiKey,
+                thinkingMap: storeMod.modelThinkingMap(ep, model), ollamaThinkLevels: !!(T && T.ollamaLevels === true),
                 maxOutputTokens: thinksAnyway ? Math.max(FU_MAX_TOKENS, Math.min(2048, Number(applied.maxOutput) || 1024)) : FU_MAX_TOKENS,
                 numCtx: Number(ep.numCtx) > 0 ? Number(ep.numCtx) : null, ollamaNative: !!applied.ollamaNative,
                 thinking: eff.thinking, temperature: eff.temperature, topP: ep.topP == null ? null : ep.topP, topK: ep.topK == null ? null : ep.topK, seed: ep.seed == null ? null : ep.seed
@@ -1045,7 +1149,7 @@ function create(o) {
             try {
                 Promise.resolve(store.auditAdd({
                     time: t0, kind: 'followups', userid: userid, username: user.name || null, nodeid: nodeid, nodename: node.name || null,
-                    endpointId: ep.id || null, endpointName: ep.name || null, host: (function () { try { return new URL(ep.baseUrl).host; } catch (e) { return null; } })(), model: ep.model || null, format: ep.format || null,
+                    endpointId: ep.id || null, endpointName: ep.name || null, host: (function () { try { return new URL(ep.baseUrl).host; } catch (e) { return null; } })(), model: model || null, format: ep.format || null,
                     mode: 'followups', convId: S ? S.convId : null, chatId: chatId || null, turn: turn, steps: [], rounds: 1,
                     bytesSent: Buffer.byteLength(FU_SYSTEM + userText, 'utf8'), bytesRecv: recv,
                     redactionOn: R.total() > 0 || anyOn(R.enabled || {}), redactionCounts: R.counts(), tokensIn: tin, tokensOut: tout, estimated: estimated,

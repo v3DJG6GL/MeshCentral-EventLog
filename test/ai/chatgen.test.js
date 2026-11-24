@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const F = require('./engine-fakes.js');
-const { createMockLlm, chatSse, anthropicSse } = require('./mock-llm.js');
+const { createMockLlm, chatSse, anthropicSse, responsesSse } = require('./mock-llm.js');
 const historyMod = require('../../ai/history.js');
 const storeMod = require('../../ai/store.js');
 const aiIndex = require('../../ai/index.js');
@@ -300,4 +300,142 @@ test('settings: chatGen.enabled merges (default on, boolean only)', function () 
     assert.deepStrictEqual(storeMod.mergeSettings(base, { chatGen: { enabled: false } }).chatGen, { enabled: false });
     assert.deepStrictEqual(storeMod.mergeSettings(base, { chatGen: { enabled: 'no' } }).chatGen, { enabled: true });
     assert.deepStrictEqual(storeMod.mergeSettings(storeMod.mergeSettings(base, { chatGen: { enabled: false } }), { limits: {} }).chatGen, { enabled: false });
+});
+
+// ---- model choice per chat (ep.userModels) ----
+const M2 = { id: 'qwen3.8-flash-next', thinkingMap: { off: null, low: 20, medium: 70, high: 90, max: 99 } };
+const M2CAPS = { model: M2.id, caps: { at: Date.now(), tools: true, ctx: 65536, thinking: { supported: true, verified: true, levels: ['low', 'medium', 'high', 'max'], accepted: ['low', 'high', 50], reasoned: ['high', 50] } } };
+function modelsEp(extra) { return Object.assign({ userModels: { enabled: true, models: [M2] }, capsByModel: [M2CAPS] }, extra || {}); }
+
+test('chatGenInfo / genIn: listed models with their own levels; thinking checked against the picked model; a model off the list ignored', function () {
+    const S = { chatGen: { enabled: true } };
+    const ep = Object.assign({ format: 'openai-chat', model: 'test-model', caps: null, thinkingMap: { max: 'xhigh' } }, modelsEp());
+    const i = aiIndex.chatGenInfo(S, ep);
+    assert.deepStrictEqual(i.models, [
+        { id: 'test-model', label: 'test-model', default: true, thinkingLevels: ['off', 'low', 'medium', 'high', 'max'], thinkingVerified: false },
+        { id: M2.id, label: M2.id, default: false, thinkingLevels: ['low', 'medium', 'high', 'max'], thinkingVerified: true }
+    ]);
+    assert.strictEqual(i.defaultModel, 'test-model');
+    assert.deepStrictEqual(aiIndex.genIn({ model: M2.id, thinking: 'off' }, i), { model: M2.id }, 'off is not offered for this model');
+    assert.deepStrictEqual(aiIndex.genIn({ model: M2.id, thinking: 'max' }, i), { model: M2.id, thinking: 'max' });
+    assert.deepStrictEqual(aiIndex.genIn({ model: 'other', thinking: 'off' }, i), { thinking: 'off' });
+    // the model choice does not depend on chatGen.enabled; Anthropic gets it too (no levels)
+    assert.deepStrictEqual(aiIndex.genIn({ model: M2.id, thinking: 'max' }, aiIndex.chatGenInfo({ chatGen: { enabled: false } }, ep)), { model: M2.id });
+    const a = aiIndex.chatGenInfo(S, Object.assign({}, ep, { format: 'anthropic' }));
+    assert.deepStrictEqual(a.models.map(function (m) { return m.id + ':' + m.thinkingLevels; }), ['test-model:null', M2.id + ':null']);
+    // no choice: the shape stays as before
+    assert.ok(!('models' in aiIndex.chatGenInfo(S, Object.assign({}, ep, { userModels: { enabled: false, models: [M2] } }))));
+});
+
+test('model choice: the picked model is used for the request, the thinking map of that model, the audit and the saved chat; an unknown one falls back with a note', async function () {
+    mock.always(CHAT, { sse: chatSse({ text: 'Fine.' }) });
+    const t = setup({ ep: modelsEp() });
+    const acc = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual(acc.chatGen.models.map(function (m) { return m.id; }), ['test-model', M2.id]);
+    await t.start('ask', { text: 'Q1?' }, { gen: { model: M2.id, thinking: 'max' } });
+    let b = chatReqs().pop().body;
+    assert.deepStrictEqual([b.model, b.reasoning_effort], [M2.id, 99], 'the model and its map value (a number)');
+    const st = t.last('onAiStarted');
+    assert.deepStrictEqual([st.model, 'modelFallback' in st], [M2.id, false]);
+    let au = t.store.audits.pop();
+    assert.deepStrictEqual([au.model, au.thinking], [M2.id, 'max']);
+    const chatId = t.last('onAiDone').chatId;
+    await until(async function () { const c = await t.hist.get('user/d/alice', F.NODE, 'chat', chatId); return c && c.gen; }, 'gen saved');
+    const saved = await t.hist.get('user/d/alice', F.NODE, 'chat', chatId);
+    assert.deepStrictEqual([saved.gen, saved.messages[0].model], [{ model: M2.id, thinking: 'max' }, M2.id]);
+    // aiSend without gen keeps the model; gen without model keeps it too, its thinking checked against that model
+    await t.ai.handle(t.cmd('aiSend', { convId: st.convId, text: 'Q2?', gen: { thinking: 'low' } }), t.myparent, {});
+    b = chatReqs().pop().body;
+    assert.deepStrictEqual([b.model, b.reasoning_effort], [M2.id, 20]);
+    // back to the endpoint's model mid-conversation
+    await t.ai.handle(t.cmd('aiSend', { convId: st.convId, text: 'Q3?', gen: { model: 'test-model', thinking: 'max' } }), t.myparent, {});
+    b = chatReqs().pop().body;
+    assert.deepStrictEqual([b.model, 'reasoning_effort' in b], ['test-model', false], 'max has no value in the default map');
+    assert.strictEqual(t.store.audits.pop().model, 'test-model');
+    // a model that is not allowed: the endpoint's, with a note
+    t.ai.sessions.closeAll('test');
+    await t.start('ask', { text: 'Q4?' }, { gen: { model: 'evil-model' }, reqId: 'r4' });
+    b = chatReqs().pop().body;
+    assert.strictEqual(b.model, 'test-model');
+    const fb = t.last('onAiStarted').modelFallback;
+    assert.deepStrictEqual([fb.requested, fb.model], ['evil-model', 'test-model']);
+    assert.match(fb.message, /^The model evil-model is no longer available; this chat continues with test-model\.$/);
+    // aiSend with a model off the list: onAiModelFallback, the endpoint's model
+    await t.ai.handle(t.cmd('aiSend', { convId: t.last('onAiStarted').convId, text: 'Q5?', gen: { model: 'evil-model' } }), t.myparent, {});
+    assert.deepStrictEqual([t.last('onAiModelFallback').requested, t.last('onAiModelFallback').convId], ['evil-model', t.last('onAiStarted').convId]);
+    assert.strictEqual(chatReqs().pop().body.model, 'test-model');
+    t.close();
+});
+
+test('model choice: a saved chat whose model is no longer allowed continues with the endpoint\'s model and says so; Suggest questions follows the chat\'s model', async function () {
+    mock.always(CHAT, { sse: chatSse({ text: 'Fine.\n' + FU }) });
+    const t = setup({ ep: modelsEp() });
+    await t.start('ask', { text: 'Q1?' }, { gen: { model: M2.id } });
+    const chatId = t.last('onAiDone').chatId, convId = t.last('onAiStarted').convId;
+    await until(async function () { const c = await t.hist.get('user/d/alice', F.NODE, 'chat', chatId); return c && c.gen; }, 'saved');
+    // Suggest questions in the open conversation: its model
+    await t.fu({ convId: convId });
+    assert.strictEqual(chatReqs().pop().body.model, M2.id);
+    assert.strictEqual(t.store.audits.filter(function (x) { return x.kind === 'followups'; }).pop().model, M2.id);
+    t.ai.sessions.closeAll('test');
+    // the saved chat, no conversation: its saved model while it is allowed
+    await t.fu({ chatId: chatId, reqId: 'fu2' });
+    assert.strictEqual(chatReqs().pop().body.model, M2.id);
+    // continued while allowed: the saved model without a note
+    await t.start('ask', { text: 'Q2?' }, { chatId: chatId, reqId: 'r2' });
+    assert.deepStrictEqual([chatReqs().pop().body.model, t.last('onAiStarted').model, 'modelFallback' in t.last('onAiStarted')], [M2.id, M2.id, false]);
+    t.ai.sessions.closeAll('test');
+    // the admin turns the choice off: the endpoint's model, with a note
+    t.store.endpoints.ep1.userModels.enabled = false;
+    await t.start('ask', { text: 'Q3?' }, { chatId: chatId, reqId: 'r3' });
+    assert.strictEqual(chatReqs().pop().body.model, 'test-model');
+    const st = t.last('onAiStarted');
+    assert.deepStrictEqual([st.model, st.continued, st.modelFallback.requested, st.modelFallback.model], ['test-model', true, M2.id, 'test-model']);
+    await t.fu({ chatId: chatId, convId: 'gone', reqId: 'fu3' });
+    assert.strictEqual(t.last('onAiFollowups').reqId, 'fu3');
+    t.close();
+});
+
+test('model choice: a changed model replays earlier answers as text (no reasoning items with encrypted content of the old model)', async function () {
+    const RS = '/v1/responses';
+    mock.always(RS, { sse: responsesSse({ items: [{ type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'ENC-OF-MODEL-A' }, { type: 'message', text: 'Fine.' }] }) });
+    const t = setup({ format: 'openai-responses', ep: modelsEp() });
+    await t.start('ask', { text: 'Q1?' });
+    const convId = t.last('onAiStarted').convId;
+    const reqs = function () { return mock.requests.filter(function (r) { return r.path === RS; }); };
+    // same model: the reasoning item is replayed as it came
+    await t.ai.handle(t.cmd('aiSend', { convId: convId, text: 'Q2?' }), t.myparent, {});
+    let b = reqs().pop();
+    assert.strictEqual(b.body.model, 'test-model');
+    assert.ok(b.bodyText.indexOf('ENC-OF-MODEL-A') >= 0, 'replayed for the same model');
+    // another model: earlier answers as plain assistant text
+    await t.ai.handle(t.cmd('aiSend', { convId: convId, text: 'Q3?', gen: { model: M2.id } }), t.myparent, {});
+    b = reqs().pop();
+    assert.strictEqual(b.body.model, M2.id);
+    assert.ok(t.last('onAiDone'), t.ws.sent.map(function (m) { return m.method + (m.code ? ':' + m.code : ''); }).join(','));
+    assert.strictEqual(b.bodyText.indexOf('ENC-OF-MODEL-A'), -1, 'no encrypted reasoning of the old model');
+    assert.ok(!b.body.input.some(function (x) { return x && x.type === 'reasoning'; }));
+    assert.deepStrictEqual(b.body.input.filter(function (x) { return x && x.role === 'assistant'; }).map(function (x) { return x.content; }), ['Fine.', 'Fine.']);
+    t.close();
+});
+
+test('model choice: independent of chatGen.enabled; the Anthropic format gets the model only', async function () {
+    mock.always(CHAT, { sse: chatSse({ text: 'Fine.' }) });
+    let t = setup({ settings: { chatGen: { enabled: false } }, ep: modelsEp() });
+    const acc = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual([acc.chatGen.enabled, acc.chatGen.models.length], [false, 2]);
+    await t.start('ask', { text: 'Q?' }, { gen: { model: M2.id, thinking: 'high', temperature: 0.3 } });
+    const b = chatReqs().pop().body;
+    assert.deepStrictEqual([b.model, 'reasoning_effort' in b, 'temperature' in b], [M2.id, false, false]);
+    t.close();
+    mock.reset();
+    mock.always('/v1/messages', { sse: anthropicSse({ blocks: [{ type: 'text', text: 'Fine.' }] }) });
+    t = setup({ format: 'anthropic', ep: { userModels: { enabled: true, models: [{ id: 'claude-b', thinkingMap: null }] } } });
+    const a = await t.ai.accessInfo(t.myparent, t.node, 0xFFFFFFFF);
+    assert.deepStrictEqual(a.chatGen.models.map(function (m) { return m.id + ':' + m.thinkingLevels; }), ['test-model:null', 'claude-b:null']);
+    await t.start('ask', { text: 'Q?' }, { gen: { model: 'claude-b', thinking: 'high' } });
+    const ab = mock.requests.filter(function (r) { return r.path === '/v1/messages'; }).pop().body;
+    assert.deepStrictEqual([ab.model, 'thinking' in ab], ['claude-b', false]);
+    assert.strictEqual(t.store.audits.pop().model, 'claude-b');
+    t.close();
 });

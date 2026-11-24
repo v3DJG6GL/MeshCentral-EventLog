@@ -131,7 +131,19 @@ async function getJson(deps, o, classify) {
 function num(x) { const n = Number(x); return Number.isFinite(n) && n > 0 ? Math.floor(n) : null; }
 
 // ---- generation settings (ep.thinking / temperature / topP / topK / seed; null = the server's default) ----------
-const THINK_LEVELS = ['off', 'low', 'medium', 'high'];
+// User-facing thinking levels; ep.thinkingMap says what each one sends: a request value (THINK_VALUES or a whole
+// number 1-100, sent as a number) or null (the level is not offered). No map = DEFAULT_THINKING_MAP (off -> 'none').
+const THINK_LEVELS = ['off', 'low', 'medium', 'high', 'max'];
+const THINK_VALUES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const DEFAULT_THINKING_MAP = { off: 'none', low: 'low', medium: 'medium', high: 'high', max: null };
+function isThinkValue(v) { return THINK_VALUES.indexOf(v) >= 0 || (Number.isInteger(v) && v >= 1 && v <= 100); }
+// a stored or given map with every level; unknown or bad entries fall back to the default map
+function thinkingMap(m) {
+    const out = Object.assign({}, DEFAULT_THINKING_MAP);
+    if (!isObj(m)) return out;
+    for (const l of THINK_LEVELS) if (m[l] === null || isThinkValue(m[l])) out[l] = m[l];
+    return out;
+}
 function genOf(ep) {
     ep = ep || {};
     const f = function (v) { return typeof v === 'number' && Number.isFinite(v) ? v : null; };
@@ -140,8 +152,68 @@ function genOf(ep) {
         temperature: f(ep.temperature), topP: f(ep.topP), topK: f(ep.topK), seed: f(ep.seed)
     };
 }
-// OpenAI-style effort for a level: off -> 'none'
-function effortOf(level) { return level === 'off' ? 'none' : level; }
+// The request value for a thinking level through ep.thinkingMap: a string, a number, or null (nothing is sent).
+function requestThinking(ep, level) {
+    if (THINK_LEVELS.indexOf(level) < 0) return null;
+    const v = thinkingMap(ep && ep.thinkingMap)[level];
+    return v == null ? null : v;
+}
+// OpenAI-style effort for a level with the default map: off -> 'none' (kept for callers without an endpoint)
+function effortOf(level) { return requestThinking(null, level); }
+// Ollama native think for a request value: false for none/minimal; a level string when the server takes them
+// (caps.thinking.ollamaLevels; xhigh -> max), else true. null = not sent.
+function ollamaThink(value, levels) {
+    if (value == null) return null;
+    if (value === 'none' || value === 'minimal') return false;
+    if (levels && typeof value === 'string') return value === 'xhigh' ? 'max' : value;
+    return true;
+}
+
+// The proposed thinking map from per-value probe results { value: { ok, reasoned } | { rejected } | { error } }:
+// off = none, else minimal; low / medium / high the same name; max = max, else xhigh; null where not accepted.
+function proposeThinkingMap(accepted) {
+    const a = function (v) { return accepted.indexOf(v) >= 0; };
+    return {
+        off: a('none') ? 'none' : a('minimal') ? 'minimal' : null,
+        low: a('low') ? 'low' : null, medium: a('medium') ? 'medium' : null, high: a('high') ? 'high' : null,
+        max: a('max') ? 'max' : a('xhigh') ? 'xhigh' : null
+    };
+}
+// The request values the thinking probe tries (two at a time).
+const PROBE_THINK_VALUES = THINK_VALUES.concat([50]);
+// Runs one(value) for every probe value, two at a time, and turns the results into the caps.thinking verdict:
+//   { supported, levels, serverDefault, verified, detail, accepted:[values], reasoned:[values], proposed:{map} }
+// param names the request field in the details ('reasoning_effort', 'reasoning.effort'); opts.serverDefault and
+// opts.templateThinks (llama.cpp /props) as found. levels = the levels the proposed map offers.
+async function probeThinkingValues(one, param, opts) {
+    opts = opts || {};
+    const out = { supported: null, levels: null, serverDefault: opts.serverDefault || null, verified: false, detail: '', accepted: [], reasoned: [], proposed: null };
+    const vals = PROBE_THINK_VALUES.slice(), res = new Map();
+    const worker = async function () { while (vals.length) { const v = vals.shift(); res.set(v, await one(v)); } };
+    await Promise.all([worker(), worker()]);
+    const r = function (v) { return res.get(v) || { error: 'not run' }; };
+    if (r('none').error || r('high').error) { out.detail = 'Could not check: ' + String(r('none').error || r('high').error).slice(0, 160); return out; }
+    for (const v of PROBE_THINK_VALUES) {
+        if (r(v).ok) { out.accepted.push(v); if (r(v).reasoned) out.reasoned.push(v); }
+    }
+    out.proposed = proposeThinkingMap(out.accepted);
+    out.levels = THINK_LEVELS.filter(function (l) { return out.proposed[l] != null; });
+    const offs = out.accepted.filter(function (v) { return v === 'none' || v === 'minimal'; });
+    const ons = out.accepted.filter(function (v) { return v !== 'none' && v !== 'minimal'; });
+    if (!out.accepted.length) { out.supported = false; out.levels = []; out.detail = 'the server rejected ' + param; return out; }
+    if (!ons.length) { out.supported = false; out.levels = ['off']; out.detail = 'the server accepts ' + param + ' ' + offs.map(function (v) { return '"' + v + '"'; }).join(' and ') + ' only'; return out; }
+    const onReasoned = ons.some(function (v) { return out.reasoned.indexOf(v) >= 0; });
+    if (!offs.length) {
+        out.supported = true; out.verified = onReasoned;
+        out.detail = 'thinking cannot be switched off (the server rejected ' + param + ' "none")';
+        return out;
+    }
+    const offReasoned = out.reasoned.indexOf(out.proposed.off) >= 0;
+    if (onReasoned && !offReasoned) { out.supported = true; out.verified = true; out.detail = 'checked with short requests'; }
+    else if (onReasoned) { out.supported = true; out.detail = 'the model reasoned with every setting; "off" may have no effect'; }
+    else { out.detail = 'accepted; effect not verifiable'; if (opts.templateThinks === false) out.supported = false; }
+    return out;
+}
 
 // A 400 that names a generation setting the request carried -> { field, label, param, message } or null.
 // sent: [{ field, label, param, names? }] for the settings actually in the request (param: the name in the request
@@ -185,6 +257,7 @@ function propsEffort(json) {
     for (const v of [p.reasoning_effort, g.reasoning_effort, json.reasoning_effort, kw.reasoning_effort]) {
         const s = typeof v === 'string' ? v.toLowerCase() : '';
         if (s === 'none' || s === 'minimal') return 'off';
+        if (s === 'xhigh') return 'max';
         if (THINK_LEVELS.indexOf(s) >= 0) return s;
     }
     return null;
@@ -235,5 +308,6 @@ function thinkSplitter(onText, onThink) {
 module.exports = {
     synthId, trimSlash, joinUrl, ollamaRoot, pathOf, safeJson, isObj, parseArgs, argsToText, argsToObject, resultText, rawFor,
     retryAfterMs, errorMessage, classifyHttpError, streamErrorCode, mkErr, call, getJson, num, RE_TOOLS, RE_CTX,
-    THINK_LEVELS, GEN_LABELS, genOf, effortOf, rejectedSetting, propsDefaults, propsEffort, thinkSplitter
+    THINK_LEVELS, THINK_VALUES, DEFAULT_THINKING_MAP, PROBE_THINK_VALUES, GEN_LABELS, genOf, effortOf, isThinkValue, thinkingMap,
+    requestThinking, ollamaThink, proposeThinkingMap, probeThinkingValues, rejectedSetting, propsDefaults, propsEffort, thinkSplitter
 };

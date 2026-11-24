@@ -56,6 +56,42 @@ test('request bodies: settings are sent only when set, per API format', function
     assert.deepStrictEqual(none(chat.buildRequest(ep({ thinking: 'max', temperature: '0.5' }), T, [], {}).body), []);
 });
 
+test('thinking map: each level sends its mapped value per API format; numbers as numbers; Ollama levels or on/off', function () {
+    const map = { off: 'minimal', low: 'low', medium: 'high', high: 'xhigh', max: 75 };
+    const body = function (a, x) { return a.buildRequest(ep(x), T, [], {}).body; };
+    // openai-chat: reasoning_effort = the mapped value
+    assert.deepStrictEqual(['off', 'low', 'medium', 'high', 'max'].map(function (l) { return body(chat, { thinking: l, thinkingMap: map }).reasoning_effort; }), ['minimal', 'low', 'high', 'xhigh', 75]);
+    // no map: today's behaviour (off -> none, max not offered so nothing is sent); a level mapped to null sends nothing
+    assert.deepStrictEqual(['off', 'low', 'medium', 'high'].map(function (l) { return body(chat, { thinking: l }).reasoning_effort; }), ['none', 'low', 'medium', 'high']);
+    assert.ok(!('reasoning_effort' in body(chat, { thinking: 'max' })));
+    assert.ok(!('reasoning_effort' in body(chat, { thinking: 'low', thinkingMap: Object.assign({}, map, { low: null }) })));
+    // a bad stored value falls back to the default for that level
+    assert.strictEqual(body(chat, { thinking: 'low', thinkingMap: { low: 'huge' } }).reasoning_effort, 'low');
+    // Responses: reasoning.effort, a number as a number
+    assert.deepStrictEqual(body(rs, { thinking: 'max', thinkingMap: map }).reasoning, { effort: 75 });
+    assert.deepStrictEqual(body(rs, { thinking: 'off', thinkingMap: map }).reasoning, { effort: 'minimal' });
+    assert.ok(!('reasoning' in body(rs, { thinking: 'max' })));
+    // Anthropic: never
+    assert.ok(!('thinking' in body(an, { thinking: 'max', thinkingMap: map })) && !('reasoning_effort' in body(an, { thinking: 'max', thinkingMap: map })));
+    // Ollama native: none / minimal -> false; with levels the string (xhigh -> max); without levels (or a number) true
+    const think = function (l, levels, m) { return body(chat, { ollamaNative: true, thinking: l, thinkingMap: m === undefined ? map : m, ollamaThinkLevels: levels }).think; };
+    assert.deepStrictEqual(['off', 'low', 'medium', 'high', 'max'].map(function (l) { return think(l, true); }), [false, 'low', 'high', 'max', true]);
+    assert.deepStrictEqual(['off', 'low', 'medium', 'high', 'max'].map(function (l) { return think(l, false); }), [false, true, true, true, true]);
+    assert.deepStrictEqual([think('off', true, null), think('high', true, null), think('max', true, null)], [false, 'high', undefined]);
+    assert.strictEqual(think('max', true, { max: 'max' }), 'max');
+    // the settings a request carries, and a 400 naming the thinking field (also for a number)
+    assert.deepStrictEqual(chat.sentSettings(body(chat, { thinking: 'max', thinkingMap: map }), {}).map(function (x) { return x.param; }), ['reasoning_effort']);
+    assert.deepStrictEqual(chat.sentSettings(body(chat, { ollamaNative: true, thinking: 'low', thinkingMap: map, ollamaThinkLevels: true }), { ollamaNative: true }).map(function (x) { return x.param; }), ['think']);
+    const rej = chat.rejectedSetting(400, JSON.stringify({ error: { message: "Invalid type for 'reasoning_effort': expected a string, but got an integer." } }), body(chat, { thinking: 'max', thinkingMap: map }), {});
+    assert.deepStrictEqual([rej.field, rej.param], ['thinking', 'reasoning_effort']);
+    assert.strictEqual(rs.rejectedSetting(400, JSON.stringify({ error: { message: 'Unsupported value for reasoning: 75' } }), body(rs, { thinking: 'max', thinkingMap: map })).field, 'thinking');
+    // helpers
+    assert.deepStrictEqual(C.thinkingMap(null), { off: 'none', low: 'low', medium: 'medium', high: 'high', max: null });
+    assert.deepStrictEqual(C.proposeThinkingMap(['minimal', 'low', 'high', 'xhigh', 50]), { off: 'minimal', low: 'low', medium: null, high: 'high', max: 'xhigh' });
+    assert.deepStrictEqual(C.proposeThinkingMap(['none', 'medium', 'max']), { off: 'none', low: null, medium: 'medium', high: null, max: 'max' });
+    assert.strictEqual(C.effortOf('off'), 'none');
+});
+
 // ---- store ---------------------------------------------------------------------------------------------------------
 test('store: generation settings are validated, clamped and dropped where the API format has none', function () {
     const v = function (x) { return storeMod.validateEndpoint(Object.assign({ name: 'E', baseUrl: 'http://localhost:1/v1', model: 'm' }, x)); };
@@ -67,7 +103,8 @@ test('store: generation settings are validated, clamped and dropped where the AP
     assert.deepStrictEqual([o.thinking, o.temperature, o.topP, o.topK, o.seed], [null, null, null, 1, 0]);
     o = v({ temperature: -1, topK: 12.6 });
     assert.deepStrictEqual([o.temperature, o.topK], [0, 13]);
-    assert.throws(function () { v({ thinking: 'max' }); }, /Thinking must be/);
+    assert.throws(function () { v({ thinking: 'huge' }); }, /Thinking must be off, low, medium, high or max/);
+    assert.throws(function () { v({ thinking: 'max' }); }, /Thinking max is not offered by the thinking map/);
     assert.throws(function () { v({ temperature: 'warm' }); }, /Temperature must be a number/);
     assert.throws(function () { v({ topP: true }); }, /Top-p must be a number/);
     assert.throws(function () { v({ seed: -1 }); }, /Seed must be a whole number/);

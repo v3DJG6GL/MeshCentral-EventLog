@@ -70,7 +70,8 @@ test('endpoint form: server defaults as placeholders, unsupported levels disable
     assert.strictEqual($(w, 'elAiSeed').placeholder, 'random (server default)');
     var sel = $(w, 'elAiThinking');
     assert.strictEqual(sel.options[0].textContent, 'High (server default)');
-    assert.deepStrictEqual(Array.prototype.map.call(sel.options, function (o) { return o.value + ':' + o.disabled; }), [':false', 'off:true', 'low:false', 'medium:false', 'high:false']);
+    assert.deepStrictEqual(Array.prototype.map.call(sel.options, function (o) { return o.value + ':' + o.disabled; }), [':false', 'off:true', 'low:false', 'medium:false', 'high:false', 'max:true']);
+    assert.match(sel.options[5].title, /No thinking value is set for this level/);
     assert.match(sel.options[1].title, /does not accept this level/);
     // another model: what was found no longer applies
     $(w, 'elAiModel').value = 'other'; w.elAiModelFacts();
@@ -358,11 +359,12 @@ test('scrollspy: the rail marks the Assistant section at the top of the window',
     assert.strictEqual(w.document.querySelectorAll('#elRail a.spy, #elRail a[aria-current="location"]').length, 0, 'no section marked on other pages');
 });
 
-test('collapsed by default: only System prompt, Starter questions, Full prompt preview and the endpoint\'s Advanced options', { skip: SKIP }, function () {
+test('collapsed by default: only System prompt, Starter questions, Full prompt preview and the endpoint\'s Models and thinking and Advanced options', { skip: SKIP }, function () {
     var w = page();
     withPrompts(w, {});
     var colls = Array.prototype.map.call(w.document.querySelectorAll('button[aria-controls][aria-expanded].coll-btn'), function (b) { return b.id; });
-    assert.deepStrictEqual(colls.sort(), ['elAiColl_adv', 'elAiColl_preview', 'elAiColl_prompt', 'elAiColl_starters']);
+    assert.deepStrictEqual(colls.sort(), ['elAiColl_adv', 'elAiColl_models', 'elAiColl_preview', 'elAiColl_prompt', 'elAiColl_starters']);
+    assert.deepStrictEqual([$(w, 'elAiColl_models').getAttribute('aria-expanded'), $(w, 'elAiModelsBody').hidden], ['false', true]);
     Object.keys(COLL).forEach(function (k) {
         assert.strictEqual(isOpen(w, k), false, k);
         assert.ok($(w, 'elAiColl_' + k).querySelector('svg.elAiChev'), k + ' chevron');
@@ -770,4 +772,105 @@ test('collapsible parts: summaries follow edits (edited parts, unsaved changes, 
     w.h.aiAdminSettingsSaved(null, { reqId: sv.reqId, settings: sv.settings });
     assert.deepStrictEqual(summary(w, 'starters'), ['Windows: 3 questions, Linux: 3 questions, macOS: 4 questions.']);
     assert.strictEqual(bar(w), null);
+});
+
+test('endpoint form: users can choose the model; thinking values per model with accepted marks, per-model Test, Use tested values, saved with the endpoint', { skip: SKIP }, function () {
+    var w = page();
+    var ep = Object.assign({}, EP, {
+        thinking: null, thinkingMap: null,
+        caps: Object.assign({}, EP.caps, { thinking: { supported: true, verified: true, levels: ['off', 'low', 'medium', 'high', 'max'], accepted: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'], reasoned: ['high'] } }),
+        userModels: { enabled: true, models: [{ id: 'inkling-2-mini', thinkingMap: { off: 'none', low: 20, medium: 70, high: 90, max: 99 } }] },
+        capsByModel: []
+    });
+    w.data([ep]);
+    w.elAiOpenForm(w.elAi.endpoints[0]);
+    assert.strictEqual($(w, 'elAiUserModels').checked, true);
+    var rows = w.document.querySelectorAll('#elAiUmRows tr');
+    assert.strictEqual(rows.length, 2);
+    assert.match(rows[0].querySelector('.elAiMapName').textContent, /^qwen3Default$/);
+    assert.strictEqual(rows[1].querySelector('.elAiMapName').textContent, 'inkling-2-mini');
+    // the default row: today's values, the accepted ones marked from the endpoint's test
+    var s0 = function (lvl) { return $(w, 'elAiMapS_0_' + lvl); };
+    assert.deepStrictEqual(['off', 'low', 'medium', 'high', 'max'].map(function (l) { return s0(l).value; }), ['none', 'low', 'medium', 'high', '']);
+    var opts = Array.prototype.map.call(s0('max').options, function (o) { return o.textContent; });
+    assert.deepStrictEqual(opts, ['—', 'none ✓', 'minimal ✓', 'low ✓', 'medium ✓', 'high ✓', 'xhigh ✓', 'max ✗', 'number ✗']);
+    // the listed model: numbers shown in the number fields; no test yet, so no marks
+    assert.deepStrictEqual(['low', 'medium', 'high', 'max'].map(function (l) { return $(w, 'elAiMapS_1_' + l).value + ':' + $(w, 'elAiMapN_1_' + l).value + ':' + $(w, 'elAiMapN_1_' + l).hidden; }), ['n:20:false', 'n:70:false', 'n:90:false', 'n:99:false']);
+    assert.strictEqual($(w, 'elAiMapS_1_low').options[1].textContent, 'none');
+    // Max in the endpoint's Thinking select follows the default row: not offered until it has a value
+    assert.strictEqual(w.document.querySelector('#elAiThinking option[value="max"]').disabled, true);
+    s0('max').value = 'xhigh'; fire(w, s0('max'), 'change');
+    assert.strictEqual(w.document.querySelector('#elAiThinking option[value="max"]').disabled, false);
+    $(w, 'elAiThinking').value = 'max';
+    // add a model from the fetched list; duplicates and the endpoint's model are refused inline
+    $(w, 'elAiUmNew').value = 'qwen3'; w.elAiUmAdd();
+    assert.match($(w, 'elAiUmNewErr').textContent, /endpoint’s model/);
+    $(w, 'elAiUmNew').value = 'inkling-2-mini'; w.elAiUmAdd();
+    assert.match($(w, 'elAiUmNewErr').textContent, /already listed/);
+    $(w, 'elAiUmNew').value = 'deepseek-v4.1-flash';
+    $(w, 'elAiUmNew').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    assert.strictEqual(w.document.querySelectorAll('#elAiUmRows tr').length, 3);
+    assert.strictEqual(w.document.activeElement, $(w, 'elAiUmNew'), 'focus stays in the add field');
+    // per-model Test: sent as a draft (the form changed) with the model; the result marks that row and offers its values
+    w.elAiTestModel('deepseek-v4.1-flash');
+    var t = w.last('aiAdminTest');
+    assert.strictEqual(t.model, 'deepseek-v4.1-flash');
+    assert.ok(t.draft && t.draft.userModels.models.some(function (m) { return m.id === 'deepseek-v4.1-flash'; }));
+    w.h.aiAdminTestResult(null, { reqId: t.reqId, ok: true, network: 'loopback', model: 'deepseek-v4.1-flash', steps: [{ name: 'model', ok: true, ms: 1, detail: 'Model deepseek-v4.1-flash answered' }],
+        caps: { tools: true, ctx: 65536, thinking: { supported: true, levels: ['off', 'low', 'medium', 'high', 'max'], accepted: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 50], proposed: { off: 'none', low: 'low', medium: 'medium', high: 'high', max: 'max' } } } });
+    assert.match($(w, 'elAiTestOut').textContent, /The model deepseek-v4\.1-flash works/);
+    assert.strictEqual($(w, 'elAiMapS_2_max').options[8].textContent, 'number ✓');
+    assert.strictEqual($(w, 'elAiMapS_0_max').options[7].textContent, 'max ✗', 'the default row keeps its own test');
+    var use = w.document.querySelectorAll('#elAiUmRows tr')[2].querySelector('.elAiMapUse');
+    assert.ok(use, 'Use tested values shown');
+    assert.strictEqual(use.disabled, false);
+    use.click();
+    assert.strictEqual($(w, 'elAiMapS_2_max').value, 'max');
+    assert.strictEqual(w.document.querySelectorAll('#elAiUmRows tr')[2].querySelector('.elAiMapUse').disabled, true);
+    // a number out of range: inline error, nothing saved
+    $(w, 'elAiMapN_1_low').value = '150'; fire(w, $(w, 'elAiMapN_1_low'), 'input');
+    var n = w.sent.length;
+    w.elAiSaveEndpoint();
+    assert.strictEqual(w.sent.length, n);
+    assert.ok($(w, 'elAiMapN_1_lowErr'), 'inline error');
+    $(w, 'elAiMapN_1_low').value = '25'; fire(w, $(w, 'elAiMapN_1_low'), 'input');
+    // remove a model; save carries the map, the list and the choice
+    w.document.querySelectorAll('#elAiUmRows tr')[1].querySelector('.elAiMapRm').click();
+    assert.strictEqual(w.document.querySelectorAll('#elAiUmRows tr').length, 2);
+    w.elAiSaveEndpoint();
+    var save = w.last('aiAdminSaveEndpoint').endpoint;
+    assert.deepStrictEqual(save.thinkingMap, { off: 'none', low: 'low', medium: 'medium', high: 'high', max: 'xhigh' });
+    assert.strictEqual(save.thinking, 'max');
+    assert.deepStrictEqual(save.userModels, { enabled: true, models: [{ id: 'deepseek-v4.1-flash', thinkingMap: { off: 'none', low: 'low', medium: 'medium', high: 'high', max: 'max' } }] });
+    // the choice off: the list is kept (and said so), saved with enabled false
+    setCheck(w, 'elAiUserModels', false);
+    assert.match($(w, 'elAiMapNote').textContent, /kept but not offered/);
+    assert.match($(w, 'elAiCollSum_models').textContent, /^Users get the endpoint’s model\. Thinking values: set per model\.$/);
+    w.elAiSaveEndpoint();
+    assert.strictEqual(w.last('aiAdminSaveEndpoint').endpoint.userModels.enabled, false);
+    // Anthropic: model choice only, the value selects disabled
+    $(w, 'elAiType').value = 'anthropic'; w.elAiTypeChanged();
+    assert.strictEqual($(w, 'elAiMapS_0_low').disabled, true);
+    assert.match($(w, 'elAiMapNote').textContent, /only the model can be chosen/);
+});
+
+test('endpoint form: an unchanged saved endpoint is tested by id, also per model; starter icons are 16 px', { skip: SKIP }, function () {
+    var w = page();
+    var ep = Object.assign({}, EP, { thinkingMap: null, userModels: { enabled: true, models: [{ id: 'm2', thinkingMap: null }] }, capsByModel: [{ model: 'm2', caps: { thinking: { accepted: ['none', 'low'] } } }] });
+    w.data([ep]);
+    w.elAiOpenForm(w.elAi.endpoints[0]);
+    assert.strictEqual($(w, 'elAiMapS_1_low').options[3].textContent, 'low ✓', 'caps stored for the listed model');
+    w.document.querySelectorAll('#elAiUmRows tr')[1].querySelector('.elAiMapTest').click();
+    var t = w.last('aiAdminTest');
+    assert.deepStrictEqual([t.id, t.model, 'draft' in t], [EP.id, 'm2', false]);
+    w.document.querySelectorAll('#elAiUmRows tr')[0].querySelector('.elAiMapTest').click();
+    t = w.last('aiAdminTest');
+    assert.deepStrictEqual([t.id, 'model' in t], [EP.id, false]);
+    // another address: the listed model's marks no longer apply
+    $(w, 'elAiUrl').value = 'http://127.0.0.1:9999/v1'; w.elAiModelFacts();
+    assert.strictEqual($(w, 'elAiMapS_1_low').options[3].textContent, 'low');
+    var w2 = page();
+    dataWith(w2, {});
+    var svg = w2.document.querySelector('#elAiStart_windows .elAiIconBtn svg');
+    assert.deepStrictEqual([svg.getAttribute('width'), svg.getAttribute('height')], ['16', '16']);
 });
