@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Added
+- Assistant: *Run…* next to *Copy* on suggested commands and diagnosis steps, after an editable confirmation (on Windows with *Run as* agent or logged-in user); the output shows under the command and *Ask about the output* sends it to the Assistant as device data. New permission **Event Log: Run suggested commands** (denied by default; also needs the Run commands right). Each run is a MeshCentral device event and an audit entry
+- Assistant: users can choose the model per chat from a list the administrator sets per endpoint
+- Assistant endpoints: thinking value map per model: Off, Low, Medium, High and the new Max each send a chosen value (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or a number 1-100); *Test* tries every value and proposes the map
+- Assistant: *Quote* for selected answer text and per answer
+
+### Changed
+- Assistant: the panel opens on *Saved chats* unless a chat was used during this visit (the newest chat is no longer loaded automatically); Send while the list, the Diagnose setup or a loading chat is shown starts a new chat
+- Assistant: header and toolbar buttons share one size, with 16 px icons
+- Ollama's native API gets the thinking level (`low`, `medium`, `high`, `max`) where the model takes levels, instead of only on/off
+
+### Fixed
+- Typed text, focus and scroll position in the Event Log tab are kept when MeshCentral refreshes the device page (e.g. a Terminal or Desktop session opening or closing) or another plugin redraws the plugin tabs; an unsent question also survives a page reload
 
 ## [0.7.0] - 2026-11-19
 ### Added

@@ -89,21 +89,23 @@ Granted under *My Server → Plugins → Event Log → Permissions*; all are **d
 | Event Log: Live view | the Live view | the tab (Live runs through MeshCentral's relay tunnel) |
 | Event Log: History and Collect now | the stored history and *Collect now* | the server |
 | Event Log: Assistant | Explain, Ask and Diagnose; also needs MeshCentral's **Details** right on the device | the server, before every step |
+| Event Log: Run suggested commands | *Run…* on commands the Assistant suggests; also needs the Assistant and MeshCentral's **Run commands** right on the device | the server, before every run |
 
 - The permissions add to the normal device rights. The server reads those rights from MeshCentral's database, never from the browser.
 - Changes apply on the next device refresh. Users without Live or History see a notice with *Check again*.
 - On a MeshCentral without the plugin permission framework, only full administrators can use the tab. The startup log shows `EVENTLOG: plugin permissions registered` when the framework is present.
-- The keys (`deviceLiveTab`, `deviceHistoryTab`, `deviceAssistant`) match the Tech-Werkz fork.
+- The keys `deviceLiveTab`, `deviceHistoryTab` and `deviceAssistant` match the Tech-Werkz fork; `deviceRunCommands` is new.
 - If the plugin is loaded via `settings.plugins.list`, it does not appear on *My Server → Plugins*. Install it from the URL to grant the permissions, or, with MeshCentral stopped, edit `pluginpermission//eventlog` in the `pluginpermissions` store.
 
 ## Assistant
 
-An optional helper based on a language model (LLM) that you choose. It **only reads**: its tools are read-only and bound to one device, and it never runs commands. It suggests commands for the technician to check. Every answer cites the stored events it used (`E1`, `E2`, …). Selecting a citation highlights that event, and *Open these N events in History* lists them. The Assistant runs on the MeshCentral server, so the agents need no update.
+An optional helper based on a language model (LLM) that you choose. It **only reads**: its tools are read-only and bound to one device, and it never runs anything itself. It suggests commands; the technician checks them and copies or runs them. Every answer cites the stored events it used (`E1`, `E2`, …). Selecting a citation highlights that event, and *Open these N events in History* lists them. The Assistant runs on the MeshCentral server, so the agents need no update.
 
 - **Explain this event** — on History rows: what the event means on this device, whether it is usually harmless, and what to check next.
 - **Ask about this device** — a chat panel beside the table, or in full width. An empty panel offers starter questions per OS.
 - **Diagnose** — choose *Last 24 hours*, *Last 7 days* or *Around the last restart*. The answer has a summary, a timeline, possible causes (likely / possible / ruled out, with evidence), numbered next steps with commands to copy, and what could not be explained. Follow-up questions continue the same chat; causes can be marked *This is wrong* or asked about.
-- **Chats** — messages can be copied, edited, deleted or retried. *Suggested questions* offers follow-ups. The sliders button sets the thinking level and temperature for a chat, unless an administrator turns that off. Chats, diagnoses and the latest explanation of each event are saved per user and device: *Chats* lists, reopens and deletes them.
+- **Chats** — messages can be copied, quoted, edited, deleted or retried; selected text in an answer can be quoted into the next question. *Suggested questions* offers follow-ups. The sliders button sets the model (if the administrator lists more than one), the thinking level and the temperature for a chat. Chats, diagnoses and the latest explanation of each event are saved per user and device: the panel opens on *Saved chats*, and Send there starts a new chat. An unsent question survives tab refreshes and page reloads.
+- **Run suggested commands** — with the permission, command blocks and next steps get *Run…* next to *Copy*. A dialog shows the command for editing first (on Windows also *Run as*: the agent or the logged-in user). The output appears under the command; *Ask about the output* sends it to the Assistant like other device data (pseudonymized, marked as data). Each run is recorded as a MeshCentral device event and in the Assistant's audit log. One command runs per device at a time; it should finish on its own (no prompts).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/assistant-diagnosis-dark.png">
@@ -118,10 +120,11 @@ An optional helper based on a language model (LLM) that you choose. It **only re
 ### Setup
 
 1. *Assistant → Endpoints → Add endpoint.* Choose the server type, address, API key (if needed) and model; *Fetch models* lists the models the server offers. *Advanced options → Generation* sets the thinking level, temperature, top-p, top-k and seed; empty fields keep the server's defaults.
-2. *Test connection* checks the address, API key, model, tool calls, context size, thinking levels and the server's defaults. Then *Save endpoint*.
+2. *Test connection* checks the address, API key, model, tool calls, context size, thinking values and the server's defaults. Then *Save endpoint*.
+   - *Models and thinking:* *Users can choose the model* offers more models of the same server per chat. For each model, the levels Off / Low / Medium / High / Max send a value you pick (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or a number 1–100; servers interpret them differently). *Test* tries every value and *Use tested values* takes over what the server accepted.
 3. Check **Data sent to the model**, **Access** (daily limits) and **Saved results**, then *Save settings*.
 4. *Config sets →* pick a set *→ Assistant endpoint.*
-5. Grant **Event Log: Assistant**.
+5. Grant **Event Log: Assistant** (and **Run suggested commands** where wanted).
 
 **Models.** Prefer a local or self-hosted server (Ollama, vLLM, LM Studio, llama.cpp, LocalAI; there are presets for these). With one, the data stays on your network. Cloud services work if you enter their address yourself. API formats: OpenAI-compatible chat (Ollama's native API when *num_ctx* is set), OpenAI Responses, Anthropic Messages. Models without tool calls run in *Summary only* mode: they get one prepared summary with the question. Ollama's default context (as small as 4,096 tokens) is too small for event logs; set *Ollama context (num_ctx)* or `OLLAMA_CONTEXT_LENGTH`.
 
@@ -154,7 +157,7 @@ An optional helper based on a language model (LLM) that you choose. It **only re
 
 ### Security and limits
 
-- **Untrusted log text:** device data is marked as data, never as instructions, and suspicious text is flagged. Prompt injection cannot be ruled out; the read-only tools limit what it can do. Access is checked again before every tool call, so revoking it stops a running answer.
+- **Untrusted log text:** device data and command output are marked as data, never as instructions, and suspicious text is flagged. Prompt injection cannot be ruled out; the read-only tools limit what it can do, and a suggested command runs only after a person confirms it. Access is checked again before every tool call, so revoking it stops a running answer.
 - **Safe output:** raw HTML is shown as text, images become links naming their domain, and links show their real domain.
 - **API keys** are encrypted (AES-256-GCM) with `meshcentral-data/plugin-eventlog-ai.key` (**back it up**) and are never sent to a browser. `env:VAR_NAME` reads a key from the server's environment instead. Keys are never sent over plain `http://` to a public address.
 - **Network:** requests always go from the server, through `HTTPS_PROXY` / `HTTP_PROXY` for public `https://` endpoints. Redirects are not followed. Link-local and metadata addresses are blocked unless allowed per endpoint.
@@ -164,7 +167,7 @@ An optional helper based on a language model (LLM) that you choose. It **only re
   - tool calls and data per answer: automatic, or set by hand;
   - maximum answer length and a timeout per request;
   - a conversation ends after 30 idle minutes.
-- **Audit log** (*Requests* page, CSV export, kept 90 days): who asked, about which device, which endpoint and model, how much was sent, and how many values were replaced. Optionally it also stores the full pseudonymized transcripts.
+- **Audit log** (*Requests* page, CSV export, kept 90 days): who asked, about which device, which endpoint and model, how much was sent, how many values were replaced, and which commands were run (as proposed and as run). Optionally it also stores the full pseudonymized transcripts.
 
 ## Storage
 
