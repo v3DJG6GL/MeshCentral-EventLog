@@ -108,7 +108,8 @@ module.exports.attach = function (obj) {
 
     // ---- state ----------------------------------------------------------------------------------------------------
     // st.ai lives in the tab state (reset on a device change); the conversations of the last 5 devices are stashed in
-    // memory so switching back restores them. Nothing of it goes to localStorage (only the panel width does).
+    // memory so switching back restores them. Nothing of it goes to localStorage (only the panel width does); the
+    // composer draft is also kept in sessionStorage per device (evl_ai_draft:<nodeid>), so it survives a reload.
     obj.aiNewState = function () {
         var ph = pluginHandler.eventlog;
         var nid = (typeof currentNode != 'undefined' && currentNode) ? currentNode._id : null;
@@ -124,10 +125,11 @@ module.exports.attach = function (obj) {
         // pend: a message action sent to the server { cid, n, op, then }
         // genNew: the answer settings { thinking?, temperature? } for a chat not started yet (a chat keeps its own in
         // c.gen), genOpen: the Answer settings popover is open, fuReq: a "Suggest questions" request { reqId, cid, n }
-        var full = false;
+        var full = false, draft = '';
         try { full = getstore('evl_ai_full', '') == '1'; } catch (e) { }
+        try { if (nid) draft = String(window.sessionStorage.getItem('evl_ai_draft:' + nid) || '').slice(0, 4000); } catch (e) { }
         return { nodeid: nid, open: false, w: Number(getstore('evl_ai_w', '0')) || 0, convs: {}, chat: null, explainBy: {},
-                 focus: null, sel: null, draft: '', diagWin: win, notice: null, reveal: null, peek: null, hyp: {}, citeVer: 0,
+                 focus: null, sel: null, draft: draft, diagWin: win, notice: null, reveal: null, peek: null, hyp: {}, citeVer: 0,
                  saved: null, hist: false, opening: null, delAsk: null, exReq: {}, full: full, diagSetup: false, act: null, pend: null,
                  genNew: {}, genOpen: false, fuReq: null };
     };
@@ -465,11 +467,8 @@ module.exports.attach = function (obj) {
         });
         (Array.isArray(m.explains) ? m.explains : []).slice(0, 200).forEach(function (x) { if (x && typeof x.eventId == 'string' && x.eventId.length <= 64) sv.explains[x.eventId] = Number(x.time) || 0; });
         a.saved = sv;
-        if (sv.enabled) {
-            // after a reload: the most recent chat (or diagnosis) comes back into the panel
-            var cur = a.convs[a.chat];
-            if (!cur && !a.opening && sv.chats.length) { a.opening = sv.chats[0].id; a.openAuto = true; ph.aiHistoryGet('chat', sv.chats[0].id); }
-        }
+        // a panel already open without a chat (the Assistant-only page) starts on the list, like aiToggle
+        if (sv.enabled && sv.chats.length && a.open && !a.convs[a.chat] && !a.opening && !a.diagSetup) a.hist = true;
         if (a.open) ph.aiRenderPanel();
         if (Object.keys(sv.explains).length) ph.elUpdate();
     };
@@ -526,17 +525,15 @@ module.exports.attach = function (obj) {
         if (!ph.aiOk(m)) return;
         var a = ph.st.ai, sv = a.saved || { chats: [], explains: {} }, item = (m.item && typeof m.item == 'object') ? m.item : null, c;
         if (m.kind == 'chat') {
-            var want = a.opening, auto = a.openAuto;
-            if (typeof m.id != 'string' || m.id !== want) return;   // not (or no longer) the chat asked for
-            a.opening = null; a.openAuto = false;
+            if (typeof m.id != 'string' || m.id !== a.opening) return;   // not (or no longer) the chat asked for
+            a.opening = null;
             if (!item) {
                 sv.chats = sv.chats.filter(function (x) { return x.id !== m.id; });
-                if (!auto) ph.aiSay('This chat is no longer saved.');
+                ph.aiSay('This chat is no longer saved.');
                 if (a.open) ph.aiRenderPanel();
                 return;
             }
             var cur = a.convs[a.chat];
-            if (auto && cur) return;               // the user started something else meanwhile
             if (cur && ph.aiBusy(cur)) return;
             c = ph.aiConvFromSaved('chat', Object.assign({}, item, { id: m.id }));
             if (!c) return;
@@ -544,7 +541,8 @@ module.exports.attach = function (obj) {
             a.chat = c.id; a.hist = false; a.diagSetup = false; a.act = null; a.focus = c.id; a.sel = null; a.peek = null; a.citeVer++;
             ph.aiRenderPanel();
             ph.elUpdate();
-            if (!auto) { ph.aiSay(c.mode == 'diagnose' ? 'Opened the saved diagnosis.' : 'Opened the saved chat.'); var ta = Q('evlAiIn'); if (ta) ta.focus(); }
+            ph.aiSay(c.mode == 'diagnose' ? 'Opened the saved diagnosis.' : 'Opened the saved chat.');
+            var ta = Q('evlAiIn'); if (ta) ta.focus();
             return;
         }
         if (m.kind == 'explain' && typeof m.id == 'string') {
@@ -632,8 +630,8 @@ module.exports.attach = function (obj) {
             } else {
                 h += '<button class="evlAiHistOpen" onclick="return pluginHandler.eventlog.aiHistoryOpen(\'' + x.id + '\')"' + (isCur ? ' aria-current=true' : '') + '>' +
                      '<span class=t>' + esc(x.title) + '</span><span class=m>' + mk + esc(meta) + (isCur ? ' (open)' : '') + '</span></button>' +
-                     '<button class="evlBtn mini evlAiHistDel" aria-label="Delete chat “' + esc(x.title) + '”" title="' + (busy ? 'Wait until the answer is finished' : 'Delete this chat') + '"' + (busy ? ' disabled' : '') +
-                     ' onclick="return pluginHandler.eventlog.aiHistoryDel(\'' + x.id + '\')"><svg width=12 height=12 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.8 aria-hidden=true><path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></button>';
+                     '<button class="evlBtn mini evlAiIco sm evlAiHistDel" aria-label="Delete chat “' + esc(x.title) + '”" title="' + (busy ? 'Wait until the answer is finished' : 'Delete this chat') + '"' + (busy ? ' disabled' : '') +
+                     ' onclick="return pluginHandler.eventlog.aiHistoryDel(\'' + x.id + '\')">' + ph.aiIcon('del') + '</button>';
             }
             h += '</li>';
         });
@@ -662,7 +660,7 @@ module.exports.attach = function (obj) {
         if (typeof id != 'string' || !/^ch[0-9a-f]{24}$/.test(id)) return false;
         if (cur && cur.chatId === id) { a.hist = false; ph.aiRenderPanel(); var ta = Q('evlAiIn'); if (ta) ta.focus(); return false; }
         if (cur && ph.aiBusy(cur)) { ph.aiSay('Wait until the answer is finished, or stop it first.'); return false; }
-        a.opening = id; a.openAuto = false; a.hist = false;
+        a.opening = id; a.hist = false;
         ph.aiHistoryGet('chat', id);
         ph.aiRenderPanel();
         return false;
@@ -1483,7 +1481,7 @@ module.exports.attach = function (obj) {
         else t = n.ref + ' was not found in the stored events. Retention may have removed it.';
         return '<div class=evlAiNote role=status><span>' + t + '</span>' +
                (n.kind != 'gone' ? '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiShowAnyway()">Show anyway</button>' : '') +
-               '<button class="evlBtn mini" aria-label="Dismiss" onclick="return pluginHandler.eventlog.aiNoteClose()">&#10005;</button></div>';
+               '<button class="evlBtn mini evlAiIco sm" aria-label="Dismiss" title="Dismiss" onclick="return pluginHandler.eventlog.aiNoteClose()">' + pluginHandler.eventlog.aiIcon('x') + '</button></div>';
     };
     obj.aiNoteClose = function () {
         var ph = pluginHandler.eventlog;
@@ -1530,7 +1528,7 @@ module.exports.attach = function (obj) {
         var ev = ci.ev;
         return '<div class=evlAiPeek role=region aria-label="Cited event ' + p.ref + '"><div class=evlAiPeekH><span class="evlCite static">' + p.ref + '</span>' +
                '<span class=evlMono>' + esc(ph.elFmtTime(ev.time)) + '</span><span class="evlLv ' + ev.levelCls + '"><i></i>' + esc(ev.levelName) + '</span><span>' + esc(ev.source) + ' ' + esc(ev.id) + '</span>' +
-               '<button class="evlBtn mini" aria-label="Close the cited event" onclick="return pluginHandler.eventlog.aiPeekClose()">&#10005;</button></div>' +
+               '<button class="evlBtn mini evlAiIco sm" aria-label="Close the cited event" title="Close" onclick="return pluginHandler.eventlog.aiPeekClose()">' + ph.aiIcon('x') + '</button></div>' +
                '<div class=evlAiPeekM>' + esc(ev.message) + '</div></div>';
     };
     obj.aiRenderPeek = function () {
@@ -1718,7 +1716,11 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai;
         if (!ph.elCan('assistant')) return false;
         a.open = ph.aiOnly() ? true : !a.open;
-        if (a.open) a.diagSetup = false;
+        if (a.open) {
+            a.diagSetup = false;
+            // no chat in this visit yet: the saved chats instead of the newest one opening by itself
+            if (!a.convs[a.chat] && !a.opening && a.saved && a.saved.enabled && a.saved.chats.length) a.hist = true;
+        }
         ph.aiRenderPanel();
         setTimeout(function () { try { var el = Q(pluginHandler.eventlog.elState().ai.open ? 'evlAiIn' : 'evlAiBtn'); if (el) el.focus(); } catch (e) { } }, 0);
         return false;
@@ -1731,7 +1733,7 @@ module.exports.attach = function (obj) {
         var b = Q('evlAiBtn'); if (b) b.focus();
         return false;
     };
-    // svg icons of the panel (16 px, stroke = currentColor)
+    // svg icons of the panel (16 px, stroke = currentColor; the same metrics as elIcon in the toolbar)
     obj.aiIcon = function (name) {
         var d = ({
             copy: '<rect x=5.5 y=5.5 width=8 height=8 rx=1.5 /><path d="M10.5 3.2H4.2a1 1 0 0 0-1 1v6.3"/>',
@@ -1743,9 +1745,11 @@ module.exports.attach = function (obj) {
             diag: '<path d="M1.5 8.5h2.8l1.6-4.2 2.8 8 1.7-5 1 1.2h3.1"/>',
             sliders: '<path d="M2.5 4.5h5.6M11.9 4.5h1.6M2.5 11.5h1.6M7.9 11.5h5.6"/><circle cx=10 cy=4.5 r=1.9 /><circle cx=6 cy=11.5 r=1.9 />',
             chev: '<path d="M6 3.5l4.5 4.5L6 12.5"/>',
-            x: '<path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/>'
+            x: '<path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/>',
+            list: '<path d="M2.8 4h10.4M2.8 8h10.4M2.8 12h10.4"/>',
+            quote: '<path d="M2.8 8.6h3.6v3.6H2.8zM2.8 8.6c0-2.3 1-3.8 3.1-4.8M9.6 8.6h3.6v3.6H9.6zM9.6 8.6c0-2.3 1-3.8 3.1-4.8"/>'
         })[name] || '';
-        return '<svg width=14 height=14 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 stroke-linecap=round stroke-linejoin=round aria-hidden=true>' + d + '</svg>';
+        return '<svg width=16 height=16 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 stroke-linecap=round stroke-linejoin=round aria-hidden=true>' + d + '</svg>';
     };
     obj.aiRenderPanel = function () {
         var ph = pluginHandler.eventlog, st = ph.elState(), a = st.ai, el = Q('evlAi');
@@ -1765,12 +1769,21 @@ module.exports.attach = function (obj) {
             el.innerHTML = '<div class=evlAiIn onkeydown="return pluginHandler.eventlog.aiPanelKey(event)">' +
                 '<div class=evlAiSplit role=separator tabindex=0 aria-orientation=vertical aria-label="Resize the assistant panel" title="Drag to resize, double-click to reset"' +
                 ' onpointerdown="return pluginHandler.eventlog.aiSplitDown(event)" ondblclick="return pluginHandler.eventlog.aiSplitReset()" onkeydown="return pluginHandler.eventlog.aiSplitKey(event)"></div>' +
-                '<div class=evlAiHd id=evlAiHd></div><div class=evlAiPopSlot id=evlAiPopSlot></div><div class=evlAiStripSlot id=evlAiStripSlot></div>' +
+                '<div class=evlAiHd id=evlAiHd></div><div class=evlAiPopSlot id=evlAiPopSlot></div><div class=evlAiQtSlot id=evlAiQtSlot></div><div class=evlAiStripSlot id=evlAiStripSlot></div>' +
                 '<div class=evlAiLog id=evlAiLog role=log aria-live=polite aria-busy=false aria-label="Conversation"></div>' +
                 '<div class=evlAiFt id=evlAiFt></div>' +
                 '<div class=evlAiHGrip id=evlAiHGrip role=separator tabindex=0 aria-orientation=horizontal aria-controls=evlAi aria-label="Height of the assistant panel" aria-valuemin=360' +
                 ' title="Drag to change the height, double-click to fit the window again"' +
                 ' onpointerdown="return pluginHandler.eventlog.aiHGripDown(event)" ondblclick="return pluginHandler.eventlog.aiHGripReset()" onkeydown="return pluginHandler.eventlog.aiHGripKey(event)"></div></div>';
+            Q('evlAiLog').addEventListener('scroll', function () { try { if (pluginHandler.eventlog._aiQt) pluginHandler.eventlog.aiQuoteSync(); } catch (e) { } });
+            if (!ph._aiQtBound) {   // text selected in an answer: the Quote button
+                ph._aiQtBound = true;
+                document.addEventListener('selectionchange', function () {
+                    var p = pluginHandler.eventlog;
+                    clearTimeout(p._aiQtT);
+                    p._aiQtT = setTimeout(function () { try { pluginHandler.eventlog.aiQuoteSync(); } catch (e) { } }, 120);
+                });
+            }
         }
         var c = a.convs[a.chat] || null;
         QH('evlAiHd', ph.aiHeadHtml(c));
@@ -1814,8 +1827,7 @@ module.exports.attach = function (obj) {
             var n = sv.chats.length;
             hb = '<button id=evlAiHistBtn class="evlBtn mini evlAiHistBtn' + (a.hist ? ' on' : '') + '" aria-expanded=' + (a.hist ? 'true' : 'false') + ' aria-controls=evlAiLog' +
                  ' aria-label="' + (a.hist ? 'Back to the chat' : 'Saved chats' + (n ? ' (' + n + ')' : '')) + '" onclick="return pluginHandler.eventlog.aiHistoryToggle()">' +
-                 '<svg width=13 height=13 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 aria-hidden=true><path d="M2.5 4h11M2.5 8h11M2.5 12h7"/></svg><span class=evlAiHistL>Chats</span>' +
-                 (n ? '<span class=evlAiN>' + n + '</span>' : '') + '</button>';
+                 ph.aiIcon('list') + '<span class=evlAiHistLbl>Chats</span>' + (n ? '<span class=evlAiN>' + n + '</span>' : '') + '</button>';
         }
         var title = a.hist ? 'Saved chats' : (a.diagSetup ? 'Diagnose' : (c && c.mode == 'diagnose' ? 'Diagnosis' : 'Ask'));
         // full width <-> docked beside the table (not offered stacked below the table, nor without a table)
@@ -1830,8 +1842,8 @@ module.exports.attach = function (obj) {
         }
         return '<div class=evlAiTitle><h2>' + title + '</h2>' + (line && !a.hist ? '<div class=evlAiSub>' + ph.aiEsc(line) + '</div>' : '') +
                (tag ? '<div class=evlAiGenTag>' + ph.aiIcon('sliders') + '<span>' + ph.aiEsc(tag) + '</span></div>' : '') + (a.hist ? '' : ph.aiNotesHtml(c)) + '</div>' + hb + gb +
-               '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiNewChat()"' + (c || a.hist || a.diagSetup ? '' : ' disabled') + '>New chat</button>' + fb +
-               (only ? '' : '<button class="evlBtn mini evlAiX" aria-label="Close the assistant" title="Close" onclick="return pluginHandler.eventlog.aiClosePanel()">' + ph.aiIcon('x') + '</button>');
+               '<button class="evlBtn mini evlAiNewBtn" onclick="return pluginHandler.eventlog.aiNewChat()"' + (c || a.hist || a.diagSetup ? '' : ' disabled') + '>New chat</button>' + fb +
+               (only ? '' : '<button class="evlBtn mini evlAiIco evlAiX" aria-label="Close the assistant" title="Close" onclick="return pluginHandler.eventlog.aiClosePanel()">' + ph.aiIcon('x') + '</button>');
     };
     // the starter questions the server chose for this device's OS (admin-editable), else the built-in Windows list
     obj.aiStarters = function () {
@@ -1922,7 +1934,7 @@ module.exports.attach = function (obj) {
     };
     obj.aiActBtn = function (cid, n, kind, icon, label, dis) {
         var wait = 'Wait until the answer is finished or stop it';
-        return '<button type=button class="evlBtn mini evlAiIco" data-act=' + kind + ' aria-label="' + label + '" title="' + (dis ? wait : label) + '"' + (dis ? ' disabled' : '') +
+        return '<button type=button class="evlBtn mini evlAiIco sm" data-act=' + kind + ' aria-label="' + label + '" title="' + (dis ? wait : label) + '"' + (dis ? ' disabled' : '') +
                ' onclick="return pluginHandler.eventlog.aiMsgAct(\'' + cid + '\',' + n + ',\'' + kind + '\',this)">' + pluginHandler.eventlog.aiIcon(icon) + '</button>';
     };
     obj.aiQActsHtml = function (c, t, busy) {
@@ -1936,7 +1948,8 @@ module.exports.attach = function (obj) {
     };
     obj.aiAActsHtml = function (c, t, busy) {
         var ph = pluginHandler.eventlog;
-        var h = '<div class="evlAiMsgActs a" role=group aria-label="Answer actions">' + ph.aiActBtn(c.id, t.n, 'copya', 'copy', t.diag ? 'Copy the diagnosis' : 'Copy the answer', false);
+        var h = '<div class="evlAiMsgActs a" role=group aria-label="Answer actions">' + ph.aiActBtn(c.id, t.n, 'copya', 'copy', t.diag ? 'Copy the diagnosis' : 'Copy the answer', false) +
+                ph.aiActBtn(c.id, t.n, 'quote', 'quote', t.diag ? 'Quote the diagnosis in your question' : 'Quote the answer in your question', false);
         if (ph.aiCanEdit(c, t)) h += ph.aiActBtn(c.id, t.n, 'retry', 'retry', t.diag ? 'Run the diagnosis again' : 'Retry: ask the same question again', busy);
         return h + '</div>';
     };
@@ -1973,6 +1986,7 @@ module.exports.attach = function (obj) {
         if (!c || !t) return false;
         if (kind == 'copyq') return ph.aiCopyText(String(t.q), btn);
         if (kind == 'copya') return ph.aiCopyText(ph.aiTurnText(c, t), btn);
+        if (kind == 'quote') return ph.aiQuoteInsert(ph.aiTurnText(c, t));
         if (ph.aiBusy(c) || (a.pend && a.pend.cid == cid)) { if (!(kind == 'del' && t.status != 'done' && t.status != 'running')) { ph.aiSay('Wait until the answer is finished or stop it.'); return false; } }
         if (kind == 'retry' && !ph.aiLaterN(c, t)) return ph.aiMsgRun(c, t, 'retry');
         a.act = { cid: cid, n: n, kind: kind }; a.actDraft = (kind == 'edit') ? String(t.q) : null;
@@ -2047,7 +2061,7 @@ module.exports.attach = function (obj) {
         if (m.ok !== true) {
             var code = String(m.code || '');
             ph.aiSay(code == 'busy' ? 'Wait until the answer is finished or stop it.' : (code == 'changed' ? 'This chat changed meanwhile; it is shown again as it is saved.' : (code == 'notFound' ? 'This chat is no longer available.' : 'The chat could not be changed.')));
-            if (code == 'changed' && p.chatId && c && !ph.aiBusy(c)) { a.opening = p.chatId; a.openAuto = false; ph.aiHistoryGet('chat', p.chatId); }
+            if (code == 'changed' && p.chatId && c && !ph.aiBusy(c)) { a.opening = p.chatId; ph.aiHistoryGet('chat', p.chatId); }
             ph.aiRenderPanel();
             return;
         }
@@ -2075,15 +2089,21 @@ module.exports.attach = function (obj) {
     obj.aiRenderComposer = function () {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[a.chat], busy = ph.aiBusy(c), ft = Q('evlAiFt');
         if (!ft) return;
+        var name = (typeof currentNode != 'undefined' && currentNode) ? currentNode.name : 'this device';
         if (!Q('evlAiIn')) {
-            var acc = ph.elAccess || {}, name = (typeof currentNode != 'undefined' && currentNode) ? currentNode.name : 'this device';
-            ft.innerHTML = '<div id=evlAiPeekSlot></div><label for=evlAiIn class=evlAiLbl>Ask about ' + ph.aiEsc(name) + '</label>' +
+            var acc = ph.elAccess || {};
+            ft.innerHTML = '<div id=evlAiPeekSlot></div><label for=evlAiIn id=evlAiLbl class=evlAiLbl></label>' +
                 '<div class=evlAiRow><textarea id=evlAiIn rows=2 maxlength=4000 onkeydown="return pluginHandler.eventlog.aiKey(event)" oninput="pluginHandler.eventlog.aiDraft(this)"></textarea>' +
                 '<button id=evlAiSend class="evlBtn on" onclick="return pluginHandler.eventlog.aiSubmit()">Send</button></div>' +
                 '<div class=evlAiDisc><span>Answers can be wrong. Check the cited events before acting.' + ((function (r) { var q = (typeof r == 'number') ? r : ((r != null && typeof r.questions == 'number') ? r.questions : null); return (q != null && q <= 10) ? ' ' + q + ' questions left today.' : ''; })(acc.remaining)) + '</span>' +
                 '<button id=evlAiHReset class=evlLinkBtn hidden title="Fit the panel to the window again" onclick="return pluginHandler.eventlog.aiHGripReset()">Reset panel height</button></div>';
             Q('evlAiIn').value = a.draft || '';
         }
+        var ta = Q('evlAiIn');
+        if (!ta.value && a.draft) ta.value = a.draft;   // the field was re-created behind our back (another plugin re-parsed the page)
+        // the list, the Diagnose setup or a saved chat still loading: Send starts a new chat (aiAsk)
+        var lb = Q('evlAiLbl'), lt0 = ((a.hist || a.diagSetup || a.opening) && !busy) ? 'New chat about ' : 'Ask about ';
+        if (lb && lb.textContent != lt0 + name) lb.textContent = lt0 + name;
         var b = Q('evlAiSend'), lt = (c && busy) ? c.turns[c.turns.length - 1] : null, want = lt ? 'stop:' + lt.t0 : 'send';
         if (b._evlState !== want) {   // not rebuilt while it stays the same: the arc keeps turning smoothly
             b._evlState = want;
@@ -2099,7 +2119,24 @@ module.exports.attach = function (obj) {
         return true;
     };
     obj.aiDraft = function (el) {
-        pluginHandler.eventlog.elState().ai.draft = String(el.value || '').slice(0, 4000);
+        var ph = pluginHandler.eventlog;
+        ph.elState().ai.draft = String(el.value || '').slice(0, 4000);
+        ph.aiDraftStore(true);
+    };
+    // the draft of this device into sessionStorage (later: after a pause in typing); an empty draft removes it
+    obj.aiDraftStore = function (later) {
+        var ph = pluginHandler.eventlog, a = ph.st && ph.st.ai;
+        if (!a || !a.nodeid) return;
+        var k = 'evl_ai_draft:' + a.nodeid, v = String(a.draft || '').slice(0, 4000);
+        var put = function () { try { if (v) window.sessionStorage.setItem(k, v); else window.sessionStorage.removeItem(k); } catch (e) { } };
+        clearTimeout(ph._aiDraftT); ph._aiDraftT = null; ph._aiDraftPut = null;
+        if (!later || !v) { put(); return; }
+        ph._aiDraftPut = put;
+        ph._aiDraftT = setTimeout(function () { pluginHandler.eventlog._aiDraftT = null; put(); }, 400);
+        if (!ph._aiDraftBound) {   // a reload right after typing: the last keystrokes still go in
+            ph._aiDraftBound = true;
+            window.addEventListener('pagehide', function () { try { var p = pluginHandler.eventlog; if (p._aiDraftT && p._aiDraftPut) { clearTimeout(p._aiDraftT); p._aiDraftT = null; p._aiDraftPut(); } } catch (e) { } });
+        }
     };
     obj.aiSubmit = function () {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[a.chat];
@@ -2115,11 +2152,14 @@ module.exports.attach = function (obj) {
         text = String(text).slice(0, 4000);
         var c = a.convs[a.chat];
         if (c && a.pend && a.pend.cid == c.id) { ph.aiSay('Wait until the chat is updated.'); return false; }
-        a.draft = '';
+        // only the chat on screen is continued: from the chat list, the Diagnose setup or while a saved chat is still
+        // loading, the question starts a new chat
+        var shown = !a.hist && !a.diagSetup && !a.opening;
+        a.draft = ''; ph.aiDraftStore();
         var ta = Q('evlAiIn'); if (ta) ta.value = '';
-        a.hist = false; a.delAsk = null; a.diagSetup = false; a.act = null;
+        a.hist = false; a.delAsk = null; a.diagSetup = false; a.act = null; a.opening = null;
         // a diagnosis chat takes questions once its diagnosis is there
-        var chat = ph.aiIsChat(c) && !(c.mode == 'diagnose' && c.turns[0].status != 'done');
+        var chat = shown && ph.aiIsChat(c) && !(c.mode == 'diagnose' && c.turns[0].status != 'done');
         if (chat && c.convId && !c.closed && !ph.aiBusy(c) && c.status != 'cancelled') {
             var last = c.turns[c.turns.length - 1];
             c.turns.push(ph.aiNewTurn((last ? last.n : 0) + 1, text));
@@ -2453,11 +2493,73 @@ module.exports.attach = function (obj) {
     obj.aiPrefill = function (text) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[a.chat];
         if (c && !ph.aiIsChat(c)) a.chat = null;
-        a.draft = String(text).slice(0, 4000);
+        a.draft = String(text).slice(0, 4000); ph.aiDraftStore();
         a.open = true; a.diagSetup = false; a.hist = false;
         ph.aiRenderPanel();
         var ta = Q('evlAiIn');
         if (ta) { ta.value = a.draft; ta.focus(); try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) { } }
+        return false;
+    };
+
+    // ---- Quote: selected text of one answer (or a whole answer) into the question, as "> " lines ------------------------
+    // The text is taken from the page (pseudonymized values as shown; the server pseudonymizes questions again) and
+    // only ever set as the textarea's value.
+    obj.aiQuoteSync = function () {
+        var ph = pluginHandler.eventlog, slot = Q('evlAiQtSlot'), log = Q('evlAiLog');
+        if (!slot) return;
+        var hide = function () { ph._aiQt = null; if (slot.firstChild) slot.innerHTML = ''; };
+        var sel = window.getSelection ? window.getSelection() : null;
+        if (!log || !sel || sel.rangeCount < 1 || sel.isCollapsed) return hide();
+        var r = sel.getRangeAt(0);
+        var box = function (n) { var e = n && (n.nodeType == 1 ? n : n.parentNode); return (e && e.closest) ? e.closest('.evlAiA, .evlDgCard') : null; };
+        var b = box(r.startContainer);
+        if (!b || b !== box(r.endContainer) || !log.contains(b)) return hide();
+        var txt = ph.aiStripMarks(sel.toString()).trim();
+        if (!txt) return hide();
+        ph._aiQt = txt;
+        if (!Q('evlAiQtBtn')) slot.innerHTML = '<button type=button id=evlAiQtBtn class="evlBtn mini evlAiQtBtn" title="Quote the selected text in your question" onmousedown="event.preventDefault()" onclick="return pluginHandler.eventlog.aiQuoteSel()">' + ph.aiIcon('quote') + 'Quote</button>';
+        // below the end of the selection, inside the conversation's visible part
+        var btn = Q('evlAiQtBtn'), par = btn.offsetParent, rs = (typeof r.getClientRects == 'function') ? r.getClientRects() : null;
+        var end = (rs && rs.length) ? rs[rs.length - 1] : ((typeof r.getBoundingClientRect == 'function') ? r.getBoundingClientRect() : null);
+        if (!par || !end) return;
+        var pr = par.getBoundingClientRect(), lr = log.getBoundingClientRect(), bw = btn.offsetWidth || 72, bh = btn.offsetHeight || 28;
+        if (end.bottom < lr.top || end.top > lr.bottom) { slot.innerHTML = ''; return; }
+        var top = Math.max(lr.top + 4, Math.min(end.bottom + 6, lr.bottom - bh - 4)) - pr.top;
+        var left = Math.max(pr.left + 6, Math.min(end.right - bw / 2, pr.right - bw - 6)) - pr.left;
+        btn.style.top = Math.round(top) + 'px'; btn.style.left = Math.round(left) + 'px';
+    };
+    obj.aiQuoteSel = function () {
+        var ph = pluginHandler.eventlog, txt = ph._aiQt;
+        ph._aiQt = null;
+        var slot = Q('evlAiQtSlot'); if (slot) slot.innerHTML = '';
+        try { window.getSelection().removeAllRanges(); } catch (e) { }
+        if (txt) ph.aiQuoteInsert(txt);
+        return false;
+    };
+    // "> " lines and a blank line at the cursor of the composer (about 2000 characters at most)
+    obj.aiQuoteInsert = function (text) {
+        var ph = pluginHandler.eventlog, ta = Q('evlAiIn');
+        var q = ph.aiStripMarks(text).replace(/\r\n?/g, '\n').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+        if (!ta || !q) return false;
+        var v = String(ta.value || ''), s = ta.selectionStart, e = ta.selectionEnd;
+        if (typeof s != 'number' || s > v.length) s = v.length;
+        if (typeof e != 'number' || e < s || e > v.length) e = s;
+        var before = v.slice(0, s), after = v.slice(e);
+        var lead = !before ? '' : (/\n\n$/.test(before) ? '' : (/\n$/.test(before) ? '\n' : '\n\n'));
+        var room = 4000 - before.length - after.length - lead.length - 2, ins = '';
+        if (q.length > 2000) q = q.slice(0, 1999) + '\u2026';
+        for (var i = 0; i < 3; i++) {
+            ins = q.split('\n').map(function (l) { return l ? '> ' + l : '>'; }).join('\n');
+            if (ins.length <= room) break;
+            q = q.slice(0, Math.max(0, q.length - (ins.length - room) - 1)) + '\u2026';
+        }
+        if (room < 40 || ins.length > room) { ph.aiSay('The question is too long to add a quote.'); ta.focus(); return false; }
+        ins = lead + ins + '\n\n';
+        ta.value = before + ins + after;
+        ta.focus();
+        try { ta.setSelectionRange(before.length + ins.length, before.length + ins.length); } catch (x) { }
+        ph.aiDraft(ta);
+        ph.aiSay('Quoted in your question.');
         return false;
     };
 
@@ -2945,10 +3047,13 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlMain.evlAiFull:not(.evlStack) .evlCol, #pluginEventLog .evlMain.evlAiOnly .evlCol { display:none; }
 #pluginEventLog .evlMain.evlAiFull:not(.evlStack) .evlAi, #pluginEventLog .evlMain.evlAiOnly .evlAi { flex:1 1 auto; max-width:none; margin-left:0; }
 #pluginEventLog .evlMain.evlAiOnly.evlStack .evlAi { margin-top:0; }
-#pluginEventLog .evlAiFull .evlAiSplit, #pluginEventLog .evlAiOnly .evlAiSplit, #pluginEventLog .evlStack .evlAiFullBtn { display:none; }
+#pluginEventLog .evlAiFull .evlAiSplit, #pluginEventLog .evlAiOnly .evlAiSplit, #pluginEventLog .evlStack .evlAiHd .evlBtn.evlAiFullBtn { display:none; }
 #pluginEventLog .evlAiFull .evlAiLog, #pluginEventLog .evlAiFull .evlAiFt { padding-left:max(13px, calc((100% - 1040px) / 2)); padding-right:max(13px, calc((100% - 1040px) / 2)); }
-#pluginEventLog .evlAiIco { display:inline-flex; align-items:center; justify-content:center; padding:3px 5px; min-width:26px; }
-#pluginEventLog .evlAiIco svg { margin:0; }
+/* icon-only buttons: square, a 16 px icon in the middle (.sm: inside the conversation, notes and lists) */
+#pluginEventLog .evlBtn.evlAiIco, #pluginEventLog .evlBtn.mini.evlAiIco { display:inline-flex; align-items:center; justify-content:center; box-sizing:border-box; min-width:28px; height:28px; min-height:0; padding:0; line-height:1; flex:none; }
+#pluginEventLog .evlBtn.evlAiIco.sm { min-width:26px; height:26px; }
+#pluginEventLog .evlBtn.mini.evlAiIco.ok { padding:0 7px; }
+#pluginEventLog .evlBtn.evlAiIco svg { display:block; margin:0; flex:none; }
 #pluginEventLog .evlAiFullBtn[aria-pressed=true] { color:var(--evl-acc); }
 #pluginEventLog .evlAiHGrip { flex:none; position:relative; height:9px; cursor:row-resize; touch-action:none; user-select:none; background:var(--evl-bg); border-top:1px solid var(--evl-line2); border-radius:0 0 3px 3px; outline:none; }
 #pluginEventLog .evlAiHGrip::after { content:""; position:absolute; left:50%; top:3px; width:34px; height:1px; margin-left:-17px; background:var(--evl-line); box-shadow:0 2px 0 var(--evl-line); }
@@ -2963,12 +3068,14 @@ module.exports.attach = function (obj) {
 /* a narrow panel puts the buttons on a line of their own instead of squeezing the title (Chats: icon and count) */
 #pluginEventLog .evlAi { container:evlai / inline-size; }
 @container evlai (max-width: 440px) { #pluginEventLog .evlAiTitle { flex-basis:100%; } }
-@container evlai (max-width: 330px) { #pluginEventLog .evlAiHistBtn .evlAiHistL { display:none; } }
-#pluginEventLog .evlAiHd h2 { margin:0; font-size:15px; font-weight:bold; color:var(--evl-ink); line-height:1.3; }
+@container evlai (max-width: 330px) { #pluginEventLog .evlAiHistBtn .evlAiHistLbl { display:none; } }
+#pluginEventLog .evlAiHd h2 { margin:0; font-size:15px; font-weight:bold; color:var(--evl-ink); line-height:1.3; min-height:28px; display:flex; align-items:center; }
 #pluginEventLog .evlAiSub { font-size:12px; color:var(--evl-muted); overflow-wrap:anywhere; }
 #pluginEventLog .evlAiNoteLine { font-size:12px; color:var(--evl-warn); margin:4px 0 0; line-height:1.4; }
-#pluginEventLog .evlAiHd .evlBtn { white-space:nowrap; flex:none; }
-#pluginEventLog .evlAiX { display:inline-flex; align-items:center; padding:3px 6px; }
+/* the header's buttons: one height, text and icon centred (Bootstrap's button line-height does not change it) */
+#pluginEventLog .evlAiHd .evlBtn, #pluginEventLog .evlAiHd .evlBtn.mini { display:inline-flex; align-items:center; justify-content:center; gap:5px; box-sizing:border-box; height:28px; min-height:28px; margin:0; padding:0 9px; font-size:12px; line-height:1; white-space:nowrap; flex:none; vertical-align:middle; }
+#pluginEventLog .evlAiHd .evlBtn.mini.evlAiIco { min-width:28px; padding:0; }
+#pluginEventLog .evlAiHd .evlBtn svg { display:block; margin:0; flex:none; }
 #pluginEventLog .evlAiLog { position:relative; flex:1 1 auto; overflow-y:auto; padding:12px 13px; display:flex; flex-direction:column; gap:14px; min-height:0; overscroll-behavior:contain; }
 #pluginEventLog .evlAiTurn { display:flex; flex-direction:column; gap:9px; }
 #pluginEventLog .evlAiQW { align-self:flex-end; max-width:88%; display:flex; flex-direction:column; align-items:flex-end; gap:2px; min-width:0; }
@@ -2977,7 +3084,7 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlAiQ.dg svg { color:var(--evl-acc); flex:none; }
 /* message actions: on hover or focus; always on touch screens, stacked and narrow */
 #pluginEventLog .evlAiMsgActs { display:flex; gap:2px; opacity:0; transition:opacity .12s ease-out; }
-#pluginEventLog .evlAiMsgActs .evlBtn.evlAiIco { border-color:transparent; background:transparent; color:var(--evl-muted); min-height:24px; }
+#pluginEventLog .evlAiMsgActs .evlBtn.evlAiIco { border-color:transparent; background:transparent; color:var(--evl-muted); }
 #pluginEventLog .evlAiMsgActs .evlBtn.evlAiIco:hover:not([disabled]) { border-color:var(--evl-line); color:var(--evl-ink); background:var(--evl-hover); }
 #pluginEventLog .evlAiMsgActs .evlBtn.evlAiIco[data-act=del]:hover:not([disabled]) { color:var(--evl-err); border-color:var(--evl-err); }
 #pluginEventLog .evlAiMsgActs .evlBtn.ok { color:var(--evl-ok); opacity:1; }
@@ -3024,11 +3131,11 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlAiFuRe { margin-left:auto; margin-right:-6px; }
 #pluginEventLog .evlAiFuTg:hover, #pluginEventLog .evlAiFuRe:hover:not([disabled]):not([aria-disabled=true]) { color:var(--evl-ink); background:var(--evl-hover); }
 #pluginEventLog .evlAiFuTg svg, #pluginEventLog .evlAiFuRe svg { margin:0; flex:none; }
-#pluginEventLog .evlAiFuTg svg { width:12px; height:12px; transition:transform .12s ease-out; }
+#pluginEventLog .evlAiFuTg svg { width:14px; height:14px; transition:transform .12s ease-out; }
 #pluginEventLog .evlAiFuTg[aria-expanded=true] svg { transform:rotate(90deg); }
 #pluginEventLog .evlAiFuTg[aria-expanded=true] { color:var(--evl-ink); }
 #pluginEventLog .evlAiFuTg .n { font-variant-numeric:tabular-nums; color:var(--evl-muted); }
-#pluginEventLog .evlAiFuRe svg { width:13px; height:13px; }
+#pluginEventLog .evlAiFuRe svg { width:14px; height:14px; }
 #pluginEventLog .evlAiFuRe[aria-disabled=true] { cursor:progress; color:var(--evl-ink); }
 #pluginEventLog .evlAiFuRe[disabled] { opacity:.5; cursor:default; }
 #pluginEventLog .evlAiFuNone { color:var(--evl-muted); }
@@ -3049,7 +3156,7 @@ module.exports.attach = function (obj) {
 body.night #pluginEventLog .evlAiPop { box-shadow:0 10px 28px rgba(0,0,0,.75); border-color:var(--evl-bline); border-top-color:var(--evl-acc); }
 #pluginEventLog .evlAiPopHd { display:flex; align-items:center; gap:6px; }
 #pluginEventLog .evlAiPopHd h3 { flex:1 1 auto; margin:0; font-size:13px; font-weight:bold; color:var(--evl-ink); }
-#pluginEventLog .evlAiPopHd .evlAiX { margin-right:-6px; border-color:transparent; background:none; color:var(--evl-muted); }
+#pluginEventLog .evlAiPopHd .evlAiX { margin-right:-4px; border-color:transparent; background:none; color:var(--evl-muted); }
 #pluginEventLog .evlAiPopHd .evlAiX:hover { color:var(--evl-ink); border-color:var(--evl-line); }
 #pluginEventLog .evlAiPopSub { margin:1px 0 9px; color:var(--evl-muted); line-height:1.4; }
 #pluginEventLog .evlAiGenF { padding:9px 0 10px; border-top:1px solid var(--evl-line2); }
@@ -3084,9 +3191,8 @@ body.night #pluginEventLog .evlAiPop { box-shadow:0 10px 28px rgba(0,0,0,.75); b
 #pluginEventLog .evlAiMuted { color:var(--evl-muted); font-size:12px; margin:0; line-height:1.45; }
 #pluginEventLog .evlAiWait { color:var(--evl-muted); margin:0; }
 #pluginEventLog .evlAiNoteBox { border:1px solid var(--evl-line2); background:var(--evl-alt); border-radius:3px; padding:7px 10px; font-size:12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-#pluginEventLog .evlAiHistBtn { display:inline-flex; align-items:center; gap:2px; }
 #pluginEventLog .evlBtn.evlAiHistBtn.on, #pluginEventLog .evlBtn.evlAiHistBtn.on:hover { background:var(--evl-sel); border-color:var(--evl-acc); color:var(--evl-ink); filter:none; }
-#pluginEventLog .evlAiN { display:inline-block; min-width:16px; margin-left:5px; padding:0 4px; border-radius:8px; background:var(--evl-acc); color:var(--evl-acc-ink); font-size:10px; line-height:15px; text-align:center; font-variant-numeric:tabular-nums; font-weight:bold; }
+#pluginEventLog .evlAiN { display:inline-block; box-sizing:border-box; min-width:16px; height:16px; margin:0; padding:0 4px; border-radius:8px; background:var(--evl-acc); color:var(--evl-acc-ink); font-size:10px; line-height:16px; text-align:center; font-variant-numeric:tabular-nums; font-weight:bold; }
 #pluginEventLog .evlAiHist { display:flex; flex-direction:column; }
 #pluginEventLog .evlAiHistDay { margin:12px 0 2px; font-size:12px; font-weight:bold; color:var(--evl-muted); }
 #pluginEventLog .evlAiHistDay:first-child { margin-top:0; }
@@ -3105,9 +3211,8 @@ body.night #pluginEventLog .evlAiPop { box-shadow:0 10px 28px rgba(0,0,0,.75); b
 #pluginEventLog .evlAiDgGo, #pluginEventLog .evlAiDgBtn, #pluginEventLog .evlDgRun { display:inline-flex; align-items:center; gap:6px; }
 #pluginEventLog .evlAiDgGo svg, #pluginEventLog .evlAiDgBtn svg, #pluginEventLog .evlDgRun svg { margin:0; }
 #pluginEventLog .evlAiDgGo svg { color:var(--evl-acc); }
-#pluginEventLog .evlAiHistDel { align-self:center; flex:none; margin:0 4px; padding:4px 5px; display:inline-flex; color:var(--evl-muted); }
-#pluginEventLog .evlAiHistDel:hover:not([disabled]), #pluginEventLog .evlAiHistDel:focus-visible { color:var(--evl-err); border-color:var(--evl-err); }
-#pluginEventLog .evlAiHistDel svg { margin:0; }
+#pluginEventLog .evlBtn.evlAiHistDel { align-self:center; margin:0 4px; color:var(--evl-muted); }
+#pluginEventLog .evlBtn.evlAiHistDel:hover:not([disabled]), #pluginEventLog .evlBtn.evlAiHistDel:focus-visible { color:var(--evl-err); border-color:var(--evl-err); }
 #pluginEventLog .evlAiHistAsk { flex:1 1 auto; display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:7px 8px 7px 11px; background:var(--evl-alt); border-left:3px solid var(--evl-err); font-size:12px; }
 #pluginEventLog .evlAiHistAsk span { flex:1 1 100%; overflow-wrap:anywhere; }
 #pluginEventLog .evlBtn.evlAiDanger { color:var(--evl-err); border-color:var(--evl-err); font-weight:bold; }
@@ -3141,6 +3246,12 @@ body.night #pluginEventLog .evlAiPop { box-shadow:0 10px 28px rgba(0,0,0,.75); b
 #pluginEventLog .evlAiUnv { color:var(--evl-muted); font-size:11px; }
 /* running state: progress strip, status line with elapsed time, streaming caret, dot on the Ask button */
 #pluginEventLog .evlAiStripSlot { position:relative; height:0; z-index:1; }
+/* Quote: floats under the end of the text selected in an answer (placed by aiQuoteSync, relative to .evlAiIn) */
+#pluginEventLog .evlBtn.mini.evlAiQtBtn { position:absolute; top:0; left:0; z-index:9; display:inline-flex; align-items:center; gap:5px; box-sizing:border-box; height:28px; padding:0 10px; font-size:12px; line-height:1; white-space:nowrap;
+  background:var(--evl-panel); border-color:var(--evl-acc); color:var(--evl-ink); box-shadow:0 4px 14px rgba(0,0,0,.18); }
+#pluginEventLog .evlBtn.mini.evlAiQtBtn:hover { background:var(--evl-hover); }
+#pluginEventLog .evlBtn.evlAiQtBtn svg { display:block; margin:0; flex:none; color:var(--evl-acc); }
+body.night #pluginEventLog .evlBtn.mini.evlAiQtBtn { box-shadow:0 6px 18px rgba(0,0,0,.7); }
 #pluginEventLog .evlAiStrip { position:relative; height:2px; overflow:hidden; pointer-events:none; flex:none; }
 #pluginEventLog .evlAiStripSlot .evlAiStrip { position:absolute; left:0; right:0; top:-1px; }
 #pluginEventLog .evlAiEx { position:relative; }
@@ -3385,7 +3496,7 @@ body.night #evlAiDlg {
         'aiTurnHtml', 'aiDoneBody',
         'aiCanEdit', 'aiLaterN', 'aiMsgIndex', 'aiActBtn', 'aiQActsHtml', 'aiAActsHtml', 'aiEditHtml', 'aiConfirmHtml', 'aiTurnOf', 'aiMsgAct', 'aiMsgCancel', 'aiMsgYes',
         'aiEditSave', 'aiEditKey', 'aiTurnsCut', 'aiMsgRun', 'onAiChatEdited',
-        'aiRenderComposer', 'aiKey', 'aiDraft', 'aiSubmit', 'aiAsk', 'aiFollow', 'aiNewChat', 'aiPrefill',
+        'aiRenderComposer', 'aiKey', 'aiDraft', 'aiDraftStore', 'aiSubmit', 'aiAsk', 'aiFollow', 'aiNewChat', 'aiPrefill', 'aiQuoteSync', 'aiQuoteSel', 'aiQuoteInsert',
         'aiFuOpen', 'aiFuHtml', 'aiFuTitles', 'aiFuFocus', 'aiFuToggle', 'aiFuGen', 'onAiFollowups', 'aiFuFail',
         'aiGenInfo', 'aiGenClean', 'aiGenOut', 'aiGenGet', 'aiGenSet', 'aiGenWord', 'aiGenTag', 'aiGenToggle', 'aiGenClose', 'aiGenOutside', 'aiGenKey', 'aiGenBlur',
         'aiGenHtml', 'aiGenRender', 'aiGenPlace', 'aiGenSync', 'aiGenThink', 'aiGenTemp', 'aiGenTempReset',

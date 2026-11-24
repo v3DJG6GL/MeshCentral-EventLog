@@ -45,6 +45,11 @@ module.exports.eventlog = function (parent) {
       'elFold',
       'elInjectStyles',
       'elEnsureShell',
+      'elHeal',
+      'elAccKey',
+      'elTrack',
+      'elRestoreView',
+      'elIcon',
       'elRenderShell',
       'elUpdate',
       'elRenderChips',
@@ -589,6 +594,11 @@ body.night #pluginEventLog {
 #pluginEventLog .evlBtn:active { background:var(--evl-sel); transform:translateY(1px); }
 #pluginEventLog .evlBtn.on:hover, #pluginEventLog .evlBtn.on:active { background:var(--evl-acc); color:var(--evl-acc-ink); border-color:var(--evl-acc); filter:brightness(1.08); }
 #pluginEventLog .evlBtn.ok { color:var(--evl-ok); border-color:var(--evl-ok); }
+/* toolbar: icon and text centred in every button; icon-only buttons nearly square */
+#pluginEventLog .evlBar .evlBtn { display:inline-flex; align-items:center; justify-content:center; gap:5px; vertical-align:middle; }
+#pluginEventLog .evlBar .evlBtn.evlIcoBtn { padding-left:6px; padding-right:6px; }
+#pluginEventLog .evlBar .evlBtn svg, #pluginEventLog .evlSeg button svg { display:block; margin:0; flex:none; }
+#pluginEventLog .evlSeg button { display:inline-flex; align-items:center; gap:3px; }
 #pluginEventLog .evlSeg button:hover:not(.on) { background:var(--evl-hover); color:var(--evl-ink); }
 #pluginEventLog .evlSeg button:active:not(.on) { background:var(--evl-sel); }
 #pluginEventLog .evlChip:hover { border-color:var(--evl-acc); }
@@ -778,7 +788,8 @@ body.night #pluginEventLog {
         ph.elInjectStyles();
         if (!Q('pluginEventLog')) return false;
         if (ph.elPlatform() == 'android') { ph.elAndroidNote(); return false; }   // a note only, nothing else
-        if (!ph.elAccessGate()) return false;
+        if (!ph.elAccessGate()) { ph._evlWrapEl = null; return false; }   // a notice took the tab: build anew later
+        ph.elHeal();   // MeshCentral rebuilt the tab: the same shell goes back in (typed text, focus, scroll positions)
         if (!Q('evlWrap')) {
             var st0 = ph.elState();   // open on a view this user is allowed to see ('ai': the Assistant is all they have)
             var canL = ph.elCan('live'), canH = ph.elCan('history'), canA = ph.elCan('assistant');
@@ -786,12 +797,17 @@ body.night #pluginEventLog {
             else if (st0.view == 'history' && !canH) st0.view = canL ? 'live' : (canA ? 'ai' : 'history');
             else if (st0.view == 'ai' && (canL || canH || !canA)) st0.view = canL ? 'live' : 'history';
             // #evlCol holds the table and its status line; the Assistant panel #evlAi docks beside it (or below it on
-            // narrow screens, or takes its place in full width). Both render from state: MeshCentral rebuilds this DOM
-            // on every refresh.
+            // narrow screens, or takes its place in full width). Both render from state; the element is kept, so
+            // MeshCentral's rebuild of the tab on a refresh puts it back as it was (elHeal).
             QH('pluginEventLog', '<div id=evlWrap><div id=evlToolbar></div><div id=evlMain class=evlMain><div id=evlCol class=evlCol>' +
                 '<div id=evlChips class=evlChips></div><div id=evlBody></div><div id=evlStatus class=evlStatus></div></div>' +
                 '<aside id=evlAi class=evlAi aria-label="Ask about this device" hidden></aside></div>' +
                 '<div id=evlAiSay class=evlSr role=status aria-live=polite></div></div>');
+            var wrap = Q('evlWrap');
+            ph._evlWrapEl = wrap; ph._evlWrapNode = currentNode._id; ph._evlWrapSt = ph.st; ph._evlWrapAcc = ph.elAccKey(); ph._evlHost = Q('pluginEventLog'); ph._evlFocus = null;
+            ['scroll', 'focusin', 'focusout', 'input', 'select', 'keyup', 'mouseup'].forEach(function(t) {
+                wrap.addEventListener(t, function(ev) { try { pluginHandler.eventlog.elTrack(ev); } catch (e) { } }, true);
+            });
             ph.elRenderShell();
             if (typeof ResizeObserver == 'function') {   // the page can change width without a window resize (side menu)
                 try { if (ph._aiRO) ph._aiRO.disconnect(); ph._aiRO = new ResizeObserver(function() { try { pluginHandler.eventlog.aiLayout(); } catch (e) { } }); ph._aiRO.observe(Q('evlWrap')); ph._aiRO.observe(Q('evlToolbar')); } catch (e) { }
@@ -803,6 +819,71 @@ body.night #pluginEventLog {
         return true;
     };
 
+    // MeshCentral empties the device page on every refresh (QH('p19pages', '') before onDeviceRefreshEnd), and a
+    // plugin registering its tab after ours re-parses it (p19pages.innerHTML += ...), which leaves a copy without
+    // typed text, focus or the properties on the elements. Both times the shell built for this device and state goes
+    // back into the new #pluginEventLog. Not when our own code emptied the tab (same #pluginEventLog): that rebuilds.
+    obj.elHeal = function() {
+        var ph = pluginHandler.eventlog, kept = ph._evlWrapEl, host = Q('pluginEventLog'), cur = Q('evlWrap');
+        if (!kept || !host || cur === kept || host === ph._evlHost) return false;
+        if (typeof currentNode == 'undefined' || currentNode == null || ph._evlWrapNode != currentNode._id || ph.st == null || ph._evlWrapSt !== ph.st || ph._evlWrapAcc !== ph.elAccKey()) { ph._evlWrapEl = null; return false; }
+        if (Q('evlNotice') || (cur && !host.contains(cur))) return false;
+        host.innerHTML = '';
+        host.appendChild(kept);
+        ph._evlHost = host;
+        ph.elRestoreView(kept);
+        return true;
+    };
+    // what the shell was built for (the fields onAccess compares)
+    obj.elAccKey = function() {
+        var a = pluginHandler.eventlog.elAccess;
+        return a ? [a.nodeid, a.live, a.history, a.assistant, a.assistantReason, a.configSetName, a.canManage].join('|') : '';
+    };
+    // What a shell put back needs again: the scroll offsets and the focused field with its cursor (detaching loses them).
+    obj.elTrack = function(ev) {
+        var ph = pluginHandler.eventlog, el = ev.target, w = ev.currentTarget;
+        if (!el || el.nodeType != 1 || !w) return;
+        if (ev.type == 'scroll') {
+            el._evlScroll = [el.scrollTop, el.scrollLeft];
+            var l = (w._evlScr || []).filter(function(x) { return x !== el && w.contains(x); });
+            l.push(el); w._evlScr = l.slice(-40);
+            return;
+        }
+        if (ev.type == 'focusout') {   // focus moved elsewhere (not lost because the page was rebuilt): forget it
+            setTimeout(function() { try { var p = pluginHandler.eventlog, f = p._evlFocus; if (f && f.el === el && document.documentElement.contains(el) && document.activeElement !== el) p._evlFocus = null; } catch (e) { } }, 0);
+            return;
+        }
+        if (ev.type != 'focusin' && document.activeElement !== el) return;
+        var f = { el: el, s: null, e: null };
+        if (el.tagName == 'TEXTAREA' || (el.tagName == 'INPUT' && /^(text|search|)$/i.test(el.type || ''))) { try { f.s = el.selectionStart; f.e = el.selectionEnd; } catch (x) { } }
+        ph._evlFocus = f;
+    };
+    obj.elRestoreView = function(w) {
+        var ph = pluginHandler.eventlog;
+        (w._evlScr || []).forEach(function(el) { var p = el._evlScroll; if (p && w.contains(el)) { el.scrollTop = p[0]; el.scrollLeft = p[1]; } });
+        var f = ph._evlFocus, act = document.activeElement;
+        if (f && w.contains(f.el) && (!act || act === document.body || !document.documentElement.contains(act))) {
+            var s = f.s, e = f.e;
+            try { f.el.focus({ preventScroll: true }); } catch (x) { }
+            if (s != null) { try { f.el.setSelectionRange(s, e); } catch (x) { } }
+            ph._evlFocus = { el: f.el, s: s, e: e };
+        }
+        if (ph._aiRO) { try { ph._aiRO.disconnect(); ph._aiRO.observe(w); var tb = w.querySelector('#evlToolbar'); if (tb) ph._aiRO.observe(tb); } catch (x) { } }
+    };
+    // toolbar icons: the Assistant's metrics (16 px, stroke 1.6, round caps)
+    obj.elIcon = function(name) {
+        var d = ({
+            fold: '<path d="M4.5 2.8L8 6.3l3.5-3.5M4.5 13.2L8 9.7l3.5 3.5"/>',
+            pause: '<path d="M5.5 3.5v9M10.5 3.5v9" stroke-width=2.2 />',
+            play: '<path d="M5 3.3v9.4L12.5 8z" fill=currentColor />',
+            refresh: '<path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.8v3.4H9.6"/>',
+            download: '<path d="M8 2.5v8M4.6 7.3L8 10.7l3.4-3.4M3 13.5h10"/>',
+            live: '<circle cx=8 cy=8 r=3.4 fill=currentColor stroke=none />',
+            ask: '<path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/>'
+        })[name] || '';
+        return '<svg class=evlIco width=16 height=16 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 stroke-linecap=round stroke-linejoin=round aria-hidden=true>' + d + '</svg>';
+    };
+
     obj.elRenderShell = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
         var esc = EscapeHtml;
@@ -810,7 +891,7 @@ body.night #pluginEventLog {
         var seg = function(id, v, perm, label) {
             return '<button id=' + id + (ph.elCan(perm) ? '' : ' hidden') + ' class="' + (st.view == v ? 'on' : '') + '" aria-pressed=' + (st.view == v ? 'true' : 'false') + ' onclick="return pluginHandler.eventlog.elSetView(\'' + v + '\')">' + label + '</button>';
         };
-        if (st.view != 'ai') h += '<div class=evlSeg role=group aria-label="View">' + seg('evlVLive', 'live', 'live', '&#9679; Live') + seg('evlVHist', 'history', 'history', 'History') + '</div>';
+        if (st.view != 'ai') h += '<div class=evlSeg role=group aria-label="View">' + seg('evlVLive', 'live', 'live', ph.elIcon('live') + 'Live') + seg('evlVHist', 'history', 'history', 'History') + '</div>';
         if (st.view == 'ai') {
             // the Assistant only: no event list, so no filters
         } else {
@@ -837,10 +918,11 @@ body.night #pluginEventLog {
         h += '<span class=evlLbl>Rows</span> <select id=evlRowsSel class=evlSel title="Row density: Compact (tight), Normal, Wrap (message text wraps onto several lines)" onchange="return pluginHandler.eventlog.elSetRows(this.value)">';
         [['dense','Compact'],['normal','Normal'],['wrap','Wrap']].forEach(function(o){ h += '<option value=' + o[0] + (st.rows == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
         h += '</select>';
-        h += '<button id=evlFoldBtn class="evlBtn ' + (st.fold ? 'on' : '') + '" title="Fold repeated events into one line" onclick="return pluginHandler.eventlog.elToggleFold()">&#8659; Fold repeats</button>';
-        h += '<button id=evlPauseBtn class=evlBtn title="Pause live updates" onclick="return pluginHandler.eventlog.elTogglePause()" ' + (st.view != 'live' ? 'hidden' : '') + '>' + (st.paused ? '&#9654;' : '&#10074;&#10074;') + '</button>';
-        h += '<button class=evlBtn title="Refresh" onclick="return pluginHandler.eventlog.elRefresh()">&#8635;</button>';
-        h += '<button class=evlBtn title="Export the filtered rows as CSV" onclick="return pluginHandler.eventlog.elExportCsv()">&#10515; CSV</button>';
+        var pz = st.paused ? 'Resume live updates' : 'Pause live updates';
+        h += '<button id=evlFoldBtn class="evlBtn ' + (st.fold ? 'on' : '') + '" title="Fold repeated events into one line" onclick="return pluginHandler.eventlog.elToggleFold()">' + ph.elIcon('fold') + 'Fold repeats</button>';
+        h += '<button id=evlPauseBtn class="evlBtn evlIcoBtn" title="' + pz + '" aria-label="' + pz + '" onclick="return pluginHandler.eventlog.elTogglePause()" ' + (st.view != 'live' ? 'hidden' : '') + '>' + ph.elIcon(st.paused ? 'play' : 'pause') + '</button>';
+        h += '<button class="evlBtn evlIcoBtn" title="Refresh" aria-label="Refresh" onclick="return pluginHandler.eventlog.elRefresh()">' + ph.elIcon('refresh') + '</button>';
+        h += '<button class=evlBtn title="Export the filtered rows as CSV" onclick="return pluginHandler.eventlog.elExportCsv()">' + ph.elIcon('download') + 'CSV</button>';
         h += '<div class=evlSeg title="Layout">' +
              '<button class="' + (st.layout == 'ledger' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetLayout(\'ledger\')">Table</button>' +
              '<button class="' + (st.layout == 'viewer' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetLayout(\'viewer\')">Viewer</button></div>';
@@ -848,7 +930,7 @@ body.night #pluginEventLog {
         if (ph.elCan('assistant')) {
             // Ask opens the chat panel; Diagnose opens it in full width with the time window (it never runs by itself)
             if (st.view != 'ai') h += '<button id=evlAiBtn class="evlBtn evlAiBtn' + (st.ai.open ? ' on' : '') + '" aria-expanded=' + (st.ai.open ? 'true' : 'false') + ' aria-controls=evlAi onclick="return pluginHandler.eventlog.aiToggle()">' +
-                 '<svg width=14 height=14 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 aria-hidden=true><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/></svg>Ask about this device<span class=evlAiDot aria-hidden=true></span></button>';
+                 ph.elIcon('ask') + 'Ask about this device<span class=evlAiDot aria-hidden=true></span></button>';
             h += '<button id=evlAiDiagBtn class="evlBtn evlAiDgBtn' + (st.view == 'ai' ? ' evlAiBtn' : '') + '" aria-controls=evlAi title="Diagnose this device: choose a time window, then start" onclick="return pluginHandler.eventlog.aiDiagOpen()">' + ph.aiIcon('diag') + 'Diagnose</button>';
         } else {   // say why the Assistant is not offered here (nothing for users without its permission)
             var why = ph.aiUnavailText(ph.elAccess);
@@ -1574,7 +1656,7 @@ body.night #pluginEventLog {
             st.pending = [];
         }
         var b = Q('evlPauseBtn');
-        if (b) { b.innerHTML = st.paused ? '&#9654;' : '&#10074;&#10074;'; b.title = st.paused ? 'Resume live updates' : 'Pause live updates'; }
+        if (b) { var pz = st.paused ? 'Resume live updates' : 'Pause live updates'; b.innerHTML = ph.elIcon(st.paused ? 'play' : 'pause'); b.title = pz; b.setAttribute('aria-label', pz); }
         ph.elUpdate();
         return false;
     };
@@ -1863,6 +1945,7 @@ body.night #pluginEventLog {
           ph.livelognode = null;
           if (ph.st != null && ph.st.ai != null) ph.aiStashSave();   // stop the Assistant's requests, keep its chats for a return visit
           ph.st = null;      // reset UI state for the new node
+          ph._evlWrapEl = null; ph._evlFocus = null;   // and build its shell anew
           ph.byKey = {};
       }
       if (!isSupported) {
@@ -1873,8 +1956,10 @@ body.night #pluginEventLog {
       }
       ph.livelognode = currentNode;
       ph.elRequestAccess();   // every refresh (at most once per 5 s per device): a grant or a revoke takes effect without a page reload
-      // the plugin tab DOM is rebuilt by MeshCentral on every refresh: re-create the shell (renders from state)
+      // the plugin tab DOM is rebuilt by MeshCentral on every refresh: the kept shell goes back in (or one is built)
       ph.elEnsureShell();
+      // a plugin whose hook runs after ours may re-parse the page (registerPluginTab: p19pages.innerHTML += ...)
+      setTimeout(function() { try { pluginHandler.eventlog.elHeal(); } catch (e) { } }, 0);
       // MeshCentral restores the previously selected plugin tab right AFTER this hook returns, so the
       // "is our tab on screen?" decision has to wait for the current call stack to finish.
       setTimeout(function() { pluginHandler.eventlog.elEnsureLive(); }, 0);

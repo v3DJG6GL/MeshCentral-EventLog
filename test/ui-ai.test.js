@@ -100,7 +100,10 @@ test.afterEach(function () { while (WINDOWS.length) { try { WINDOWS.pop().close(
 function makeDom(opts) {
     opts = opts || {};
     var plugin = loadPlugin();
-    var dom = new JSDOM_MOD.JSDOM('<!doctype html><html><head></head><body><div id="p19ph-pluginEventLog" class="on"></div><div id="pluginEventLog"></div></body></html>',
+    // opts.p19: the tab lives in #p19pages like in MeshCentral, and registerPluginTab adds tabs the way it does upstream
+    var body = opts.p19 ? '<div id="p19headers"><span id="p19ph-pluginEventLog" class="on">Event Log</span></div><div id="p19pages"><div id="pluginEventLog"></div></div>'
+                        : '<div id="p19ph-pluginEventLog" class="on"></div><div id="pluginEventLog"></div>';
+    var dom = new JSDOM_MOD.JSDOM('<!doctype html><html><head></head><body>' + body + '</body></html>',
         { runScripts: 'outside-only', pretendToBeVisual: true, url: 'https://mesh.example/' });
     var w = dom.window;
     if (!opts.noLibs) { w.eval(fs.readFileSync(path.join(SCRIPTS, 'marked.js'), 'utf8')); w.eval(fs.readFileSync(path.join(SCRIPTS, 'purify.js'), 'utf8')); }
@@ -113,6 +116,9 @@ function makeDom(opts) {
         'var meshserver = { send: function (m) { sent.push(JSON.parse(JSON.stringify(m))); } };' +
         'var currentNode = { _id: "' + NODE + '", name: "FIN-LT-0142", meshid: "mesh/d/A", agent: { id: 3 }, conn: 1, osdesc: "Windows 11" };' +
         'var pluginHandler = { eventlog: {}, registerPluginTab: function () { } };');
+    if (opts.p19) w.eval('pluginHandler.registerPluginTab = function (d) {' +
+        ' if (typeof d == "function") d = d(); if (!d || d.tabId == null) return;' +
+        ' if (!document.getElementById(d.tabId)) { Q("p19headers").innerHTML += "<span id=p19ph-" + d.tabId + ">" + d.tabTitle + "</span>"; Q("p19pages").innerHTML += "<div id=" + d.tabId + "></div>"; } };');
     // exactly what MeshCentral's prepExports does: one assignment per exported name, from .toString()
     var src = '';
     plugin.exports.forEach(function (n) { src += 'pluginHandler.eventlog.' + n + ' = ' + plugin[n].toString() + ';\n'; });
@@ -796,7 +802,7 @@ function chatItem() {
     ] };
 }
 
-test('saved chats: the latest comes back after a reload, is listed, continues with its chat id, and can be deleted', { skip: SKIP }, async function () {
+test('saved chats: after a reload the panel opens on the list (nothing opens by itself); a chat is opened, continues with its chat id, and can be deleted', { skip: SKIP }, async function () {
     var w = makeDom(), ph = w.ph, doc = w.document;
     grantSaved(w); loadHistory(w);
     assert.strictEqual(sentOf(w, 'aiHistoryList').length, 1, 'asked once after access was granted');
@@ -805,10 +811,13 @@ test('saved chats: the latest comes back after a reload, is listed, continues wi
     ph.onAiHistory(null, { nodeid: 'node/d/other', enabled: true, chats: [{ id: CH2, title: 'x', updated: 1, count: 1 }] });   // another device: ignored
     assert.strictEqual(ph.st.ai.saved.loaded, false);
     ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'Why did it restart?', updated: Date.now() - 540000, count: 2 }, { id: CH2, title: 'Older <b>chat</b>', updated: Date.now() - 3 * 86400000, count: 1 }, { id: 'bad id', title: 'x' }], diagnosis: null, explains: [] });
-    var get = sentOf(w, 'aiHistoryGet');
-    assert.deepStrictEqual(plain(get.map(function (m) { return m.kind + ':' + m.id; })), ['chat:' + CH1], 'the most recent chat is restored');
-    ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: chatItem() });
+    assert.strictEqual(sentOf(w, 'aiHistoryGet').length, 0, 'the newest chat does not open by itself');
     ph.aiToggle();
+    assert.strictEqual(ph.st.ai.hist, true, 'no chat in this visit yet: the panel opens on the list');
+    assert.strictEqual(doc.querySelector('#evlAiHd h2').textContent, 'Saved chats');
+    ph.aiHistoryOpen(CH1);
+    assert.deepStrictEqual(plain(sentOf(w, 'aiHistoryGet').map(function (m) { return m.kind + ':' + m.id; })), ['chat:' + CH1]);
+    ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: chatItem() });
     var log = doc.getElementById('evlAiLog');
     assert.match(log.textContent, /Saved chat from \d/);
     assert.deepStrictEqual(Array.prototype.map.call(log.querySelectorAll('.evlAiQ'), function (e) { return e.textContent; }), ['Why did it restart?', 'And the power?']);
@@ -865,13 +874,18 @@ test('saved chats: the latest comes back after a reload, is listed, continues wi
     assert.match(log.textContent, /No saved chats for this device yet/);
 });
 
-test('saved chats: a new chat started before the restore arrives is kept; saving off shows no list', { skip: SKIP }, function () {
+test('saved chats: a question sent while a saved chat is still loading starts a new chat, the loaded one is dropped; saving off shows no list', { skip: SKIP }, function () {
     var w = makeDom(), ph = w.ph;
     grantSaved(w); loadHistory(w);
     ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 7, chats: [{ id: CH1, title: 'x', updated: Date.now(), count: 2 }] });
+    ph.aiToggle();
+    ph.aiHistoryOpen(CH1);
     ph.aiAsk('Fresh question');
+    var st0 = sentOf(w, 'aiStart').pop();
+    assert.strictEqual(st0.chatId, undefined, 'a new chat');
     ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: chatItem() });
     assert.strictEqual(ph.st.ai.convs[ph.st.ai.chat].turns[0].q, 'Fresh question');
+    assert.strictEqual(ph.st.ai.convs[ph.st.ai.chat].turns.length, 1);
     var w2 = makeDom();
     grant(w2, { saved: { enabled: false } }); loadHistory(w2);
     assert.strictEqual(sentOf(w2, 'aiHistoryList').length, 0);
@@ -887,14 +901,13 @@ test('saved diagnoses are chats: listed with a marker (also one moved from an ea
         { id: CH1, title: 'Two restarts after drive stalls.', updated: Date.now() - 1000, count: 2, type: 'diagnosis', window: '7d' },
         { id: CH2, title: 'Why did it restart?', updated: Date.now() - 5000, count: 1 },
         { id: 'ch' + 'c3'.repeat(12), title: 'Old summary.', updated: T, count: 1, type: 'diagnosis', window: 'restart' }], explains: [{ eventId: 'abc123', time: T }] });
-    assert.deepStrictEqual(plain(sentOf(w, 'aiHistoryGet').map(function (m) { return m.kind + ':' + m.id; })), ['chat:' + CH1], 'the latest chat (a diagnosis) comes back');
+    assert.strictEqual(sentOf(w, 'aiHistoryGet').filter(function (m) { return m.kind == 'chat'; }).length, 0, 'nothing opens by itself');
     ph.aiToggle();
-    ph.aiHistoryToggle();
     var rows = doc.querySelectorAll('#evlAiLog .evlAiHistRow');
     assert.strictEqual(rows.length, 3, 'every diagnosis is kept');
     assert.deepStrictEqual(Array.prototype.map.call(rows, function (r) { var m = r.querySelector('.evlAiDgMark'); return m ? m.textContent : null; }), ['Diagnosis · 7 days', null, 'Diagnosis · restart']);
     assert.match(rows[0].textContent, /1 follow-up question/);
-    ph.aiHistoryToggle();
+    ph.aiHistoryOpen(CH1);
     ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: { id: CH1, type: 'diagnosis', window: '7d', title: 'x', created: T, updated: T, messages: [
         { time: T, q: 'Diagnose the last 7 days', a: '', model: 'qwen3:14b', endpointName: 'gpu-01.lan', cites: { E1: REC },
           steps: [{ note: 'I will look at the disk first.' }, { tool: 'get_events', args: '{"limit":5}', status: 'done', items: 5, ms: 3 }],
@@ -1105,6 +1118,7 @@ test('Fold repeats: more than three citations in a row show three chips and "+N"
     // a saved chat as the server sends it after a reload ({ ref: stored record })
     var cites = {}; recs.forEach(function (r, i) { cites['E' + (i + 1)] = r; });
     ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'Resets', updated: Date.now() - 1000, count: 1 }], diagnosis: null, explains: [] });
+    ph.aiHistoryOpen(CH1);
     ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: { id: CH1, title: 'Resets', created: TO, updated: TO, messages: [{ time: TO, q: 'Resets?', a: 'See [E1] [E2] [E3] [E4] [E5].', cites: cites, steps: [], followups: [] }] } });
     assert.ok(ph.st.ai.convs[ph.st.ai.chat].restored);
     var top = ph.elNormalize(recs[0]).key;
@@ -1139,6 +1153,7 @@ test('aiStart and aiSend carry the browser\'s time zone', { skip: SKIP }, functi
 function savedChat(w, id, qs) {
     var ph = w.ph, t = Date.now() - 600000;
     ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: id, title: qs[0], updated: t, count: qs.length }], explains: [] });
+    ph.aiHistoryOpen(id);
     ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: id, item: { id: id, title: qs[0], created: t, updated: t, messages: qs.map(function (q, i) {
         return { time: t + i, q: q, a: 'Answer to ' + q + ' [E1].', cites: { E1: REC }, steps: [], followups: [] };
     }) } });
@@ -1164,7 +1179,7 @@ test('full width: the toggle hides the table column, is remembered, Esc docks ag
     assert.ok(doc.getElementById('evlToolbar').querySelector('#evlTxtIn'), 'the filter toolbar stays');
     var css = doc.getElementById('evlAiStyles').textContent;
     assert.match(css, /\.evlMain\.evlAiFull:not\(\.evlStack\) \.evlCol, #pluginEventLog \.evlMain\.evlAiOnly \.evlCol \{ display:none; \}/);
-    assert.match(css, /\.evlStack \.evlAiFullBtn \{ display:none; \}|\.evlStack \.evlAiFullBtn/);
+    assert.match(css, /\.evlStack \.evlAiHd \.evlBtn\.evlAiFullBtn \{ display:none; \}/, 'more specific than the header button rule');
     assert.strictEqual(doc.getElementById('evlAi').style.height, (1000 - 120 - 6) + 'px', 'the height fit is the same in full width');
     // Esc inside the panel docks it; an Esc already taken (inline editor) does not
     var ev = { key: 'Escape', defaultPrevented: true, preventDefault: function () { } };
@@ -1574,6 +1589,7 @@ test('answer settings: chosen per chat, shown in the header, sent with aiStart a
     var w2 = makeDom(), ph2 = w2.ph, doc2 = w2.document;
     grantGen(w2); loadHistory(w2);
     ph2.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'Why did it restart?', updated: Date.now(), count: 2 }], explains: [] });
+    ph2.aiHistoryOpen(CH1);
     ph2.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: Object.assign(chatItem(), { gen: { thinking: 'medium', temperature: 1.25 } }) });
     ph2.aiToggle();
     assert.match(doc2.querySelector('#evlAiHd .evlAiGenTag').textContent, /Thinking: medium · temperature 1\.25/);
@@ -1588,6 +1604,244 @@ test('answer settings: chosen per chat, shown in the header, sent with aiStart a
     var w3 = makeDom();
     grantGen(w3); loadHistory(w3);
     w3.ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'x', updated: Date.now(), count: 2 }], explains: [] });
+    w3.ph.aiHistoryOpen(CH1);
     w3.ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: Object.assign(chatItem(), { gen: { thinking: 'off', temperature: 7 } }) });
     assert.deepStrictEqual(plain(w3.ph.st.ai.convs[w3.ph.st.ai.chat].gen), {}, 'what the endpoint does not take is dropped');
+});
+
+// ---- chat flow, quote, header buttons, drafts (v0.8.0) ----------------------------------------------------------
+function liveChat(w, q, text) {
+    var ph = w.ph;
+    ph.aiAsk(q);
+    var s = sentOf(w, 'aiStart').pop();
+    ph.onAiStarted(null, { nodeid: NODE, reqId: s.reqId, convId: 'cvL', mode: 'ask' });
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvL', turn: 1, text: text || 'The drive stalls [E1].', citations: { E1: REC }, invalidCitations: [], usage: {}, followups: [] });
+    return ph.st.ai.convs[ph.st.ai.chat];
+}
+
+test('send goes into the chat on screen: from the chat list, the Diagnose setup or while a saved chat loads it starts a new chat', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document, a;
+    grantSaved(w); loadHistory(w);
+    ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'Why did it restart?', updated: Date.now(), count: 2 }], explains: [] });
+    var c1 = liveChat(w, 'First?');
+    a = ph.st.ai;
+    assert.strictEqual(doc.getElementById('evlAiLbl').textContent, 'Ask about FIN-LT-0142');
+    // the chat list: the label says what Send does, Send starts a new chat
+    ph.aiHistoryToggle();
+    assert.strictEqual(doc.getElementById('evlAiLbl').textContent, 'New chat about FIN-LT-0142');
+    assert.ok(!doc.querySelector('#evlAiHd .evlAiNewBtn').disabled, 'New chat stays available');
+    doc.getElementById('evlAiIn').value = 'From the list';
+    ph.aiSubmit();
+    assert.strictEqual(sentOf(w, 'aiSend').length, 0, 'not into the chat behind the list');
+    var s1 = sentOf(w, 'aiStart').pop();
+    assert.deepStrictEqual([s1.mode, s1.chatId, s1.input.text], ['ask', undefined, 'From the list']);
+    assert.notStrictEqual(a.chat, c1.id);
+    assert.strictEqual(a.hist, false);
+    assert.strictEqual(doc.getElementById('evlAiLbl').textContent, 'Ask about FIN-LT-0142');
+    ph.onAiStarted(null, { nodeid: NODE, reqId: s1.reqId, convId: 'cvM', mode: 'ask' });
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvM', turn: 1, text: 'ok', citations: {}, usage: {} });
+    // the Diagnose setup: also a new chat
+    ph.aiDiagOpen();
+    assert.strictEqual(doc.getElementById('evlAiLbl').textContent, 'New chat about FIN-LT-0142');
+    ph.aiAsk('From the setup');
+    assert.strictEqual(sentOf(w, 'aiSend').length, 0);
+    assert.deepStrictEqual([sentOf(w, 'aiStart').pop().chatId, a.diagSetup], [undefined, false]);
+    ph.onAiStarted(null, { nodeid: NODE, reqId: sentOf(w, 'aiStart').pop().reqId, convId: 'cvN', mode: 'ask' });
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvN', turn: 1, text: 'ok', citations: {}, usage: {} });
+    // a saved chat still loading: a new chat, the saved one is not opened over it
+    ph.aiHistoryOpen(CH1);
+    ph.aiAsk('While it loads');
+    assert.strictEqual(sentOf(w, 'aiSend').length, 0);
+    assert.strictEqual(sentOf(w, 'aiStart').pop().chatId, undefined);
+    assert.strictEqual(a.opening, null);
+    ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: chatItem() });
+    assert.strictEqual(a.convs[a.chat].turns[0].q, 'While it loads');
+    // in the chat itself the question continues it
+    ph.onAiStarted(null, { nodeid: NODE, reqId: sentOf(w, 'aiStart').pop().reqId, convId: 'cvO', mode: 'ask' });
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvO', turn: 1, text: 'ok', citations: {}, usage: {} });
+    ph.aiAsk('Continue');
+    assert.strictEqual(sentOf(w, 'aiSend').pop().convId, 'cvO');
+    if (ph._aiDog) w.clearInterval(ph._aiDog);
+});
+
+test('opening view: the list when no chat was used in this visit, the chat when one was (also after a device switch)', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantSaved(w); loadHistory(w);
+    ph.livelognode = w.currentNode;
+    ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'Why did it restart?', updated: Date.now(), count: 2 }], explains: [] });
+    assert.strictEqual(sentOf(w, 'aiHistoryGet').length, 0);
+    ph.aiToggle();
+    assert.strictEqual(doc.querySelector('#evlAiHd h2').textContent, 'Saved chats');
+    ph.aiToggle();
+    liveChat(w, 'This visit?');
+    ph.aiClosePanel();
+    ph.aiToggle();
+    assert.strictEqual(ph.st.ai.hist, false);
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiQ').textContent, 'This visit?');
+    // to another device and back: the stashed chat is shown again
+    ph.aiClosePanel();
+    w.eval('currentNode = { _id: "node/d/n2", name: "other", meshid: "mesh/d/A", agent: { id: 3 } };');
+    ph.onDeviceRefreshEnd('node/d/n2');
+    w.eval('currentNode = { _id: "' + NODE + '", name: "FIN-LT-0142", meshid: "mesh/d/A", agent: { id: 3 }, conn: 1, osdesc: "Windows 11" };');
+    ph.onDeviceRefreshEnd(NODE);
+    ph.aiToggle();
+    assert.strictEqual(ph.st.ai.hist, false);
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiQ').textContent, 'This visit?');
+    // the Assistant-only page (always open) starts on the list when the saved chats arrive
+    var w2 = makeDom(); grantSaved(w2, { history: false });
+    w2.ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'x', updated: Date.now(), count: 1 }], explains: [] });
+    assert.strictEqual(w2.document.querySelector('#evlAiHd h2').textContent, 'Saved chats');
+    assert.strictEqual(sentOf(w2, 'aiHistoryGet').length, 0);
+});
+
+test('quote: a selection within one answer gets a Quote button; it and the Quote action put "> " lines at the cursor', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w); loadHistory(w);
+    var c = liveChat(w, 'Why?', 'The drive **stalls** on hostPC01.\n\nSecond paragraph [E1].');
+    var ans = doc.querySelector('#evlAiLog .evlAiA'), sel = w.getSelection(), r = doc.createRange();
+    r.selectNodeContents(ans.querySelector('p'));
+    sel.removeAllRanges(); sel.addRange(r);
+    ph.aiQuoteSync();
+    var qb = doc.getElementById('evlAiQtBtn');
+    assert.ok(qb && qb.textContent == 'Quote' && qb.closest('#evlAiQtSlot'), 'a Quote button in the panel');
+    assert.ok(!/stalls|PC01/.test(qb.outerHTML), 'no answer text in the button');
+    var ta = doc.getElementById('evlAiIn');
+    ta.value = 'See this:'; ta.setSelectionRange(9, 9);
+    ph.aiQuoteSel();
+    assert.strictEqual(ta.value, 'See this:\n\n> The drive stalls on PC01.\n\n');
+    assert.strictEqual(doc.activeElement, ta);
+    assert.strictEqual(ta.selectionStart, ta.value.length);
+    assert.strictEqual(ph.st.ai.draft, ta.value);
+    assert.strictEqual(doc.getElementById('evlAiQtBtn'), null, 'the button goes after quoting');
+    // not for the question, nor across a question and an answer
+    r = doc.createRange(); r.selectNodeContents(doc.querySelector('#evlAiLog .evlAiQ'));
+    sel.removeAllRanges(); sel.addRange(r);
+    ph.aiQuoteSync();
+    assert.strictEqual(doc.getElementById('evlAiQtBtn'), null);
+    r = doc.createRange(); r.setStart(doc.querySelector('#evlAiLog .evlAiQ').firstChild, 0); r.setEnd(ans.querySelector('p').firstChild, 3);
+    sel.removeAllRanges(); sel.addRange(r);
+    ph.aiQuoteSync();
+    assert.strictEqual(doc.getElementById('evlAiQtBtn'), null);
+    sel.removeAllRanges();
+    // the Quote action quotes the whole answer, inserted at the cursor
+    var qa = actBtn(doc, 1, 'quote');
+    assert.ok(qa && qa.getAttribute('aria-label') == 'Quote the answer in your question');
+    ta.value = 'Before after'; ta.setSelectionRange(7, 7);
+    ph.aiMsgAct(c.id, 1, 'quote', qa);
+    assert.strictEqual(ta.value, 'Before \n\n> The drive **stalls** on PC01.\n>\n> Second paragraph [E1].\n\nafter');
+    // long text: about 2000 characters at most
+    ta.value = ''; ta.setSelectionRange(0, 0);
+    ph.aiQuoteInsert('word '.repeat(1000));
+    assert.ok(ta.value.length <= 2010 && /…\n\n$/.test(ta.value), String(ta.value.length));
+    if (ph._aiDog) w.clearInterval(ph._aiDog);
+});
+
+test('header buttons: one button system with 16 px icons; Chats has its own label class; toolbar glyphs are SVG', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantSaved(w); loadHistory(w);
+    ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'x', updated: Date.now(), count: 3 }], explains: [] });
+    ph.aiToggle();   // opens on the list (no chat in this visit)
+    var hd = doc.getElementById('evlAiHd');
+    assert.strictEqual(hd.querySelector('.evlAiHistL'), null, 'not the class of the chat list');
+    var hb = doc.getElementById('evlAiHistBtn');
+    assert.deepStrictEqual(Array.prototype.map.call(hb.children, function (e) { return e.tagName.toLowerCase() + (e.className && e.className.baseVal == null ? '.' + e.className : ''); }), ['svg', 'span.evlAiHistLbl', 'span.evlAiN']);
+    Array.prototype.forEach.call(hd.querySelectorAll('button'), function (b) {
+        assert.ok(b.classList.contains('evlBtn') && b.classList.contains('mini'), b.outerHTML);
+        if (!b.textContent.trim()) assert.ok(b.classList.contains('evlAiIco') && b.getAttribute('aria-label'), 'icon-only buttons are square and named');
+    });
+    Array.prototype.forEach.call(doc.querySelectorAll('#evlAi svg:not(.evlAiRing)'), function (s) { assert.strictEqual(s.getAttribute('width'), '16'); });
+    assert.ok(doc.querySelector('#evlAiLog .evlAiHistDel.evlAiIco svg'), 'the row delete uses the icon set');
+    assert.match(doc.getElementById('evlAiStyles').textContent, /\.evlAiHistBtn \.evlAiHistLbl \{ display:none/, 'the narrow panel hides the label');
+    // toolbar: icons instead of Unicode glyphs, the icon-only ones are named
+    var tb = doc.getElementById('evlToolbar');
+    assert.ok(!/[⇓❚▶↻⤓●]/.test(tb.textContent), tb.textContent);
+    ['evlFoldBtn', 'evlPauseBtn', 'evlVLive'].forEach(function (id) { assert.ok(doc.querySelector('#' + id + ' svg.evlIco[width="16"]'), id); });
+    var pb = doc.getElementById('evlPauseBtn');
+    assert.strictEqual(pb.getAttribute('aria-label'), 'Pause live updates');
+    ph.elTogglePause();
+    assert.deepStrictEqual([pb.getAttribute('aria-label'), pb.title], ['Resume live updates', 'Resume live updates']);
+    assert.ok(pb.querySelector('svg.evlIco'));
+    assert.ok(doc.querySelector('#evlToolbar button[aria-label="Refresh"] svg.evlIco'));
+});
+
+test('drafts: a refresh of the device page and another plugin re-parsing it keep the shell, the typed text, the focus and the cursor', { skip: SKIP }, async function () {
+    var w = makeDom({ p19: true }), ph = w.ph, doc = w.document;
+    grant(w); loadHistory(w);
+    ph.livelognode = w.currentNode;
+    liveChat(w, 'First?');
+    var wrap = doc.getElementById('evlWrap'), log = doc.getElementById('evlAiLog'), sig = log._evlConv, ta = doc.getElementById('evlAiIn');
+    assert.ok(sig);
+    ta.focus(); ta.value = 'Half a question'; ta.setSelectionRange(4, 4);
+    ph.aiDraft(ta);
+    ta.dispatchEvent(new w.Event('keyup', { bubbles: true }));
+    log.dispatchEvent(new w.Event('scroll'));
+    assert.ok(Array.isArray(log._evlScroll), 'scroll offsets are tracked');
+    // MeshCentral: devicesessions -> gotoDevice(..., true) empties the page and calls the hooks
+    w.QH('p19pages', '');
+    ph.onDeviceRefreshEnd(NODE);
+    assert.strictEqual(doc.getElementById('evlWrap'), wrap, 'the same shell, not a rebuild');
+    assert.strictEqual(doc.activeElement, ta);
+    // another plugin's hook registers its tab after ours: p19pages.innerHTML += ... re-parses our DOM
+    w.pluginHandler.registerPluginTab({ tabId: 'pluginOther', tabTitle: 'Other' });
+    var copy = doc.getElementById('evlWrap');
+    assert.notStrictEqual(copy, wrap);
+    assert.strictEqual(doc.getElementById('evlAiIn').value, '', 'the copy lost the text');
+    ph.aiRenderComposer();
+    assert.strictEqual(doc.getElementById('evlAiIn').value, 'Half a question', 'fallback: the draft fills a re-created field');
+    await sleep(5);
+    assert.strictEqual(doc.getElementById('evlWrap'), wrap, 'the original is back');
+    assert.strictEqual(doc.querySelectorAll('#evlWrap').length, 1);
+    assert.ok(doc.getElementById('pluginOther'), 'the other plugin\'s tab stays');
+    assert.strictEqual(doc.getElementById('evlAiIn'), ta);
+    assert.strictEqual(ta.value, 'Half a question');
+    assert.strictEqual(doc.activeElement, ta);
+    assert.deepStrictEqual([ta.selectionStart, ta.selectionEnd], [4, 4]);
+    assert.strictEqual(doc.getElementById('evlAiLog')._evlConv, sig, 'properties on the elements survive');
+    // our own rebuild (permissions changed) and a different device still build anew
+    w.QH('pluginEventLog', '');
+    ph.elEnsureShell();
+    var rebuilt = doc.getElementById('evlWrap');
+    assert.ok(rebuilt && rebuilt !== wrap);
+    assert.strictEqual(doc.getElementById('evlAiIn').value, 'Half a question', 'the draft comes from the state');
+    w.eval('currentNode = { _id: "node/d/n2", name: "other", meshid: "mesh/d/A", agent: { id: 3 } };');
+    w.QH('p19pages', ''); ph.onDeviceRefreshEnd('node/d/n2');
+    w.eval('currentNode = { _id: "' + NODE + '", name: "FIN-LT-0142", meshid: "mesh/d/A", agent: { id: 3 }, conn: 1, osdesc: "Windows 11" };');
+    w.QH('p19pages', ''); ph.onDeviceRefreshEnd(NODE);
+    assert.ok(doc.getElementById('evlWrap') && doc.getElementById('evlWrap') !== rebuilt);
+    await sleep(5);
+    if (ph._aiDog) w.clearInterval(ph._aiDog);
+});
+
+test('drafts: kept per device in sessionStorage (at most 4000 characters), restored on a fresh state, removed once sent', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document, key = 'evl_ai_draft:' + NODE;
+    grant(w); loadHistory(w);
+    ph.aiToggle();
+    var ta = doc.getElementById('evlAiIn');
+    ta.value = 'x'.repeat(5000); ph.aiDraft(ta);
+    ta.value = 'Typed before the reload'; ph.aiDraft(ta);
+    assert.strictEqual(w.sessionStorage.getItem(key), null, 'written after a pause in typing');
+    await sleep(450);
+    assert.strictEqual(w.sessionStorage.getItem(key), 'Typed before the reload');
+    ta.value = 'y'.repeat(5000); ph.aiDraft(ta);
+    await sleep(450);
+    assert.strictEqual(w.sessionStorage.getItem(key).length, 4000);
+    ta.value = 'Typed before the reload'; ph.aiDraft(ta);
+    await sleep(450);
+    // a reload: a fresh state reads it back
+    ph.st = null;
+    w.QH('pluginEventLog', '');
+    ph.elEnsureShell();
+    assert.strictEqual(ph.st.ai.draft, 'Typed before the reload');
+    ph.aiToggle();
+    assert.strictEqual(doc.getElementById('evlAiIn').value, 'Typed before the reload');
+    assert.strictEqual(w.sessionStorage.getItem('evl_ai_draft:node/d/other'), null, 'per device');
+    ph.aiSubmit();
+    assert.strictEqual(sentOf(w, 'aiStart').pop().input.text, 'Typed before the reload');
+    assert.strictEqual(w.sessionStorage.getItem(key), null, 'removed once sent');
+    // emptied by hand: removed too
+    doc.getElementById('evlAiIn').value = 'z'; ph.aiDraft(doc.getElementById('evlAiIn'));
+    doc.getElementById('evlAiIn').value = ''; ph.aiDraft(doc.getElementById('evlAiIn'));
+    await sleep(450);
+    assert.strictEqual(w.sessionStorage.getItem(key), null);
+    if (ph._aiDog) w.clearInterval(ph._aiDog);
 });
