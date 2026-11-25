@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Changed
+- Event Log toolbar: *Ask about this device* is *Ask*; Ask and Diagnose also show only their icons when the toolbar would wrap, so it stays one row down to about 1300 px in MeshCentral's modern UI
 
 ## [0.9.0] - 2026-11-25
 ### Added

@@ -730,7 +730,7 @@ test('running state: dot on the Ask button while the panel is closed; Explain an
     ph.onAiStarted(null, { nodeid: NODE, reqId: s.reqId, convId: 'cv1' });
     ph.onAiDone(null, { nodeid: NODE, convId: 'cv1', turn: 1, text: 'Done.', citations: {}, usage: {} });
     assert.ok(!btn.classList.contains('busy'));
-    assert.strictEqual(btn.getAttribute('aria-label'), null);
+    assert.deepStrictEqual([btn.getAttribute('aria-label'), btn.title], ['Ask about this device', 'Ask about this device']);
     // Explain
     var key = ph.elNormalize(REC).key;
     ph.st.expanded[key] = true; ph.elUpdate();
@@ -1310,9 +1310,14 @@ test('toolbar: short labels, icon-only Table/Viewer with aria-pressed, the IDs f
     assert.match(doc.getElementById('evlStyles').textContent, /input\.evlIn\.evlIdIn \{ width:calc\(6ch \+ 16px\);/);
     // every button that can lose its label keeps a name and a tooltip
     Array.prototype.forEach.call(doc.querySelectorAll('#evlToolbar button'), function (b) {
-        if (b.id == 'evlAiBtn' || b.id == 'evlAiDiagBtn') return;
         assert.ok(b.getAttribute('aria-label') && b.title, b.outerHTML);
     });
+    // Ask and Diagnose: short labels that go in compact like the others, the full name stays
+    var ask = doc.getElementById('evlAiBtn'), dg = doc.getElementById('evlAiDiagBtn');
+    assert.deepStrictEqual([ask.textContent, ask.getAttribute('aria-label'), ask.title], ['Ask', 'Ask about this device', 'Ask about this device']);
+    assert.deepStrictEqual([dg.textContent, dg.getAttribute('aria-label')], ['Diagnose', 'Diagnose']);
+    assert.ok(/^Diagnose this device/.test(dg.title));
+    [ask, dg].forEach(function (b) { assert.strictEqual(b.querySelector('.evlTx').textContent, b.textContent, b.id + ': the label is the part compact hides'); assert.ok(b.querySelector('svg')); });
     // compact: measured with the labels; wrapping -> .evlCompact; back only with 24 px to spare
     var bar = doc.querySelector('#evlToolbar .evlBar'), m = { wraps: true, slack: 0 };
     bar.getClientRects = function () { return [1]; };

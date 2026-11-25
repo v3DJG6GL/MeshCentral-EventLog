@@ -1218,8 +1218,8 @@ module.exports.attach = function (obj) {
         if (!btn || st == null || st.ai == null) return;
         var a = st.ai, c = a.convs[a.chat], run = !a.open && ph.aiBusy(c) && c.status != 'preview', rev = !a.open && c != null && c.status == 'preview';
         btn.classList.toggle('busy', run || rev);
-        if (run || rev) { var l = 'Ask about this device (' + (rev ? 'waiting for your review' : 'answering…') + ')'; btn.setAttribute('aria-label', l); btn.setAttribute('title', l); }
-        else { btn.removeAttribute('aria-label'); btn.removeAttribute('title'); }
+        var l = 'Ask about this device' + ((run || rev) ? ' (' + (rev ? 'waiting for your review' : 'answering…') + ')' : '');
+        btn.setAttribute('aria-label', l); btn.setAttribute('title', l);
     };
     // "qwen3:14b on gpu-01.lan (local, personal values replaced)"
     obj.aiInfoLine = function (c, short) {

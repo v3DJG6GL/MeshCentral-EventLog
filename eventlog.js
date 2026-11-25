@@ -636,7 +636,6 @@ body.night #pluginEventLog {
 #pluginEventLog .evlBar.evlCompact .evlTx { display:none; }
 #pluginEventLog .evlBar.evlCompact .evlSeg button, #pluginEventLog .evlSeg.evlIcoSeg button { padding-left:7px; padding-right:7px; }
 #pluginEventLog .evlBar.evlCompact .evlBtn { padding-left:6px; padding-right:6px; }
-#pluginEventLog .evlBar.evlCompact .evlBtn.evlAiBtn, #pluginEventLog .evlBar.evlCompact .evlBtn.evlAiDgBtn { padding-left:9px; padding-right:9px; }
 #pluginEventLog .evlBar > .evlAiGrp { display:flex; gap:6px; margin-left:auto; align-self:stretch; }
 #pluginEventLog .evlAiGrp > .evlBtn { align-self:stretch; margin-left:0; }
 #pluginEventLog input.evlIn.evlIdIn { width:calc(6ch + 16px); min-width:0; }
@@ -985,9 +984,9 @@ body.night #pluginEventLog {
             // Ask opens the chat panel beside the table; Diagnose opens the Assistant view with the time window (it never
             // runs by itself). Both on the right, and onto the next row together.
             h += '<div class=evlAiGrp>';
-            if (!ai) h += '<button type=button id=evlAiBtn class="evlBtn evlAiBtn' + (st.ai.open ? ' on' : '') + '" aria-expanded=' + (st.ai.open ? 'true' : 'false') + ' aria-controls=evlAi onclick="return pluginHandler.eventlog.aiToggle()">' +
-                 ph.elIcon('ask') + 'Ask about this device<span class=evlAiDot aria-hidden=true></span></button>';
-            h += '<button type=button id=evlAiDiagBtn class="evlBtn evlAiDgBtn" aria-controls=evlAi title="Diagnose this device: choose a time window, then start" onclick="return pluginHandler.eventlog.aiDiagOpen()">' + ph.aiIcon('diag') + 'Diagnose</button></div>';
+            if (!ai) h += '<button type=button id=evlAiBtn class="evlBtn evlAiBtn' + (st.ai.open ? ' on' : '') + '" aria-expanded=' + (st.ai.open ? 'true' : 'false') + ' aria-controls=evlAi aria-label="Ask about this device" title="Ask about this device" onclick="return pluginHandler.eventlog.aiToggle()">' +
+                 ph.elIcon('ask') + '<span class=evlTx>Ask</span><span class=evlAiDot aria-hidden=true></span></button>';
+            h += '<button type=button id=evlAiDiagBtn class="evlBtn evlAiDgBtn" aria-controls=evlAi aria-label="Diagnose" title="Diagnose this device: choose a time window, then start" onclick="return pluginHandler.eventlog.aiDiagOpen()">' + ph.aiIcon('diag') + '<span class=evlTx>Diagnose</span></button></div>';
         } else {   // say why the Assistant is not offered here (nothing for users without its permission)
             var why = ph.aiUnavailText(ph.elAccess);
             if (why) h += '<span id=evlAiWhy class=evlAiWhy role=note>' + esc(why) + '</span>';
@@ -1027,7 +1026,7 @@ body.night #pluginEventLog {
         s.parentNode.removeChild(s);
         return w;
     };
-    // Labels of the view switch, Fold and CSV only while the bar fits in one row: measured with the labels, .evlCompact
+    // Labels of the view switch, Fold, CSV, Ask and Diagnose only while the bar fits in one row: measured with the labels, .evlCompact
     // when it wraps. Back to the labels only with 24 px to spare, so a scrollbar coming and going cannot flip it.
     obj.elFitBar = function() {
         var ph = pluginHandler.eventlog, bar = document.querySelector('#evlToolbar .evlBar');
