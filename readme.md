@@ -1,6 +1,6 @@
 # MeshCentral-EventLog
 
-*Current Version: 0.8.2
+*Current Version: 0.9.0
 Released: 2026-11-25*
 
 A [MeshCentral](https://github.com/Ylianst/MeshCentral) plugin that shows a device's event log live, stores its history on the server, raises alerts, and offers an optional LLM assistant that explains events and diagnoses the device.

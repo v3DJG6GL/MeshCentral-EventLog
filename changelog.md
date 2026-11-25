@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+
+## [0.9.0] - 2026-11-25
 ### Added
 - Event Log tab: third view *Assistant* (Live | History | Assistant): the Assistant in full width without the filter toolbar; the panel's full-width button switches to it and Esc docks back. The split view beside the table stays
 - Time ranges 3, 60, 90, 180 and 365 days (labels without "Last")
