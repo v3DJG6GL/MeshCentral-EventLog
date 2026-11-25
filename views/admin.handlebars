@@ -637,7 +637,7 @@
         var id = input.id + 'Err';
         if (document.getElementById(id) != null) return;
         var e = document.createElement('div'); e.className = 'elAiErr'; e.id = id; e.textContent = text;
-        (input.closest('label') || input).insertAdjacentElement('afterend', e);
+        (input.closest('label') || input.closest('.elCombo') || input).insertAdjacentElement('afterend', e);
         input.setAttribute('data-desc', input.getAttribute('aria-describedby') || '');
         input.setAttribute('aria-describedby', (id + ' ' + (input.getAttribute('aria-describedby') || '')).trim());
         input.setAttribute('aria-invalid', 'true');
@@ -973,7 +973,6 @@
         Q('elAiUrl').value = ep ? (ep.baseUrl || '') : EL_AI_PRESETS.ollama;
         Q('elAiKey').value = '';
         Q('elAiModel').value = ep ? (ep.model || '') : '';
-        Q('elAiModelList').textContent = '';
         var num = function(v) { return (v == null || v === '' || !isFinite(Number(v))) ? '' : String(v); };
         Q('elAiNumCtx').value = ep ? num(ep.numCtx) : '';
         Q('elAiMaxOut').value = ep ? num(ep.maxOutputTokens) : '';
@@ -987,6 +986,7 @@
         ((ep && Array.isArray(ep.capsByModel)) ? ep.capsByModel : []).forEach(function(x) { if (x && typeof x.model == 'string' && x.caps) elAi.edit.modelCaps[x.model] = x.caps; });
         Q('elAiUserModels').checked = elAi.edit.um.enabled;
         Q('elAiUmNew').value = ''; setStatus('elAiUmStatus', '', '');
+        elComboReset();
         Q('elAiTemp').value = ep ? num(ep.temperature) : '';
         Q('elAiTopP').value = ep ? num(ep.topP) : '';
         Q('elAiTopK').value = ep ? num(ep.topK) : '';
@@ -1012,6 +1012,7 @@
         return false;
       }
       function elAiCloseForm() {
+        elComboReset();
         Q('elAiEpForm').hidden = true;
         Q('elAiKey').value = '';
         elAi.edit = null;
@@ -1145,7 +1146,7 @@
         var p = elAiDraftPayload(false);
         if (p == null) { setStatus('elAiModelsStatus', 'err', 'Check the marked fields.'); return false; }
         setStatus('elAiModelsStatus', 'pending', 'Asking the server\u2026', 'elAiFetchBtn');
-        elAiSend('models', 'aiAdminModels', p, 40000, function() { setStatus('elAiModelsStatus', 'err', '\u2717 No list within 40 seconds.', 'elAiFetchBtn'); });
+        elAiSend('models', 'aiAdminModels', p, 40000, function() { setStatus('elAiModelsStatus', 'err', '\u2717 No list within 40 seconds.', 'elAiFetchBtn'); elComboFetched('\u2717 No list within 40 seconds.'); });
         return false;
       }
       function elAiModelFacts() {
@@ -1908,15 +1909,14 @@
       parent.pluginHandler['eventlog'].aiAdminModelsResult = elAiHandler(function(msg) {
         if (elAiTake(msg) == null || elAi.edit == null) return;
         elAiServerNet('models', msg.network);
-        if (!msg.ok) { setStatus('elAiModelsStatus', 'err', '\u2717 ' + String(msg.error || 'The server did not return a model list.'), 'elAiFetchBtn'); return; }
+        if (!msg.ok) { setStatus('elAiModelsStatus', 'err', '\u2717 ' + String(msg.error || 'The server did not return a model list.'), 'elAiFetchBtn'); elComboFetched(Q('elAiModelsStatus').textContent); return; }
         elAi.models = (Array.isArray(msg.models) ? msg.models : []).filter(function(m) { return m && typeof m.id == 'string'; });
         elAi.modelsMeta = { genDefaults: (msg.genDefaults && typeof msg.genDefaults == 'object') ? msg.genDefaults : null, thinkingDefault: (typeof msg.thinkingDefault == 'string') ? msg.thinkingDefault : null };
         elAi.edit.modelsFor = elAi.edit.sentTarget && elAi.edit.sentTarget.models;
-        var dl = Q('elAiModelList'); dl.textContent = '';
-        elAi.models.forEach(function(m) { dl.appendChild(new Option(m.id, m.id)); });
         setStatus('elAiModelsStatus', 'ok', elAi.models.length ? ('\u2713 ' + elAiFmtNum(elAi.models.length) + ' models; pick one in the Model field.') : 'The server lists no models.', 'elAiFetchBtn');
         if (Q('elAiModel').value.trim() === '' && elAi.models.length == 1) Q('elAiModel').value = elAi.models[0].id;
         elAiModelFacts();
+        elComboFetched('');
       });
       parent.pluginHandler['eventlog'].aiAdminHistoryStats = elAiHandler(function(msg) {
         if (elAiTake(msg) == null) return;
@@ -1944,7 +1944,7 @@
           case 'delete': setStatus('elAiEpStatus', 'err', text); break;
           case 'settings': setStatus('elAiSetStatus', 'err', '\u2717 Assistant settings not saved: ' + String(msg.error || 'the server refused the request.')); break;
           case 'test': setStatus('elAiFormStatus', 'err', text, 'elAiTestBtn'); break;
-          case 'models': setStatus('elAiModelsStatus', 'err', text, 'elAiFetchBtn'); break;
+          case 'models': setStatus('elAiModelsStatus', 'err', text, 'elAiFetchBtn'); elComboFetched(text); break;
           case 'audit': setStatus('elAiAuditStatus', 'err', text); elAiAuditButtons(); break;
           case 'preview': setStatus('elAiPrevStatus', 'err', text, 'elAiPrevBtn'); break;
           case 'purge': setStatus('elAiHistStatus', 'err', text, 'elAiHistPurge'); elAiRenderHistCounts(); break;
@@ -2443,6 +2443,208 @@
         box.textContent = parts.join(' ');
       }
 
+      // ---- combobox: a text field with a list to pick from (free text stays possible). The arrow button, Alt+Down,
+      // Down or a click into the empty field show the whole list, typing filters it (any part, any case).
+      // o: { label (arrow button), listLabel, items() -> [{ id, info, tag, cur, disabled }] or null when there is no
+      //      list yet, fetch() -> '' while a list is being fetched or the reason it cannot be, pick(id), enter() }
+      var elCombos = [];
+      function elCombo(input, o) {
+        var lid = input.id + 'List';
+        var wrap = document.createElement('span'); wrap.className = 'elCombo';
+        if (input.classList.contains('w-m')) { input.classList.remove('w-m'); wrap.classList.add('w-m'); }
+        input.parentNode.insertBefore(wrap, input); wrap.appendChild(input);
+        var btn = document.createElement('button'); btn.type = 'button'; btn.className = 'elComboBtn'; btn.tabIndex = -1;
+        btn.setAttribute('aria-label', o.label); btn.title = o.label; btn.setAttribute('aria-controls', lid); btn.setAttribute('aria-expanded', 'false');
+        btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+        wrap.appendChild(btn);
+        var pop = document.createElement('div'); pop.className = 'elComboPop'; pop.hidden = true;
+        var msg = document.createElement('div'); msg.className = 'elComboMsg'; msg.setAttribute('role', 'status'); msg.hidden = true;
+        var ul = document.createElement('ul'); ul.id = lid; ul.className = 'elComboList'; ul.setAttribute('role', 'listbox'); ul.setAttribute('aria-label', o.listLabel);
+        pop.appendChild(msg); pop.appendChild(ul);
+        (document.getElementById('eventLogAdmin') || document.body).appendChild(pop);   // not inside a card: its containment would clip the fixed list
+        input.setAttribute('role', 'combobox'); input.setAttribute('aria-autocomplete', 'list');
+        input.setAttribute('aria-expanded', 'false'); input.setAttribute('aria-controls', lid);
+        var c = { input: input, pop: pop, list: ul, isOpen: false, filter: null, act: -1, opts: [], waiting: false, err: '', picking: false };
+        function setMsg(text, err) { msg.textContent = text || ''; msg.hidden = !text; msg.className = 'elComboMsg' + (err ? ' err' : ''); }
+        function render() {
+          var items = o.items(), q = (c.filter == null) ? '' : String(c.filter).trim().toLowerCase(), keep = (c.act >= 0 && c.opts[c.act]) ? c.opts[c.act].id : null;
+          ul.textContent = ''; c.opts = []; c.act = -1;
+          input.removeAttribute('aria-activedescendant');
+          if (c.waiting) { setMsg('Fetching models…'); return; }
+          if (c.err) { setMsg(c.err, true); return; }
+          if (items == null) { setMsg(o.noList || 'No list yet.'); return; }
+          items.forEach(function(it) { if (q === '' || it.id.toLowerCase().indexOf(q) >= 0) c.opts.push(it); });
+          setMsg(!items.length ? 'The server lists no models.' : !c.opts.length ? 'No listed model contains “' + c.filter.trim() + '”; the name is used as typed.' : '');
+          c.opts.forEach(function(it, i) {
+            var li = document.createElement('li'); li.id = lid + '-' + i; li.setAttribute('role', 'option'); li.setAttribute('aria-selected', 'false');
+            if (it.cur) li.className = 'cur';
+            if (it.disabled) li.setAttribute('aria-disabled', 'true');
+            var name = document.createElement('span'); name.className = 'elComboId'; name.textContent = it.id; li.appendChild(name);
+            if (it.cur) { var sr = document.createElement('span'); sr.className = 'elSr'; sr.textContent = ' (current)'; li.appendChild(sr); }
+            if (it.tag) { var t = elAiTag(it.tag); t.classList.add('elComboTag'); li.appendChild(t); }
+            if (it.info) { var inf = document.createElement('span'); inf.className = 'elComboInfo'; inf.textContent = it.info; li.appendChild(inf); }
+            li.addEventListener('mousemove', function() { if (!it.disabled && c.act != i) setAct(i, true); });
+            li.addEventListener('click', function() { choose(i); });
+            ul.appendChild(li);
+            if (keep != null && it.id === keep && !it.disabled) c.act = i;
+          });
+          if (c.act >= 0) setAct(c.act);
+        }
+        function setAct(i, noScroll) {
+          var old = ul.querySelector('li.act'); if (old) { old.classList.remove('act'); old.setAttribute('aria-selected', 'false'); }
+          c.act = i;
+          var li = (i >= 0) ? ul.children[i] : null;
+          if (li == null) { c.act = -1; input.removeAttribute('aria-activedescendant'); return; }
+          li.classList.add('act'); li.setAttribute('aria-selected', 'true');
+          input.setAttribute('aria-activedescendant', li.id);
+          if (!noScroll) { if (li.offsetTop < ul.scrollTop) ul.scrollTop = li.offsetTop; else if (li.offsetTop + li.offsetHeight > ul.scrollTop + ul.clientHeight) ul.scrollTop = li.offsetTop + li.offsetHeight - ul.clientHeight; }
+        }
+        // the next enabled option from `from` in direction `dir` (stays at the last one found)
+        function step(from, dir, count) {
+          var i = from, best = -1;
+          while (count > 0) { i += dir; if (i < 0 || i >= c.opts.length) break; if (!c.opts[i].disabled) { best = i; count--; } }
+          return best >= 0 ? best : (from >= 0 && from < c.opts.length ? from : -1);
+        }
+        function pageSize() { var li = ul.children[0]; return (li && li.offsetHeight) ? Math.max(1, Math.floor(ul.clientHeight / li.offsetHeight) - 1) : 8; }
+        function place() {
+          if (!c.isOpen) return;
+          var r = wrap.getBoundingClientRect(), vw = document.documentElement.clientWidth || window.innerWidth, vh = window.innerHeight, gap = 2, edge = 8;
+          pop.style.minWidth = Math.round(r.width) + 'px'; pop.style.maxWidth = Math.max(160, vw - 2 * edge) + 'px';
+          pop.style.maxHeight = ''; pop.style.top = '0px'; pop.style.left = '0px';
+          var h = Math.min(pop.offsetHeight, 280), w = pop.offsetWidth, below = vh - r.bottom - gap - edge, above = r.top - gap - edge;
+          var down = (below >= h || below >= above), room = Math.max(80, down ? below : above);
+          h = Math.min(h, room);
+          pop.style.maxHeight = Math.min(280, room) + 'px';
+          pop.style.top = Math.round(down ? r.bottom + gap : r.top - gap - h) + 'px';
+          pop.style.left = Math.round(Math.max(edge, Math.min(r.left, vw - w - edge))) + 'px';
+          pop.classList.toggle('up', !down);
+        }
+        function openList(all, first, noFetch) {
+          if (all) c.filter = null;
+          c.err = '';
+          if (o.items() == null && o.fetch && !c.waiting && !noFetch) { var why = o.fetch(); if (why) c.err = why; else c.waiting = true; }
+          if (!c.isOpen) { c.isOpen = true; pop.hidden = false; input.setAttribute('aria-expanded', 'true'); btn.setAttribute('aria-expanded', 'true'); }
+          c.act = -1; render(); place();
+          var cur = -1; c.opts.forEach(function(it, i) { if (cur < 0 && it.cur && !it.disabled) cur = i; });
+          if (cur >= 0) setAct(cur); else if (first) setAct(step(-1, 1, 1));   // after place(): scrolled into the list's final height
+        }
+        function close() {
+          if (!c.isOpen) return;
+          c.isOpen = false; pop.hidden = true; c.act = -1;
+          input.setAttribute('aria-expanded', 'false'); btn.setAttribute('aria-expanded', 'false'); input.removeAttribute('aria-activedescendant');
+        }
+        function choose(i) {
+          var it = c.opts[i]; if (!it || it.disabled) return;
+          close();
+          c.picking = true;
+          try { input.value = it.id; o.pick(it.id); } finally { c.picking = false; }
+        }
+        c.open = openList; c.close = close; c.place = place;
+        c.refresh = function() { if (c.isOpen) { render(); place(); } };
+        btn.addEventListener('mousedown', function(e) { e.preventDefault(); });   // the field keeps the focus
+        pop.addEventListener('mousedown', function(e) { e.preventDefault(); });
+        btn.addEventListener('click', function() {
+          if (c.isOpen) { close(); input.focus(); return; }
+          input.focus(); openList(true, false);
+        });
+        input.addEventListener('click', function() { if (!c.isOpen && input.value.trim() === '' && o.items() != null) openList(true, false); });
+        input.addEventListener('input', function() {
+          if (c.picking) return;
+          c.filter = input.value; c.err = '';
+          if (c.isOpen) { c.act = -1; render(); place(); }
+          else if (o.items() != null && input.value.trim() !== '') { c.isOpen = true; pop.hidden = false; input.setAttribute('aria-expanded', 'true'); btn.setAttribute('aria-expanded', 'true'); render(); place(); }
+        });
+        input.addEventListener('blur', function() { close(); });
+        input.addEventListener('keydown', function(e) {
+          var k = e.key;
+          if (k == 'ArrowDown' || k == 'Down') {
+            e.preventDefault();
+            if (!c.isOpen) openList(true, !e.altKey);
+            else if (!e.altKey) setAct(c.act < 0 ? step(-1, 1, 1) : step(c.act, 1, 1));
+            return;
+          }
+          if (!c.isOpen) { if (k == 'Enter' && o.enter) { e.preventDefault(); o.enter(); } return; }
+          switch (k) {
+            case 'ArrowUp': case 'Up': e.preventDefault(); if (e.altKey) close(); else setAct(c.act < 0 ? step(c.opts.length, -1, 1) : step(c.act, -1, 1)); break;
+            case 'Home': e.preventDefault(); setAct(step(-1, 1, 1)); break;
+            case 'End': e.preventDefault(); setAct(step(c.opts.length, -1, 1)); break;
+            case 'PageDown': e.preventDefault(); setAct(step(c.act, 1, pageSize())); break;
+            case 'PageUp': e.preventDefault(); setAct(c.act < 0 ? step(-1, 1, 1) : step(c.act, -1, pageSize())); break;
+            case 'Enter':
+              e.preventDefault();
+              if (c.act >= 0) choose(c.act);
+              else { close(); if (o.enter) o.enter(); }
+              break;
+            case 'Escape': case 'Esc': e.preventDefault(); e.stopPropagation(); close(); break;
+            case 'Tab': close(); break;
+          }
+        });
+        elCombos.push(c);
+        return c;
+      }
+      // a fetch the lists waited for has ended ('' = the list is there, else the error to show)
+      function elComboFetched(err) {
+        elCombos.forEach(function(c) {
+          var was = c.waiting;
+          c.waiting = false;
+          if (was) c.err = err || '';
+          if (was && c.isOpen && !c.err) c.open(true, false, true); else c.refresh();
+        });
+      }
+      function elComboReset() { elCombos.forEach(function(c) { c.close(); c.waiting = false; c.err = ''; c.filter = null; }); }
+      (function() {
+        var follow = function(e) { if (e && e.target && e.target.classList && e.target.classList.contains('elComboList')) return; elCombos.forEach(function(c) { c.place(); }); };
+        window.addEventListener('resize', follow);
+        window.addEventListener('scroll', follow, true);
+      })();
+      // the models Fetch models found for the form's server type and address; null when there is no such list
+      function elAiFetchedModels() {
+        var e = elAi.edit;
+        return (e && e.modelsFor != null && e.modelsFor === elAiFormTarget(false)) ? elAi.models : null;
+      }
+      function elAiFmtCtx(n) { n = Number(n); return (n >= 1048576 && n % 1048576 === 0) ? (n / 1048576) + 'M' : (n >= 1024 && n % 1024 === 0) ? (n / 1024) + 'K' : elAiFmtNum(n); }
+      function elAiModelInfo(m) {
+        var p = [];
+        if (m.tools === true) p.push('tools'); else if (m.tools === false) p.push('no tools');
+        if (m.thinking === true) p.push('thinking');
+        if (Number(m.ctx) > 0) p.push(elAiFmtCtx(m.ctx) + ' context');
+        return p.join(' · ');
+      }
+      // the arrow of a list nothing was fetched for yet: Fetch models, when the address allows it
+      function elAiComboFetch() {
+        if (elAi.edit == null) return 'Open an endpoint first.';
+        var url = Q('elAiUrl').value.trim(), k = elAiAddrKind(url);
+        if (url === '' || k == 'invalid' || k == 'userinfo' || k == 'query') return 'Enter the server’s address above to fetch its models; a name can also be typed.';
+        var pending = function() { return Object.keys(elAi.reqs).some(function(x) { return elAi.reqs[x].kind == 'models'; }); };
+        if (!pending()) elAiFetchModels();
+        return pending() ? '' : (Q('elAiModelsStatus').textContent || 'The models could not be fetched.');
+      }
+      function elAiCombosInit() {
+        elCombo(Q('elAiModel'), {
+          label: 'Show models', listLabel: 'Models', fetch: elAiComboFetch,
+          noList: 'Use Fetch models to list the server’s models; a name can also be typed.',
+          items: function() {
+            var l = elAiFetchedModels(), cur = Q('elAiModel').value.trim();
+            return l == null ? null : l.map(function(m) { return { id: m.id, info: elAiModelInfo(m), cur: m.id === cur }; });
+          },
+          pick: function() { var i = Q('elAiModel'); i.dispatchEvent(new Event('input', { bubbles: true })); i.dispatchEvent(new Event('change', { bubbles: true })); }
+        });
+        elCombo(Q('elAiUmNew'), {
+          label: 'Show models to add', listLabel: 'Models to add', fetch: elAiComboFetch,
+          noList: 'Use Fetch models to list the server’s models; a name can also be typed.',
+          items: function() {
+            var l = elAiFetchedModels(), e = elAi.edit, def = Q('elAiModel').value.trim();
+            if (l == null) return null;
+            return l.map(function(m) {
+              var added = !!(e && e.um && e.um.models.some(function(x) { return x.id === m.id; }));
+              return { id: m.id, info: elAiModelInfo(m), tag: m.id === def ? 'default' : added ? 'added' : '', disabled: m.id === def || added };
+            });
+          },
+          pick: function() { elAiUmAdd(); },
+          enter: function() { elAiUmAdd(); }
+        });
+      }
+
       function elLayoutInit() {
         var any = function() { elBarUpdate(); };
         document.addEventListener('input', any);
@@ -2453,7 +2655,7 @@
         });
         Q('elAiEpForm').addEventListener('input', elAiAdvSummary);
         Q('elAiEpForm').addEventListener('change', elAiAdvSummary);
-        Q('elAiUmNew').addEventListener('keydown', function(e) { if (e.key == 'Enter') { e.preventDefault(); elAiUmAdd(); } });
+        elAiCombosInit();
         Q('elaiEndpointId').addEventListener('change', function() { elAi.cfgChosen = Q('elaiEndpointId').value; });
         Q('elAsFilter').addEventListener('input', function(e) { e.stopPropagation(); elAsFilter(); });
         ['elAsGroups', 'elAsDevices'].forEach(function(id) { Q(id + 'All').addEventListener('change', function(e) { e.stopPropagation(); elAsSelectAll(id, Q(id + 'All').checked); }); });
@@ -2576,6 +2778,29 @@
     #eventLogAdmin input.sw:checked { background: var(--accent); border-color: var(--accent); }
     #eventLogAdmin input.sw:checked::after { transform: translateX(16px); background: var(--accent-ink); }
     #eventLogAdmin input.sw:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    /* combobox: text field + arrow; the list floats under (or above) the field */
+    .elCombo { position: relative; display: inline-flex; max-width: 100%; vertical-align: middle; }
+    #eventLogAdmin .elCombo > input { width: 100%; padding-right: 34px; }
+    #eventLogAdmin .elCombo > button.elComboBtn { position: absolute; top: 1px; right: 1px; bottom: 1px; width: 30px; min-height: 0; padding: 0; border: 0; border-radius: 0 var(--r-ctl) var(--r-ctl) 0; background: transparent; color: var(--muted); display: flex; align-items: center; justify-content: center; line-height: 0; }
+    #eventLogAdmin .elCombo > button.elComboBtn:hover { background: var(--hover); color: var(--ink); }
+    .elComboBtn svg { transition: transform .15s; }
+    .elComboBtn[aria-expanded="true"] svg { transform: rotate(180deg); }
+    .elComboPop { position: fixed; z-index: 20; display: flex; flex-direction: column; min-height: 0; overflow: hidden; background: var(--surface); color: var(--ink); border: 1px solid var(--control); border-radius: var(--r-ctl); font-size: 13.5px; line-height: 1.35; }
+    .elComboMsg { padding: 8px 12px; color: var(--muted); max-width: 46ch; white-space: normal; }
+    .elComboMsg.err { color: var(--danger); }
+    .elComboMsg + .elComboList:not(:empty) { border-top: 1px solid var(--line); }
+    .elComboList { list-style: none; margin: 0; padding: 4px 0; position: relative; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+    .elComboList:empty { display: none; }
+    .elComboList li { position: relative; display: flex; align-items: baseline; gap: 6px 10px; padding: 5px 12px 5px 28px; cursor: pointer; white-space: nowrap; }
+    .elComboList li.act { background: var(--accent-soft); }
+    .elComboList li.cur::before { content: "\2713"; position: absolute; left: 10px; top: 5px; color: var(--accent); font-weight: 700; }
+    .elComboList li[aria-disabled="true"] { cursor: default; }
+    .elComboList li[aria-disabled="true"] .elComboId { color: var(--muted); }
+    .elComboId { font-family: var(--mono); font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .elComboList li.cur .elComboId { font-weight: 600; }
+    .elComboInfo { margin-left: auto; padding-left: 14px; color: var(--muted); font-size: 12px; flex: none; }
+    #eventLogAdmin .elComboTag { font-size: 11.5px; line-height: 16px; padding: 0 7px; vertical-align: 0; flex: none; }
+    @media (forced-colors: active) { .elComboList li.act { outline: 2px solid Highlight; outline-offset: -2px; } }
     .elAiCount { font-size: 12.5px; color: var(--muted); text-align: right; margin-top: 4px; font-variant-numeric: tabular-nums; }
     .elAiCount.over { color: var(--danger); font-weight: 600; }
     .elAiGrid { display: grid; grid-template-columns: minmax(180px, 250px) minmax(0, 1fr); gap: 16px 28px; align-items: start; }
@@ -3076,8 +3301,7 @@
                     <small id="elAiKeyHelp" class="elAiHelp">Only needed if the server asks for one. Stored encrypted on the MeshCentral server and never shown again. Enter <code>env:VAR_NAME</code> to read it from an environment variable of the MeshCentral server instead.</small></div>
 
                   <label for="elAiModel">Model</label>
-                  <div><div class="inl"><input type="text" id="elAiModel" class="w-m mono-in" list="elAiModelList" spellcheck="false" autocomplete="off" aria-describedby="elAiModelFacts" oninput="elAiModelFacts();">
-                    <datalist id="elAiModelList"></datalist>
+                  <div><div class="inl"><input type="text" id="elAiModel" class="w-m mono-in" spellcheck="false" autocomplete="off" aria-describedby="elAiModelFacts" oninput="elAiModelFacts();">
                     <button type="button" id="elAiFetchBtn" onclick="return elAiFetchModels();">Fetch models</button>
                     <span id="elAiModelsStatus" class="elSaveStatus" role="status" aria-live="polite"></span></div>
                     <div id="elAiModelFacts" class="elAiHelp" aria-live="polite"></div></div>
@@ -3097,7 +3321,7 @@
                       <thead><tr><th scope="col">Model</th><th scope="col">Off</th><th scope="col">Low</th><th scope="col">Medium</th><th scope="col">High</th><th scope="col">Max</th><th scope="col"><span class="elSr">Actions</span></th></tr></thead>
                       <tbody id="elAiUmRows"></tbody>
                     </table></div>
-                    <div class="inl" id="elAiUmAddRow"><input type="text" id="elAiUmNew" class="w-m mono-in" list="elAiModelList" spellcheck="false" autocomplete="off" maxlength="200" aria-label="Model to add" placeholder="Model name">
+                    <div class="inl" id="elAiUmAddRow"><input type="text" id="elAiUmNew" class="w-m mono-in" spellcheck="false" autocomplete="off" maxlength="200" aria-label="Model to add" placeholder="Model name">
                       <button type="button" id="elAiUmAdd" onclick="return elAiUmAdd();">Add model</button>
                       <span id="elAiUmStatus" class="elSaveStatus" role="status" aria-live="polite"></span></div>
                     <small id="elAiMapNote" class="elAiHelp elAiGenNote" hidden></small>

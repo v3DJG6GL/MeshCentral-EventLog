@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 ### Changed
+- Admin page: the Model and add-model fields are real dropdowns: the full fetched list (with tools, thinking and context size) even when a model is entered, filtered by typing, already listed models marked; free text still works
 - Event Log toolbar: *Ask about this device* is *Ask*; Ask and Diagnose also show only their icons when the toolbar would wrap, so it stays one row down to about 1300 px in MeshCentral's modern UI
 
 ## [0.9.0] - 2026-11-25

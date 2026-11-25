@@ -874,3 +874,172 @@ test('endpoint form: an unchanged saved endpoint is tested by id, also per model
     var svg = w2.document.querySelector('#elAiStart_windows .elAiIconBtn svg');
     assert.deepStrictEqual([svg.getAttribute('width'), svg.getAttribute('height')], ['16', '16']);
 });
+
+// a fetched model list (Ollama-style facts on some)
+var MODELS = [
+    { id: 'qwen3', ctx: 262144, tools: true, thinking: true }, { id: 'qwen3.8-flash-next', ctx: 131072, tools: true },
+    { id: 'deepseek-v4.1-flash', ctx: 65536, tools: true, thinking: true }, { id: 'hy4-flash', tools: false },
+    { id: 'inkling-2-mini', ctx: 32768 }, { id: 'gpt-oss:20b', ctx: 131072, tools: true, thinking: true },
+    { id: 'llama4-scout:17b', ctx: 10485760, tools: true }, { id: 'granite4-tiny' }, { id: 'mistral-small4:24b', tools: true },
+    { id: 'phi5-mini', ctx: 16384 }, { id: 'gemma4-12b', tools: false }, { id: 'olmo3-32b-think', thinking: true }
+];
+function key(w, el, k, extra) { var e = new w.KeyboardEvent('keydown', Object.assign({ key: k, bubbles: true, cancelable: true }, extra || {})); el.dispatchEvent(e); return e; }
+function comboOpts(w, id) { return Array.prototype.map.call(w.document.querySelectorAll('#' + id + 'List [role=option]'), function (li) { return li.querySelector('.elComboId').textContent; }); }
+function comboBtn(w, id) { return $(w, id).parentNode.querySelector('.elComboBtn'); }
+function comboMsg(w, id) { var m = $(w, id + 'List').parentNode.querySelector('.elComboMsg'); return m.hidden ? '' : m.textContent; }
+function answerModels(w, models, err) {
+    var m = w.last('aiAdminModels');
+    w.h.aiAdminModelsResult(null, err ? { reqId: m.reqId, ok: false, models: [], network: 'loopback', error: err } : { reqId: m.reqId, ok: true, models: models, network: 'loopback' });
+}
+
+test('model combobox: ARIA, the arrow fetches the list, the full list with a model entered, typing filters, keys, Enter / click pick, Esc keeps the typed name', { skip: SKIP }, function () {
+    var w = page();
+    w.data([EP]);
+    w.elAiOpenForm(w.elAi.endpoints[0]);
+    var inp = $(w, 'elAiModel'), btn = comboBtn(w, 'elAiModel'), lb = $(w, 'elAiModelList');
+    assert.strictEqual(w.document.querySelector('datalist'), null, 'no datalist left');
+    assert.deepStrictEqual(['role', 'aria-autocomplete', 'aria-expanded', 'aria-controls'].map(function (a) { return inp.getAttribute(a); }), ['combobox', 'list', 'false', 'elAiModelList']);
+    assert.strictEqual(lb.getAttribute('role'), 'listbox');
+    assert.deepStrictEqual([btn.getAttribute('aria-label'), btn.tabIndex, btn.getAttribute('aria-controls')], ['Show models', -1, 'elAiModelList']);
+    // no list yet: the arrow runs Fetch models and says so in the list
+    var n = w.sent.length;
+    btn.click();
+    assert.strictEqual(w.sent.length, n + 1);
+    assert.ok(w.last('aiAdminModels'), 'models fetched');
+    assert.strictEqual(inp.getAttribute('aria-expanded'), 'true');
+    assert.strictEqual(btn.getAttribute('aria-expanded'), 'true');
+    assert.strictEqual(lb.parentNode.hidden, false);
+    assert.strictEqual(comboMsg(w, 'elAiModel'), 'Fetching models…');
+    answerModels(w, MODELS);
+    // the full list although a model is entered; the current one marked and active, facts shown compactly
+    assert.strictEqual(inp.value, 'qwen3');
+    assert.deepStrictEqual(comboOpts(w, 'elAiModel'), MODELS.map(function (m) { return m.id; }));
+    var cur = lb.querySelector('li.cur');
+    assert.strictEqual(cur.querySelector('.elComboId').textContent, 'qwen3');
+    assert.match(cur.textContent, /\(current\)/);
+    assert.strictEqual(inp.getAttribute('aria-activedescendant'), cur.id);
+    assert.strictEqual(cur.getAttribute('aria-selected'), 'true');
+    assert.strictEqual(cur.querySelector('.elComboInfo').textContent, 'tools · thinking · 256K context');
+    assert.strictEqual(lb.children[3].querySelector('.elComboInfo').textContent, 'no tools');
+    assert.strictEqual(lb.children[7].querySelector('.elComboInfo'), null, 'no facts, no info');
+    // Esc closes and keeps the value; opening again shows the full list again (not filtered by the value)
+    var e = key(w, inp, 'Escape');
+    assert.strictEqual(e.defaultPrevented, true);
+    assert.deepStrictEqual([inp.getAttribute('aria-expanded'), lb.parentNode.hidden, inp.hasAttribute('aria-activedescendant')], ['false', true, false]);
+    key(w, inp, 'ArrowDown', { altKey: true });
+    assert.strictEqual(comboOpts(w, 'elAiModel').length, 12);
+    assert.strictEqual(w.sent.length, n + 1, 'the list is fetched once');
+    // typing filters (any part, any case); nothing active until the arrow keys
+    inp.value = 'FLASH'; fire(w, inp, 'input');
+    assert.deepStrictEqual(comboOpts(w, 'elAiModel'), ['qwen3.8-flash-next', 'deepseek-v4.1-flash', 'hy4-flash']);
+    assert.strictEqual(inp.hasAttribute('aria-activedescendant'), false);
+    key(w, inp, 'ArrowDown'); key(w, inp, 'ArrowDown');
+    var act = w.document.getElementById(inp.getAttribute('aria-activedescendant'));
+    assert.deepStrictEqual([act.querySelector('.elComboId').textContent, act.querySelector('.elComboInfo').textContent], ['deepseek-v4.1-flash', 'tools · thinking · 64K context']);
+    key(w, inp, 'End');
+    assert.match(w.document.getElementById(inp.getAttribute('aria-activedescendant')).textContent, /^hy4-flash/);
+    key(w, inp, 'ArrowDown');
+    assert.match(w.document.getElementById(inp.getAttribute('aria-activedescendant')).textContent, /^hy4-flash/, 'stays at the last one');
+    key(w, inp, 'Home');
+    assert.match(w.document.getElementById(inp.getAttribute('aria-activedescendant')).textContent, /^qwen3\.8-flash-next/);
+    // Enter picks: value set, list closed, the form follows (facts of the picked model)
+    e = key(w, inp, 'Enter');
+    assert.strictEqual(e.defaultPrevented, true);
+    assert.strictEqual(inp.value, 'qwen3.8-flash-next');
+    assert.strictEqual(inp.getAttribute('aria-expanded'), 'false');
+    assert.match($(w, 'elAiModelFacts').textContent, /Context: 131,072 tokens/);
+    // a name not in the list: said so, Esc keeps it
+    inp.value = 'my-own-model'; fire(w, inp, 'input');
+    assert.strictEqual(inp.getAttribute('aria-expanded'), 'true');
+    assert.deepStrictEqual(comboOpts(w, 'elAiModel'), []);
+    assert.match(comboMsg(w, 'elAiModel'), /No listed model contains “my-own-model”; the name is used as typed/);
+    key(w, inp, 'Escape');
+    assert.strictEqual(inp.value, 'my-own-model');
+    // Enter without an active option keeps the typed name too
+    inp.value = 'gpt'; fire(w, inp, 'input');
+    key(w, inp, 'Enter');
+    assert.deepStrictEqual([inp.value, inp.getAttribute('aria-expanded')], ['gpt', 'false']);
+    // a click into the empty field opens the full list; Down from nothing, PageDown / PageUp by pages; a click picks
+    inp.value = ''; fire(w, inp, 'input'); key(w, inp, 'Escape');
+    inp.click();
+    assert.strictEqual(comboOpts(w, 'elAiModel').length, 12);
+    key(w, inp, 'ArrowDown');
+    assert.strictEqual(inp.getAttribute('aria-activedescendant'), 'elAiModelList-0');
+    key(w, inp, 'PageDown');
+    assert.strictEqual(inp.getAttribute('aria-activedescendant'), 'elAiModelList-8');
+    key(w, inp, 'PageDown');
+    assert.strictEqual(inp.getAttribute('aria-activedescendant'), 'elAiModelList-11');
+    key(w, inp, 'PageUp');
+    assert.strictEqual(inp.getAttribute('aria-activedescendant'), 'elAiModelList-3');
+    lb.children[5].click();
+    assert.deepStrictEqual([inp.value, inp.getAttribute('aria-expanded')], ['gpt-oss:20b', 'false']);
+    // the arrow toggles; Tab closes without picking
+    btn.click(); assert.strictEqual(inp.getAttribute('aria-expanded'), 'true');
+    btn.click(); assert.strictEqual(inp.getAttribute('aria-expanded'), 'false');
+    btn.click(); key(w, inp, 'ArrowDown');
+    var t = key(w, inp, 'Tab');
+    assert.deepStrictEqual([t.defaultPrevented, inp.getAttribute('aria-expanded'), inp.value], [false, 'false', 'gpt-oss:20b']);
+    // another address: that list no longer applies, the arrow fetches anew; a failure is shown in the list
+    $(w, 'elAiUrl').value = 'http://127.0.0.1:9999/v1'; fire(w, $(w, 'elAiUrl'), 'input');
+    btn.click();
+    assert.strictEqual(w.sent.length, n + 2);
+    answerModels(w, null, 'Connection refused');
+    assert.strictEqual(comboMsg(w, 'elAiModel'), '✗ Connection refused');
+    assert.ok($(w, 'elAiModelList').parentNode.querySelector('.elComboMsg.err'));
+});
+
+test('add-model combobox: an option adds the model, the default and listed models are disabled and marked; the arrow needs an address to fetch', { skip: SKIP }, function () {
+    var w = page();
+    w.data([Object.assign({}, EP, { userModels: { enabled: true, models: [{ id: 'inkling-2-mini', thinkingMap: null }] } })]);
+    w.elAiOpenForm(w.elAi.endpoints[0]);
+    w.elGoPage('assistant'); w.elAiCollSet('models', true, false);
+    var inp = $(w, 'elAiUmNew'), btn = comboBtn(w, 'elAiUmNew'), lb = $(w, 'elAiUmNewList');
+    assert.deepStrictEqual([inp.getAttribute('role'), inp.getAttribute('aria-controls'), lb.getAttribute('role'), lb.getAttribute('aria-label')], ['combobox', 'elAiUmNewList', 'listbox', 'Models to add']);
+    // no usable address: nothing sent, the list says why
+    var url = $(w, 'elAiUrl').value, n = w.sent.length;
+    $(w, 'elAiUrl').value = '';
+    btn.click();
+    assert.strictEqual(w.sent.length, n);
+    assert.match(comboMsg(w, 'elAiUmNew'), /Enter the server’s address above/);
+    btn.click();
+    $(w, 'elAiUrl').value = url;
+    btn.click();
+    assert.strictEqual(w.sent.length, n + 1);
+    assert.strictEqual(comboMsg(w, 'elAiUmNew'), 'Fetching models…');
+    answerModels(w, MODELS);
+    assert.strictEqual(comboOpts(w, 'elAiUmNew').length, 12);
+    var li = function (id) { return Array.prototype.filter.call(lb.children, function (x) { return x.querySelector('.elComboId').textContent === id; })[0]; };
+    assert.deepStrictEqual([li('qwen3').getAttribute('aria-disabled'), li('qwen3').querySelector('.elComboTag').textContent], ['true', 'default']);
+    assert.deepStrictEqual([li('inkling-2-mini').getAttribute('aria-disabled'), li('inkling-2-mini').querySelector('.elComboTag').textContent], ['true', 'added']);
+    assert.strictEqual(li('hy4-flash').hasAttribute('aria-disabled'), false);
+    // a click on a disabled option does nothing; the keys skip it (qwen3 is first)
+    li('qwen3').click();
+    assert.strictEqual(inp.getAttribute('aria-expanded'), 'true');
+    assert.strictEqual(w.document.querySelectorAll('#elAiUmRows tr').length, 2);
+    key(w, inp, 'ArrowDown');
+    assert.match(w.document.getElementById(inp.getAttribute('aria-activedescendant')).textContent, /^qwen3\.8-flash-next/);
+    // Enter on an option adds it directly
+    key(w, inp, 'Enter');
+    var rows = w.document.querySelectorAll('#elAiUmRows tr');
+    assert.strictEqual(rows.length, 3);
+    assert.strictEqual(rows[2].querySelector('.elAiMapName').textContent, 'qwen3.8-flash-next');
+    assert.deepStrictEqual([inp.value, inp.getAttribute('aria-expanded')], ['', 'false']);
+    assert.strictEqual(w.document.activeElement, inp, 'focus stays in the add field');
+    assert.match($(w, 'elAiUmStatus').textContent, /Added qwen3\.8-flash-next/);
+    // a click adds too; the added ones are now marked
+    inp.click();
+    assert.strictEqual(li('qwen3.8-flash-next').querySelector('.elComboTag').textContent, 'added');
+    li('gpt-oss:20b').click();
+    assert.strictEqual(w.document.querySelectorAll('#elAiUmRows tr').length, 4);
+    // typing filters; a typed name not in the list is still added with Enter
+    inp.value = 'mini'; fire(w, inp, 'input');
+    assert.deepStrictEqual(comboOpts(w, 'elAiUmNew'), ['inkling-2-mini', 'phi5-mini']);
+    inp.value = 'custom-finetune'; fire(w, inp, 'input');
+    key(w, inp, 'Enter');
+    assert.strictEqual(w.document.querySelectorAll('#elAiUmRows tr')[4].querySelector('.elAiMapName').textContent, 'custom-finetune');
+    w.elAiSaveEndpoint();
+    assert.deepStrictEqual(w.last('aiAdminSaveEndpoint').endpoint.userModels.models.map(function (m) { return m.id; }), ['inkling-2-mini', 'qwen3.8-flash-next', 'gpt-oss:20b', 'custom-finetune']);
+    // closing the form closes and resets the lists
+    inp.click(); w.elAiCloseForm();
+    assert.strictEqual(lb.parentNode.hidden, true);
+});
