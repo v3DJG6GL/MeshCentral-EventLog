@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+
+## [0.9.1] - 2026-11-25
 ### Changed
 - Admin page: the Model and add-model fields are real dropdowns: the full fetched list (with tools, thinking and context size) even when a model is entered, filtered by typing, already listed models marked; free text still works
 - Event Log toolbar: *Ask about this device* is *Ask*; Ask and Diagnose also show only their icons when the toolbar would wrap, so it stays one row down to about 1300 px in MeshCentral's modern UI
