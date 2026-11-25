@@ -1873,6 +1873,107 @@ test('drafts: kept per device in sessionStorage (at most 4000 characters), resto
     if (ph._aiDog) w.clearInterval(ph._aiDog);
 });
 
+// ---- composer height: grows with its text (aiInFit) ----------------------------------------------------------------
+// jsdom has no layout: every textarea gets one here. Its rows give `base` px (3 lines), each line of text 20 px plus
+// 12 px padding and a 2 px border; a set height is what it is.
+function fakeTextareas(w, base) {
+    var P = w.HTMLTextAreaElement.prototype;
+    Object.defineProperty(P, 'offsetHeight', { configurable: true, get: function () { var h = this.style.height; return (!h || h == 'auto') ? (base[this.id] || 70) : parseFloat(h); } });
+    Object.defineProperty(P, 'clientHeight', { configurable: true, get: function () { return this.offsetHeight - 2; } });
+    Object.defineProperty(P, 'scrollHeight', { configurable: true, get: function () { return Math.max(this.offsetHeight - 2, String(this.value).split('\n').length * 20 + 12); } });
+}
+function setPx(el, prop, v) { Object.defineProperty(el, prop, { value: v, configurable: true }); }
+function lines(n) { var l = []; for (var i = 1; i <= n; i++) l.push('Line ' + i); return l.join('\n'); }
+
+test('composer: grows with its text from 3 lines to 40% of the panel (at most 260 px), then scrolls; back down after Send', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w); loadHistory(w);
+    var c = liveChat(w, 'Why?', 'The drive **stalls** on hostPC01.\n\nSecond paragraph [E1].');
+    var ta = doc.getElementById('evlAiIn'), css = doc.getElementById('evlAiStyles').textContent;
+    assert.strictEqual(ta.getAttribute('rows'), '3');
+    assert.match(css, /\.evlAiRow textarea \{[^}]*line-height:1\.45; resize:none; overflow-y:hidden;[^}]*max-height:260px;/, 'no manual resize: the height follows the text');
+    assert.strictEqual(ph.aiInFit(), false, 'no layout: nothing changes');
+    assert.strictEqual(ta.style.height, '');
+    fakeTextareas(w, { evlAiIn: 70, evlAiEd: 80 });
+    setPx(doc.getElementById('evlAi'), 'clientHeight', 800);
+    assert.strictEqual(ph.aiInFit(), true);
+    assert.deepStrictEqual([ta.style.height, ta.style.overflowY], ['70px', 'hidden'], 'empty: its 3 rows');
+    assert.strictEqual(ph.aiInFit(), false, 'same text, width and panel: not measured again');
+    // typing (oninput -> aiDraft)
+    ta.value = 'One line'; ph.aiDraft(ta);
+    assert.strictEqual(ta.style.height, '70px', 'not below the rows');
+    ta.value = lines(5); ph.aiDraft(ta);
+    assert.strictEqual(ta.style.height, '114px');
+    ta.value = lines(30); ph.aiDraft(ta);
+    assert.deepStrictEqual([ta.style.height, ta.style.overflowY], ['260px', 'auto'], 'at most 260 px, then it scrolls');
+    // the maximum follows the panel's height (aiLayout runs on every resize), never below the rows
+    setPx(doc.getElementById('evlAi'), 'clientHeight', 400);
+    ph.aiLayout();
+    assert.strictEqual(ta.style.height, '160px', '40% of a 400 px panel');
+    setPx(doc.getElementById('evlAi'), 'clientHeight', 100);
+    ph.aiLayout();
+    assert.deepStrictEqual([ta.style.height, ta.style.overflowY], ['70px', 'auto']);
+    // and the conversation keeps 100 px of the space it shares with the composer
+    setPx(doc.getElementById('evlAi'), 'clientHeight', 800);
+    setPx(doc.getElementById('evlAiLog'), 'clientHeight', 160);
+    ph.aiInFit();
+    assert.strictEqual(ta.style.height, '130px', '70 + 160 - 100');
+    setPx(doc.getElementById('evlAiLog'), 'clientHeight', 0);
+    // deleting text shrinks it
+    ta.value = lines(2); ph.aiDraft(ta);
+    assert.deepStrictEqual([ta.style.height, ta.style.overflowY], ['70px', 'hidden']);
+    // a Quote
+    ta.value = ''; ta.setSelectionRange(0, 0);
+    ph.aiMsgAct(c.id, 1, 'quote', actBtn(doc, 1, 'quote'));
+    assert.strictEqual(ta.value.split('\n').length, 5);
+    assert.strictEqual(ta.style.height, '114px', 'grows with the quote');
+    ph.aiQuoteInsert(lines(40));
+    assert.strictEqual(ta.style.height, '260px');
+    // Send clears it: back to 3 lines
+    ph.aiSubmit();
+    assert.strictEqual(ta.value, '');
+    assert.deepStrictEqual([ta.style.height, ta.style.overflowY], ['70px', 'hidden'], 'after Send');
+    if (ph._aiDog) w.clearInterval(ph._aiDog);
+});
+
+test('composer: fits a prefilled question, a restored draft and a shell put back after a refresh; the editor grows too', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantSaved(w); loadHistory(w);
+    fakeTextareas(w, { evlAiIn: 70, evlAiEd: 80 });
+    var c = liveChat(w, 'Why?', 'The drive stalls [E1].');
+    setPx(doc.getElementById('evlAi'), 'clientHeight', 800);
+    var ta = doc.getElementById('evlAiIn');
+    // Ask about a cause / Continue in Ask (aiPrefill)
+    ph.aiPrefill(lines(6));
+    assert.strictEqual(doc.getElementById('evlAiIn'), ta);
+    assert.strictEqual(ta.style.height, '134px');
+    // a draft into a re-created field (another plugin re-parsed the page)
+    ph.st.ai.draft = lines(4);
+    w.QH('evlAiFt', '');
+    ph.aiRenderComposer();
+    ta = doc.getElementById('evlAiIn');
+    assert.deepStrictEqual([ta.value, ta.style.height], [lines(4), '94px']);
+    // the shell put back (elRestoreView): fitted to the panel as it is now
+    ta.value = lines(30); ph.aiDraft(ta);
+    assert.strictEqual(ta.style.height, '260px');
+    setPx(doc.getElementById('evlAi'), 'clientHeight', 500);
+    ph.elRestoreView(doc.getElementById('evlWrap'));
+    assert.strictEqual(ta.style.height, '200px');
+    // the inline editor of a question: from its rows up to 260 px whatever the panel's height; no manual resize
+    ta.value = ''; ph.aiDraft(ta);
+    setPx(doc.getElementById('evlAi'), 'clientHeight', 400);
+    ph.aiMsgAct(c.id, 1, 'edit');
+    var ed = doc.getElementById('evlAiEd');
+    assert.match(ed.getAttribute('oninput'), /aiInFit\(this\)/);
+    assert.strictEqual(ed.style.height, '80px', 'fitted when shown');
+    ed.value = lines(8); ph.aiInFit(ed);
+    assert.strictEqual(ed.style.height, '174px');
+    ed.value = lines(30); ph.aiInFit(ed);
+    assert.deepStrictEqual([ed.style.height, ed.style.overflowY], ['260px', 'auto'], 'not 40% of the panel');
+    assert.match(doc.getElementById('evlAiStyles').textContent, /\.evlAiEdIn \{[^}]*resize:none; overflow-y:hidden; min-height:60px; max-height:260px;/);
+    if (ph._aiDog) w.clearInterval(ph._aiDog);
+});
+
 // ---- model choice and Max (v0.8.0) ------------------------------------------------------------------------------
 var MODELS = [{ id: 'qwen3:14b', label: 'qwen3:14b', 'default': true, thinkingLevels: ['low', 'medium', 'high'], thinkingVerified: true },
               { id: 'gpt-oss:20b', label: 'gpt-oss:20b', 'default': false, thinkingLevels: ['low', 'medium', 'high', 'max'], thinkingVerified: false },

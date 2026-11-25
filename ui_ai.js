@@ -1600,6 +1600,7 @@ module.exports.attach = function (obj) {
         main.style.setProperty('--evl-ai-w', (st.ai.w || 400) + 'px');
         if (stack != was) ph.elFitHeight();
         ph.aiFitPanel();
+        ph.aiInFit();   // a new width wraps the text differently
     };
     // the Assistant is all this user has on this device: no event table, the panel is the page
     obj.aiOnly = function () {
@@ -1666,6 +1667,7 @@ module.exports.attach = function (obj) {
             g.setAttribute('aria-valuetext', h + ' pixels' + (uh ? '' : ', fits the window'));
         }
         var rb = Q('evlAiHReset'); if (rb) rb.hidden = !uh;
+        ph.aiInFit();   // the Reset button may have wrapped the line below the composer
     };
     // set the height and keep the conversation pinned to its end if it was there (streaming keeps following)
     obj.aiApplyH = function (h) {
@@ -1674,6 +1676,7 @@ module.exports.attach = function (obj) {
         var stick = log ? (log.scrollHeight - log.scrollTop - log.clientHeight < 48) : false;
         el.style.height = h + 'px';
         if (stick && log) log.scrollTop = log.scrollHeight;
+        pluginHandler.eventlog.aiInFit();   // its maximum depends on the panel's height
     };
     // Dragging: the bottom edge follows the pointer, measured from the panel's top where it is now (the page may scroll
     // meanwhile) and keeping where the grip was grabbed; nothing else sets the height until the pointer is released
@@ -1728,7 +1731,7 @@ module.exports.attach = function (obj) {
         try { g.setPointerCapture(ev.pointerId); } catch (e) { }
         g.classList.add('active');
         var x0 = ev.clientX, w0 = panel.getBoundingClientRect().width, mw = main.getBoundingClientRect().width, w = 0;
-        var mv = function (e) { w = Math.round(Math.max(300, Math.min(Math.min(760, mw - 380), w0 - (e.clientX - x0)))); main.style.setProperty('--evl-ai-w', w + 'px'); };
+        var mv = function (e) { w = Math.round(Math.max(300, Math.min(Math.min(760, mw - 380), w0 - (e.clientX - x0)))); main.style.setProperty('--evl-ai-w', w + 'px'); ph.aiInFit(); };
         var up = function () {
             g.removeEventListener('pointermove', mv); g.removeEventListener('pointerup', up); g.removeEventListener('pointercancel', up);
             g.classList.remove('active');
@@ -1848,6 +1851,7 @@ module.exports.attach = function (obj) {
         var top = log.scrollTop;
         log.setAttribute('aria-busy', ph.aiBusy(c) ? 'true' : 'false');
         log.innerHTML = ph.aiLogHtml(c);
+        var ed = Q('evlAiEd'); if (ed) ph.aiInFit(ed);
         ph.aiFuTitles(log);
         ph.aiCmdDress(log, c);
         var turns = log.querySelectorAll('.evlAiTurn'), lastEl = turns.length ? turns[turns.length - 1] : null;
@@ -1999,7 +2003,7 @@ module.exports.attach = function (obj) {
     obj.aiEditHtml = function (c, t) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, later = ph.aiLaterN(c, t), v = (a.actDraft != null) ? a.actDraft : t.q;
         return '<div class="evlAiQW edit" role=group aria-label="Edit the question"><label class=evlSr for=evlAiEd>Edit the question</label>' +
-               '<textarea id=evlAiEd class=evlAiEdIn rows=3 maxlength=4000 oninput="pluginHandler.eventlog.elState().ai.actDraft=String(this.value).slice(0,4000)" onkeydown="return pluginHandler.eventlog.aiEditKey(event,\'' + c.id + '\',' + t.n + ')">' + ph.aiEsc(v) + '</textarea>' +
+               '<textarea id=evlAiEd class=evlAiEdIn rows=3 maxlength=4000 oninput="pluginHandler.eventlog.elState().ai.actDraft=String(this.value).slice(0,4000);pluginHandler.eventlog.aiInFit(this)" onkeydown="return pluginHandler.eventlog.aiEditKey(event,\'' + c.id + '\',' + t.n + ')">' + ph.aiEsc(v) + '</textarea>' +
                '<p class=evlAiEdNote>' + (later ? 'Sending replaces its answer and removes the ' + (later == 1 ? 'later message' : later + ' later messages') + '.' : 'Sending replaces its answer.') + '</p>' +
                '<div class=evlAiActs><button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiMsgCancel()">Cancel</button>' +
                '<button class="evlBtn mini on" onclick="return pluginHandler.eventlog.aiEditSave(\'' + c.id + '\',' + t.n + ')">Save &amp; send</button></div></div>';
@@ -2136,7 +2140,7 @@ module.exports.attach = function (obj) {
         if (!Q('evlAiIn')) {
             var acc = ph.elAccess || {};
             ft.innerHTML = '<div id=evlAiPeekSlot></div><label for=evlAiIn id=evlAiLbl class=evlAiLbl></label>' +
-                '<div class=evlAiRow><textarea id=evlAiIn rows=2 maxlength=4000 onkeydown="return pluginHandler.eventlog.aiKey(event)" oninput="pluginHandler.eventlog.aiDraft(this)"></textarea>' +
+                '<div class=evlAiRow><textarea id=evlAiIn rows=3 maxlength=4000 onkeydown="return pluginHandler.eventlog.aiKey(event)" oninput="pluginHandler.eventlog.aiDraft(this)"></textarea>' +
                 '<button id=evlAiSend class="evlBtn on" onclick="return pluginHandler.eventlog.aiSubmit()">Send</button></div>' +
                 '<div class=evlAiDisc><span>Answers can be wrong. Check the cited events before acting.' + ((function (r) { var q = (typeof r == 'number') ? r : ((r != null && typeof r.questions == 'number') ? r.questions : null); return (q != null && q <= 10) ? ' ' + q + ' questions left today.' : ''; })(acc.remaining)) + '</span>' +
                 '<button id=evlAiHReset class=evlLinkBtn hidden title="Fit the panel to the window again" onclick="return pluginHandler.eventlog.aiHGripReset()">Reset panel height</button></div>';
@@ -2144,6 +2148,7 @@ module.exports.attach = function (obj) {
         }
         var ta = Q('evlAiIn');
         if (!ta.value && a.draft) ta.value = a.draft;   // the field was re-created behind our back (another plugin re-parsed the page)
+        ph.aiInFit(ta);
         // the list, the Diagnose setup or a saved chat still loading: Send starts a new chat (aiAsk)
         var lb = Q('evlAiLbl'), lt0 = ((a.hist || a.diagSetup || a.opening) && !busy) ? 'New chat about ' : 'Ask about ';
         if (lb && lb.textContent != lt0 + name) lb.textContent = lt0 + name;
@@ -2165,6 +2170,32 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog;
         ph.elState().ai.draft = String(el.value || '').slice(0, 4000);
         ph.aiDraftStore(true);
+        ph.aiInFit(el);
+    };
+    // The composer and the question editor grow with their text from their rows (3 lines) to a maximum, then scroll:
+    // the composer up to 40% of the panel's height (at most 260 px) while the conversation keeps 100 px, the editor up
+    // to 260 px; never below the rows. The conversation keeps its place (or its end). No layout (hidden tab): nothing
+    // changes until the next call.
+    obj.aiInFit = function (ta) {
+        ta = ta || Q('evlAiIn');
+        if (!ta || !ta.offsetHeight) return false;
+        var comp = (ta.id == 'evlAiIn'), panel = Q('evlAi'), pnH = (comp && panel) ? panel.clientHeight : 0;
+        var log = Q('evlAiLog'), key = ta.value + '|' + ta.clientWidth + '|' + pnH + '|' + (log ? log.clientHeight : 0);
+        if (ta._evlFit === key && ta.style.height) return false;
+        var top = log ? log.scrollTop : 0, stick = log ? (log.scrollHeight - top - log.clientHeight < 48) : false, tsc = ta.scrollTop;
+        var max = pnH ? Math.min(260, Math.floor(pnH * 0.4)) : 260;
+        if (comp && log && log.clientHeight) max = Math.min(max, ta.offsetHeight + log.clientHeight - 100);   // the space both share now
+        ta.style.overflowY = 'hidden';
+        ta.style.height = 'auto';
+        var base = ta.offsetHeight, need = ta.scrollHeight + (ta.offsetHeight - ta.clientHeight);
+        max = Math.max(base, max);
+        var h = Math.max(base, Math.min(need, max));
+        ta.style.height = h + 'px';
+        ta.style.overflowY = (need > max) ? 'auto' : 'hidden';
+        ta._evlFit = ta.value + '|' + ta.clientWidth + '|' + pnH + '|' + (log ? log.clientHeight : 0);
+        ta.scrollTop = (ta.selectionEnd === ta.value.length) ? ta.scrollHeight : tsc;   // the cursor at the end stays in view
+        if (log) log.scrollTop = stick ? log.scrollHeight : top;
+        return true;
     };
     // the draft of this device into sessionStorage (later: after a pause in typing); an empty draft removes it
     obj.aiDraftStore = function (later) {
@@ -2201,7 +2232,7 @@ module.exports.attach = function (obj) {
         // loading, the question starts a new chat
         var shown = !a.hist && !a.diagSetup && !a.opening;
         a.draft = ''; ph.aiDraftStore();
-        var ta = Q('evlAiIn'); if (ta) ta.value = '';
+        var ta = Q('evlAiIn'); if (ta) { ta.value = ''; ph.aiInFit(ta); }
         a.hist = false; a.delAsk = null; a.diagSetup = false; a.act = null; a.opening = null;
         // a diagnosis chat takes questions once its diagnosis is there
         var chat = shown && ph.aiIsChat(c) && !(c.mode == 'diagnose' && c.turns[0].status != 'done');
@@ -2600,7 +2631,7 @@ module.exports.attach = function (obj) {
         a.open = true; a.diagSetup = false; a.hist = false;
         ph.aiRenderPanel();
         var ta = Q('evlAiIn');
-        if (ta) { ta.value = a.draft; ta.focus(); try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) { } }
+        if (ta) { ta.value = a.draft; ta.focus(); try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (e) { } ph.aiInFit(ta); }
         return false;
     };
 
@@ -3438,7 +3469,7 @@ module.exports.attach = function (obj) {
 @media (hover: none), (max-width: 700px) { #pluginEventLog .evlAiMsgActs { opacity:1; } }
 #pluginEventLog .evlAiMsgActs.a { margin-top:-4px; }
 #pluginEventLog .evlAiQW.edit { align-self:stretch; max-width:none; align-items:stretch; gap:6px; }
-#pluginEventLog .evlAiEdIn { font:inherit; border:1px solid var(--evl-acc); background:var(--evl-input); color:var(--evl-ink); border-radius:6px; padding:7px 10px; line-height:1.45; resize:vertical; min-height:60px; max-height:260px; box-sizing:border-box; width:100%; }
+#pluginEventLog .evlAiEdIn { font:inherit; border:1px solid var(--evl-acc); background:var(--evl-input); color:var(--evl-ink); border-radius:6px; padding:7px 10px; line-height:1.45; resize:none; overflow-y:hidden; min-height:60px; max-height:260px; box-sizing:border-box; width:100%; }
 #pluginEventLog .evlAiEdIn:focus-visible { outline:2px solid var(--evl-acc); outline-offset:1px; }
 #pluginEventLog .evlAiEdNote { margin:0; font-size:12px; color:var(--evl-muted); }
 #pluginEventLog .evlAiQW.edit .evlAiActs { justify-content:flex-end; }
@@ -3581,7 +3612,7 @@ body.night #pluginEventLog .evlAiPop { box-shadow:0 10px 28px rgba(0,0,0,.75); b
 #pluginEventLog .evlAiFt { flex:none; border-top:1px solid var(--evl-line2); padding:9px 12px 8px; background:var(--evl-bg); }
 #pluginEventLog .evlAiLbl { display:block; font-size:12px; color:var(--evl-muted); margin:0 0 4px; font-weight:normal; }
 #pluginEventLog .evlAiRow { display:flex; gap:8px; align-items:flex-end; }
-#pluginEventLog .evlAiRow textarea { flex:1 1 auto; min-width:0; font:inherit; border:1px solid var(--evl-line); background:var(--evl-input); color:var(--evl-ink); border-radius:3px; padding:6px 8px; resize:vertical; min-height:42px; max-height:220px; box-sizing:border-box; }
+#pluginEventLog .evlAiRow textarea { flex:1 1 auto; min-width:0; font:inherit; border:1px solid var(--evl-line); background:var(--evl-input); color:var(--evl-ink); border-radius:3px; padding:6px 8px; line-height:1.45; resize:none; overflow-y:hidden; min-height:42px; max-height:260px; box-sizing:border-box; }
 #pluginEventLog .evlAiRow textarea:focus-visible { outline:2px solid var(--evl-acc); outline-offset:-1px; }
 #pluginEventLog .evlAiRow .evlBtn { min-height:42px; min-width:66px; }
 #pluginEventLog .evlAiDisc { font-size:11px; color:var(--evl-muted); margin-top:6px; line-height:1.4; display:flex; align-items:baseline; gap:10px; }
@@ -3879,7 +3910,7 @@ body.night #evlAiDlg {
         'aiTurnHtml', 'aiDoneBody',
         'aiCanEdit', 'aiLaterN', 'aiMsgIndex', 'aiActBtn', 'aiQActsHtml', 'aiAActsHtml', 'aiEditHtml', 'aiConfirmHtml', 'aiTurnOf', 'aiMsgAct', 'aiMsgCancel', 'aiMsgYes',
         'aiEditSave', 'aiEditKey', 'aiTurnsCut', 'aiMsgRun', 'onAiChatEdited',
-        'aiRenderComposer', 'aiKey', 'aiDraft', 'aiDraftStore', 'aiSubmit', 'aiAsk', 'aiFollow', 'aiNewChat', 'aiPrefill', 'aiQuoteSync', 'aiQuoteSel', 'aiQuoteInsert',
+        'aiRenderComposer', 'aiKey', 'aiDraft', 'aiInFit', 'aiDraftStore', 'aiSubmit', 'aiAsk', 'aiFollow', 'aiNewChat', 'aiPrefill', 'aiQuoteSync', 'aiQuoteSel', 'aiQuoteInsert',
         'aiFuOpen', 'aiFuHtml', 'aiFuTitles', 'aiFuFocus', 'aiFuToggle', 'aiFuGen', 'onAiFollowups', 'aiFuFail',
         'aiGenInfo', 'aiGenModel', 'aiGenThinkOf', 'aiGenClean', 'aiGenOut', 'aiGenGet', 'aiGenSet', 'aiGenWord', 'aiGenTag', 'aiGenToggle', 'aiGenClose', 'aiGenOutside', 'aiGenKey', 'aiGenBlur',
         'aiGenHtml', 'aiGenRender', 'aiGenPlace', 'aiGenSync', 'aiGenThink', 'aiGenPick', 'aiGenTemp', 'aiGenTempReset',

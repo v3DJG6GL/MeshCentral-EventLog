@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Changed
+- Assistant: the answer field starts at three lines and grows with its text (typing, quotes, restored drafts) up to 40% of the panel, then scrolls; it shrinks again after Send. The inline edit field does the same
 
 ## [0.8.1] - 2026-11-25
 ### Fixed

@@ -876,6 +876,7 @@ body.night #pluginEventLog {
             ph._evlFocus = { el: f.el, s: s, e: e };
         }
         if (ph._aiRO) { try { ph._aiRO.disconnect(); ph._aiRO.observe(w); var tb = w.querySelector('#evlToolbar'); if (tb) ph._aiRO.observe(tb); } catch (x) { } }
+        if (typeof ph.aiInFit == 'function') ph.aiInFit();   // the composer's height for its text and the panel as it is now
     };
     // toolbar icons: the Assistant's metrics (16 px, stroke 1.6, round caps)
     obj.elIcon = function(name) {
