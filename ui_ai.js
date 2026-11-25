@@ -12,7 +12,8 @@
 // Rendering rule: text written by the model only ever reaches the page through aiMd() (own marked + DOMPurify
 // instances, raw HTML escaped, images turned into links, links shown with their real domain) or aiPlain()/aiEsc()
 // (escaped). It never goes into an attribute or an inline handler: those carry only ids we generated (conversation
-// ids "c12", citation refs "E3", hypothesis ids checked against /^[\w-]{1,20}$/, numbers).
+// ids "c12", citation refs "E3", hypothesis ids checked against /^[\w-]{1,20}$/, command block keys "c12-3-0",
+// numbers). The same holds for text from the device (command outputs, the commands run): escaped or textContent.
 
 module.exports.attach = function (obj) {
 
@@ -109,7 +110,8 @@ module.exports.attach = function (obj) {
     // ---- state ----------------------------------------------------------------------------------------------------
     // st.ai lives in the tab state (reset on a device change); the conversations of the last 5 devices are stashed in
     // memory so switching back restores them. Nothing of it goes to localStorage (only the panel width does); the
-    // composer draft is also kept in sessionStorage per device (evl_ai_draft:<nodeid>), so it survives a reload.
+    // composer draft is also kept in sessionStorage per device (evl_ai_draft:<nodeid>: the text, or { text, attach }
+    // with the outputs attached to it), so it survives a reload.
     obj.aiNewState = function () {
         var ph = pluginHandler.eventlog;
         var nid = (typeof currentNode != 'undefined' && currentNode) ? currentNode._id : null;
@@ -127,13 +129,23 @@ module.exports.attach = function (obj) {
         // c.gen), genOpen: the Answer settings popover is open, fuReq: a "Suggest questions" request { reqId, cid, n }
         // runs: suggested commands run from a chat, per block (aiCmdDress; key "c3-2-0" = conversation, turn, block),
         // cmdReq: reqId of a run waiting for its result -> its key
-        var full = false, draft = '';
+        // attach: the outputs attached to the next question [{ runId, shell, cmd, key? }] (chips above the answer
+        // field), attNote: why some of them went again (attachExpired)
+        var full = false, raw = '';
         try { full = getstore('evl_ai_full', '') == '1'; } catch (e) { }
-        try { if (nid) draft = String(window.sessionStorage.getItem('evl_ai_draft:' + nid) || '').slice(0, 4000); } catch (e) { }
+        try { if (nid) raw = String(window.sessionStorage.getItem('evl_ai_draft:' + nid) || ''); } catch (e) { }
+        var dr = ph.aiDraftParse(raw), draft = dr.text;
         return { nodeid: nid, open: false, w: Number(getstore('evl_ai_w', '0')) || 0, convs: {}, chat: null, explainBy: {},
                  focus: null, sel: null, draft: draft, diagWin: win, notice: null, reveal: null, peek: null, hyp: {}, citeVer: 0,
                  saved: null, hist: false, opening: null, delAsk: null, exReq: {}, full: full, diagSetup: false, act: null, pend: null,
-                 genNew: {}, genOpen: false, fuReq: null, runs: {}, cmdReq: {} };
+                 genNew: {}, genOpen: false, fuReq: null, runs: {}, cmdReq: {}, attach: dr.attach, attNote: null };
+    };
+    // a stored draft: plain text (also what earlier versions stored), or { text, attach } -> { text, attach: [...] }
+    obj.aiDraftParse = function (raw) {
+        var ph = pluginHandler.eventlog, v = String(raw == null ? '' : raw), o = null;
+        if (/^\{"/.test(v)) { try { o = JSON.parse(v); } catch (e) { o = null; } }
+        if (o && typeof o == 'object' && typeof o.text == 'string') return { text: o.text.slice(0, 4000), attach: ph.aiChipsIn(o.attach) };
+        return { text: v.slice(0, 4000), attach: [] };
     };
     obj.aiStashSave = function () {
         var ph = pluginHandler.eventlog, st = ph.st;
@@ -202,7 +214,7 @@ module.exports.attach = function (obj) {
             delete a.convs[c.id];
         }
     };
-    // att: { runId } of a command's output the first question is about
+    // att: { runIds } of the outputs sent with the first question
     obj.aiStartConv = function (c, att) {
         var ph = pluginHandler.eventlog;
         c.last = Date.now();
@@ -291,7 +303,7 @@ module.exports.attach = function (obj) {
         if (ph.aiIsChat(c) && 'chatId' in m) c.chatId = (typeof m.chatId == 'string' && /^ch[0-9a-f]{24}$/.test(m.chatId)) ? m.chatId : null;
         if (ph.aiIsChat(c) && m.modelFallback && typeof m.modelFallback == 'object') ph.aiGenFallback(c, m.modelFallback);
         var at = ph.aiAttachIn(m.attach), lt = c.turns[c.turns.length - 1];
-        if (at && lt) lt.attach = at;
+        if (at && lt) lt.attach = ph.aiAttMerge(lt.attach, at);
         c.last = Date.now();
         if (c.status == 'starting') c.status = 'running';
         ph.aiRefresh(c);
@@ -418,7 +430,7 @@ module.exports.attach = function (obj) {
         t.usage = (m.usage && typeof m.usage == 'object') ? m.usage : null;
         t.followups = (Array.isArray(m.followups) ? m.followups : []).filter(function (f) { return typeof f == 'string' && f.trim(); }).slice(0, 3).map(function (f) { return f.slice(0, 200); });
         t.segment = Number(m.segment) || 0;
-        var at = ph.aiAttachIn(m.attach); if (at) t.attach = at;   // a question about a command's output, as the server stored it
+        var at = ph.aiAttachIn(m.attach); if (at) t.attach = ph.aiAttMerge(t.attach, at);   // the outputs sent with the question, as the server keeps them
         t.status = 'done'; t.live = ''; t.sHtml = null;
         if (m.redactionCounts) c.red = m.redactionCounts;
         c.status = 'done'; c.doneAt = Date.now(); c.last = Date.now();
@@ -446,6 +458,7 @@ module.exports.attach = function (obj) {
         var t = ph.aiTurn(c, m.turn);
         if (!t) return;
         if (t.status == 'done' && !ph.aiBusy(c)) return;
+        if (code == 'attachExpired' && t.status == 'running' && t.attach) { ph.aiAttExpired(c, t, m); return; }
         ph.aiDlgClose(true, c.id);
         if (code == 'aborted' && t.status == 'stopped') { c.status = 'stopped'; ph.aiRefresh(c); return; }
         t.status = (code == 'aborted') ? 'stopped' : 'error';
@@ -614,7 +627,7 @@ module.exports.attach = function (obj) {
             var e = null;
             sv.chats = sv.chats.filter(function (x) { if (x.id === c.chatId) { e = x; return false; } return true; });
             if (!e) {
-                var q = String(c.turns[0].q || '').replace(/\s+/g, ' ').trim();
+                var t0 = c.turns[0], q = String(t0.q || (t0.attach && t0.attach[0] ? String(t0.attach[0].cmd).split('\n')[0] : '')).replace(/\s+/g, ' ').trim();   // only outputs: the first command, as the server names it
                 if (c.mode == 'diagnose') q = ph.aiDiagTitle(c);
                 e = { id: c.chatId, title: q.length > 80 ? q.slice(0, 79) + '…' : (q || 'Chat'), updated: now, count: 0 };
                 if (c.mode == 'diagnose') { e.type = 'diagnosis'; e.window = c.win || '24h'; }
@@ -950,7 +963,7 @@ module.exports.attach = function (obj) {
             pre.removeAttribute('title');
             var w = doc.createElement('div'); w.className = 'evlAiCodeW';
             if (kind && kind[1]) w.setAttribute('data-sh', kind[1]);   // the shell, for Run (aiCmdDress)
-            var bar = doc.createElement('div'); bar.className = 'evlAiCodeBar';
+            var bar = doc.createElement('div'); bar.className = 'evlAiCodeBar'; bar.setAttribute('data-evl-ui', '');   // UI, not answer text (Quote)
             var lab = doc.createElement('span'); lab.textContent = cmd ? ph.aiShellName(kind[1]) : 'Code'; bar.appendChild(lab);
             var b = doc.createElement('button'); b.type = 'button'; b.className = 'evlBtn mini'; b.textContent = 'Copy';
             b.setAttribute('aria-label', cmd ? 'Copy the command' : 'Copy the code');
@@ -958,7 +971,7 @@ module.exports.attach = function (obj) {
             pre.parentNode.insertBefore(w, pre); w.appendChild(bar); w.appendChild(pre);
             if (cmd) {
                 if (noteTxt == null) noteTxt = ph.aiCmdNote(cid);
-                var note = doc.createElement('p'); note.className = 'evlAiCmdNote'; note.textContent = noteTxt; w.parentNode.insertBefore(note, w.nextSibling);
+                var note = doc.createElement('p'); note.className = 'evlAiCmdNote'; note.setAttribute('data-evl-ui', ''); note.textContent = noteTxt; w.parentNode.insertBefore(note, w.nextSibling);
             }
         }
         var tbls = root.querySelectorAll('table');
@@ -1014,7 +1027,7 @@ module.exports.attach = function (obj) {
             stepLimit: 'The model kept asking for more data after the step limit. Try a shorter time window, or have an administrator raise Max steps per answer.',
             noAnswer: 'The model sent an empty reply. Try again.',
             invalid: 'The server did not accept this request.',
-            attachExpired: 'The command\'s output is no longer kept on the server. Run the command again, then ask about it.',
+            attachExpired: 'The command\'s output is no longer kept on the server. Run the command again, then send it.',
             unavailable: 'The Assistant is not available on this server right now. An administrator can check the MeshCentral log.',
             internal: 'Something went wrong on the server. Try again.'
         })[code] || 'The request failed. Try again.';
@@ -1271,21 +1284,25 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[cid];
         if (!c || ph.aiBusy(c)) return false;
         var t = c.turns[c.turns.length - 1], later = ph.aiIsChat(c) && !t.diag && c.turns.length > 1;
+        var att = ph.aiAttSent(t);   // the outputs it carried go again
         if (later && c.convId && !c.closed && c.turns[0].status == 'done') {
-            c.turns[c.turns.length - 1] = ph.aiNewTurn(t.n, t.q);
+            var nt = c.turns[c.turns.length - 1] = ph.aiNewTurn(t.n, t.q);
+            var rm = { convId: c.convId, text: t.q };
+            if (att.length) { nt.attach = att; rm.attach = { runIds: att.map(function (x) { return x.runId; }) }; }
             c.status = 'running'; c.last = Date.now();
-            ph.aiSendMsg('aiSend', { convId: c.convId, text: t.q });
+            ph.aiSendMsg('aiSend', rm);
             ph.aiDogStart();
         } else if (later && c.chatId) {
-            c.turns.pop(); a.chat = c.id; ph.aiAsk(t.q); return false;   // the saved chat continues with this question
+            c.turns.pop(); a.chat = c.id; ph.aiAsk(t.q, { att: att }); return false;   // the saved chat continues with this question
         } else if (later) {
-            a.chat = null; ph.aiAsk(t.q); return false;
+            a.chat = null; ph.aiAsk(t.q, { att: att }); return false;
         } else {
             ph.aiCloseConv(c);
             c.convId = null; c.closed = false; c.ended = false; c.restored = false; c.reqId = ph.aiReqId(); c.info = null; c.notes = []; c.preview = null; c.red = null;
             if (c.mode == 'diagnose') c.chatId = null;   // a new diagnosis: a new chat
             c.turns = [ph.aiNewTurn(1, c.turns[0].q)]; c.turns[0].diag = (c.mode == 'diagnose'); c.status = 'starting';
-            ph.aiStartConv(c);
+            if (att.length) c.turns[0].attach = att;
+            ph.aiStartConv(c, att.length ? { runIds: att.map(function (x) { return x.runId; }) } : null);
         }
         ph.aiRefresh(c);
         return false;
@@ -1792,7 +1809,9 @@ module.exports.attach = function (obj) {
             x: '<path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/>',
             list: '<path d="M2.8 4h10.4M2.8 8h10.4M2.8 12h10.4"/>',
             quote: '<path d="M2.8 8.6h3.6v3.6H2.8zM2.8 8.6c0-2.3 1-3.8 3.1-4.8M9.6 8.6h3.6v3.6H9.6zM9.6 8.6c0-2.3 1-3.8 3.1-4.8"/>',
-            run: '<path d="M5 3.2v9.6l7.6-4.8z"/>'
+            run: '<path d="M5 3.2v9.6l7.6-4.8z"/>',
+            clip: '<path d="M12.6 7.4l-4.9 4.9a2.9 2.9 0 0 1-4.1-4.1l5.3-5.3a1.9 1.9 0 0 1 2.7 2.7L6.3 10.9a.9.9 0 0 1-1.3-1.3l4.6-4.6"/>',
+            check: '<path d="M3.2 8.4l3 3 6.6-6.8"/>'
         })[name] || '';
         return '<svg width=16 height=16 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 stroke-linecap=round stroke-linejoin=round aria-hidden=true>' + d + '</svg>';
     };
@@ -1854,6 +1873,7 @@ module.exports.attach = function (obj) {
         var ed = Q('evlAiEd'); if (ed) ph.aiInFit(ed);
         ph.aiFuTitles(log);
         ph.aiCmdDress(log, c);
+        ph.aiAttDress(log, c);
         var turns = log.querySelectorAll('.evlAiTurn'), lastEl = turns.length ? turns[turns.length - 1] : null;
         if (a.act) log.scrollTop = top;   // an inline editor or confirmation: stay where the user is
         else if (justDone && lastEl && log._evlConv == sig) log.scrollTop = Math.max(0, lastEl.offsetTop - 8);
@@ -1937,7 +1957,7 @@ module.exports.attach = function (obj) {
         if (t.cont) h += '<div class=evlAiSeg>Continued' + (t.at ? ' ' + esc(ph.aiWhen(t.at)) : '') + ' with a recap of the answers above</div>';
         if (t.segment && isLast && t.status == 'done') h += '<div class=evlAiSeg>Earlier answers were summarized to fit the model\'s context</div>';
         if (act == 'edit') h += ph.aiEditHtml(c, t);
-        else h += '<div class=evlAiQW><div class="evlAiQ' + (t.diag ? ' dg' : '') + '">' + (t.diag ? ph.aiIcon('diag') : '') + ph.aiAttachHtml(t) + esc(t.q).replace(/\n/g, '<br>') + '</div>' + ph.aiQActsHtml(c, t, busy) + '</div>';
+        else h += '<div class=evlAiQW><div class="evlAiQ' + (t.diag ? ' dg' : '') + (t.attach && !t.q ? ' att' : '') + '">' + (t.diag ? ph.aiIcon('diag') : '') + ph.aiAttachHtml(c, t) + esc(t.q).replace(/\n/g, '<br>') + '</div>' + ph.aiAttXHtml(c, t) + ph.aiQActsHtml(c, t, busy) + '</div>';
         if (act == 'del') h += ph.aiConfirmHtml(c, t, 'del');
         if (c.status == 'preview' && isLast) h += '<div class=evlAiNoteBox>Waiting for you to review what is sent. <button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiDlgOpen(\'' + c.id + '\')">Review</button></div>';
         if (!(t.diag && t.status == 'done')) h += ph.aiStepsHtml(c, t);   // a finished diagnosis has them in its footer
@@ -1988,16 +2008,16 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog;
         if (!ph.aiIsChat(c)) return '';
         var can = ph.aiCanEdit(c, t), local = (t.status != 'done' && t.status != 'running' && c.status != 'preview');
-        var h = '<div class="evlAiMsgActs q" role=group aria-label="Question actions">' + ph.aiActBtn(c.id, t.n, 'copyq', 'copy', t.diag ? 'Copy' : 'Copy the question', false);
+        var h = '<div class="evlAiMsgActs q" role=group aria-label="Question actions" data-evl-ui>' + (t.q ? ph.aiActBtn(c.id, t.n, 'copyq', 'copy', t.diag ? 'Copy' : 'Copy the question', false) : '');
         if (can && !t.diag) h += ph.aiActBtn(c.id, t.n, 'edit', 'edit', 'Edit the question', busy);
         if (can || local) h += ph.aiActBtn(c.id, t.n, 'del', 'del', t.diag ? 'Delete the diagnosis' : 'Delete the question and its answer', busy && !local);
         return h + '</div>';
     };
     obj.aiAActsHtml = function (c, t, busy) {
         var ph = pluginHandler.eventlog;
-        var h = '<div class="evlAiMsgActs a" role=group aria-label="Answer actions">' + ph.aiActBtn(c.id, t.n, 'copya', 'copy', t.diag ? 'Copy the diagnosis' : 'Copy the answer', false) +
+        var h = '<div class="evlAiMsgActs a" role=group aria-label="Answer actions" data-evl-ui>' + ph.aiActBtn(c.id, t.n, 'copya', 'copy', t.diag ? 'Copy the diagnosis' : 'Copy the answer', false) +
                 ph.aiActBtn(c.id, t.n, 'quote', 'quote', t.diag ? 'Quote the diagnosis in your question' : 'Quote the answer in your question', false);
-        if (ph.aiCanEdit(c, t)) h += ph.aiActBtn(c.id, t.n, 'retry', 'retry', t.diag ? 'Run the diagnosis again' : 'Retry: ask the same question again', busy);
+        if (ph.aiCanEdit(c, t) && (t.q || t.diag || ph.aiAttSent(t).length)) h += ph.aiActBtn(c.id, t.n, 'retry', 'retry', t.diag ? 'Run the diagnosis again' : 'Retry: ask the same question again', busy);
         return h + '</div>';
     };
     obj.aiEditHtml = function (c, t) {
@@ -2033,7 +2053,7 @@ module.exports.attach = function (obj) {
         if (!c || !t) return false;
         if (kind == 'copyq') return ph.aiCopyText(String(t.q), btn);
         if (kind == 'copya') return ph.aiCopyText(ph.aiTurnText(c, t), btn);
-        if (kind == 'quote') return ph.aiQuoteInsert(ph.aiTurnText(c, t));
+        if (kind == 'quote') return ph.aiQuoteInsert(ph.aiQuoteTurn(c, t));
         if (ph.aiBusy(c) || (a.pend && a.pend.cid == cid)) { if (!(kind == 'del' && t.status != 'done' && t.status != 'running')) { ph.aiSay('Wait until the answer is finished or stop it.'); return false; } }
         if (kind == 'retry' && !ph.aiLaterN(c, t)) return ph.aiMsgRun(c, t, 'retry');
         a.act = { cid: cid, n: n, kind: kind }; a.actDraft = (kind == 'edit') ? String(t.q) : null;
@@ -2059,7 +2079,7 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[cid], t = ph.aiTurnOf(c, n), ta = Q('evlAiEd');
         var text = String((ta ? ta.value : a.actDraft) || '').trim().slice(0, 4000);
         if (!c || !t) return false;
-        if (!text) { if (ta) ta.focus(); return false; }
+        if (!text && !ph.aiAttSent(t).length) { if (ta) ta.focus(); return false; }
         a.act = null; a.actDraft = null;
         return ph.aiMsgRun(c, t, 'edit', text);
     };
@@ -2083,11 +2103,13 @@ module.exports.attach = function (obj) {
     obj.aiMsgRun = function (c, t, kind, text) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai;
         var op = (kind == 'delete') ? 'delete' : 'truncate';
-        var then = (kind == 'edit') ? { text: text } : (kind == 'retry' ? (t.diag ? { diag: c.win || '24h' } : { text: String(t.q) }) : null);
+        // the outputs the question carried go again while the server still keeps them (else: attachExpired)
+        var att = ph.aiAttSent(t);
+        var then = (kind == 'edit') ? { text: text, att: att } : (kind == 'retry' ? (t.diag ? { diag: c.win || '24h' } : { text: String(t.q), att: att }) : null);
         if (!ph.aiCanEdit(c, t)) {   // a question the server never answered: only here
             if (ph.aiBusy(c) && t === c.turns[c.turns.length - 1]) return false;
             ph.aiTurnsCut(c, t, op);
-            if (then && then.text) ph.aiAsk(then.text);
+            if (then && (then.text || (then.att && then.att.length))) ph.aiAsk(then.text || '', { att: then.att });
             else { ph.aiRenderPanel(); ph.elUpdate(); ph.aiSay('Question deleted.'); }
             return false;
         }
@@ -2126,7 +2148,7 @@ module.exports.attach = function (obj) {
             a.citeVer++;
         } else if (c && t) ph.aiTurnsCut(c, t, p.op);   // a conversation that is not saved: the server reset its session
         if (p.then && p.then.diag) { ph.aiDiagnose(p.then.diag); return; }
-        if (p.then && p.then.text) { ph.aiAsk(p.then.text); ph.elUpdate(); return; }
+        if (p.then && (p.then.text || (p.then.att && p.then.att.length))) { ph.aiAsk(p.then.text || '', { att: p.then.att }); ph.elUpdate(); return; }
         ph.aiRenderPanel();
         ph.elUpdate();
         ph.aiSay('Deleted.');
@@ -2139,7 +2161,7 @@ module.exports.attach = function (obj) {
         var name = (typeof currentNode != 'undefined' && currentNode) ? currentNode.name : 'this device';
         if (!Q('evlAiIn')) {
             var acc = ph.elAccess || {};
-            ft.innerHTML = '<div id=evlAiPeekSlot></div><label for=evlAiIn id=evlAiLbl class=evlAiLbl></label>' +
+            ft.innerHTML = '<div id=evlAiPeekSlot></div><label for=evlAiIn id=evlAiLbl class=evlAiLbl></label><div id=evlAiChips class=evlAiChips hidden></div>' +
                 '<div class=evlAiRow><textarea id=evlAiIn rows=3 maxlength=4000 onkeydown="return pluginHandler.eventlog.aiKey(event)" oninput="pluginHandler.eventlog.aiDraft(this)"></textarea>' +
                 '<button id=evlAiSend class="evlBtn on" onclick="return pluginHandler.eventlog.aiSubmit()">Send</button></div>' +
                 '<div class=evlAiDisc><span>Answers can be wrong. Check the cited events before acting.' + ((function (r) { var q = (typeof r == 'number') ? r : ((r != null && typeof r.questions == 'number') ? r.questions : null); return (q != null && q <= 10) ? ' ' + q + ' questions left today.' : ''; })(acc.remaining)) + '</span>' +
@@ -2148,6 +2170,7 @@ module.exports.attach = function (obj) {
         }
         var ta = Q('evlAiIn');
         if (!ta.value && a.draft) ta.value = a.draft;   // the field was re-created behind our back (another plugin re-parsed the page)
+        ph.aiRenderChips();
         ph.aiInFit(ta);
         // the list, the Diagnose setup or a saved chat still loading: Send starts a new chat (aiAsk)
         var lb = Q('evlAiLbl'), lt0 = ((a.hist || a.diagSetup || a.opening) && !busy) ? 'New chat about ' : 'Ask about ';
@@ -2159,6 +2182,11 @@ module.exports.attach = function (obj) {
             b.classList.toggle('on', !lt);
             b.classList.toggle('evlAiStop', !!lt);
             b.setAttribute('aria-label', lt ? 'Stop' : 'Send the question');
+            b._evlLbl = null;
+        }
+        if (!lt) {   // Send names what goes along
+            var n = (a.attach || []).length, al = n ? 'Send the question with ' + (n == 1 ? 'the attached output' : 'the ' + n + ' attached outputs') : 'Send the question';
+            if (b._evlLbl !== al) { b._evlLbl = al; b.setAttribute('aria-label', al); }
         }
         ph.aiRenderPeek();
     };
@@ -2173,17 +2201,19 @@ module.exports.attach = function (obj) {
         ph.aiInFit(el);
     };
     // The composer and the question editor grow with their text from their rows (3 lines) to a maximum, then scroll:
-    // the composer up to 40% of the panel's height (at most 260 px) while the conversation keeps 100 px, the editor up
+    // the composer up to 40% of the panel's height (at most 260 px, less the row of attached outputs above it) while the
+    // conversation keeps 100 px, the editor up
     // to 260 px; never below the rows. The conversation keeps its place (or its end). No layout (hidden tab): nothing
     // changes until the next call.
     obj.aiInFit = function (ta) {
         ta = ta || Q('evlAiIn');
         if (!ta || !ta.offsetHeight) return false;
         var comp = (ta.id == 'evlAiIn'), panel = Q('evlAi'), pnH = (comp && panel) ? panel.clientHeight : 0;
-        var log = Q('evlAiLog'), key = ta.value + '|' + ta.clientWidth + '|' + pnH + '|' + (log ? log.clientHeight : 0);
+        var chips = comp ? Q('evlAiChips') : null, chH = (chips && !chips.hidden) ? chips.offsetHeight : 0;   // the attached outputs above it
+        var log = Q('evlAiLog'), key = ta.value + '|' + ta.clientWidth + '|' + pnH + '|' + (log ? log.clientHeight : 0) + '|' + chH;
         if (ta._evlFit === key && ta.style.height) return false;
         var top = log ? log.scrollTop : 0, stick = log ? (log.scrollHeight - top - log.clientHeight < 48) : false, tsc = ta.scrollTop;
-        var max = pnH ? Math.min(260, Math.floor(pnH * 0.4)) : 260;
+        var max = (pnH ? Math.min(260, Math.floor(pnH * 0.4)) : 260) - chH;
         if (comp && log && log.clientHeight) max = Math.min(max, ta.offsetHeight + log.clientHeight - 100);   // the space both share now
         ta.style.overflowY = 'hidden';
         ta.style.height = 'auto';
@@ -2192,16 +2222,18 @@ module.exports.attach = function (obj) {
         var h = Math.max(base, Math.min(need, max));
         ta.style.height = h + 'px';
         ta.style.overflowY = (need > max) ? 'auto' : 'hidden';
-        ta._evlFit = ta.value + '|' + ta.clientWidth + '|' + pnH + '|' + (log ? log.clientHeight : 0);
+        ta._evlFit = ta.value + '|' + ta.clientWidth + '|' + pnH + '|' + (log ? log.clientHeight : 0) + '|' + chH;
         ta.scrollTop = (ta.selectionEnd === ta.value.length) ? ta.scrollHeight : tsc;   // the cursor at the end stays in view
         if (log) log.scrollTop = stick ? log.scrollHeight : top;
         return true;
     };
-    // the draft of this device into sessionStorage (later: after a pause in typing); an empty draft removes it
+    // the draft of this device into sessionStorage (later: after a pause in typing); an empty draft removes it. With
+    // attached outputs: { text, attach: [{ runId, shell, cmd }] } (the outputs stay on the server)
     obj.aiDraftStore = function (later) {
         var ph = pluginHandler.eventlog, a = ph.st && ph.st.ai;
         if (!a || !a.nodeid) return;
-        var k = 'evl_ai_draft:' + a.nodeid, v = String(a.draft || '').slice(0, 4000);
+        var k = 'evl_ai_draft:' + a.nodeid, v = String(a.draft || '').slice(0, 4000), at = a.attach || [];
+        if (at.length) v = JSON.stringify({ text: v, attach: at.map(function (x) { return { runId: x.runId, shell: x.shell, cmd: String(x.cmd).slice(0, 2000) }; }) });
         var put = function () { try { if (v) window.sessionStorage.setItem(k, v); else window.sessionStorage.removeItem(k); } catch (e) { } };
         clearTimeout(ph._aiDraftT); ph._aiDraftT = null; ph._aiDraftPut = null;
         if (!later || !v) { put(); return; }
@@ -2212,25 +2244,30 @@ module.exports.attach = function (obj) {
             window.addEventListener('pagehide', function () { try { var p = pluginHandler.eventlog; if (p._aiDraftT && p._aiDraftPut) { clearTimeout(p._aiDraftT); p._aiDraftT = null; p._aiDraftPut(); } } catch (e) { } });
         }
     };
+    // Send: the text with the attached outputs (chips); with outputs the text may be empty
     obj.aiSubmit = function () {
         var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[a.chat];
         if (ph.aiBusy(c)) { ph.aiStop(c.id); return false; }
-        var ta = Q('evlAiIn'), text = String((ta ? ta.value : a.draft) || '').trim();
-        if (!text) { if (ta) ta.focus(); return false; }
-        ph.aiAsk(text);
+        var ta = Q('evlAiIn'), text = String((ta ? ta.value : a.draft) || '').trim(), att = (a.attach || []).slice();
+        if (!text && !att.length) { if (ta) ta.focus(); return false; }
+        ph.aiAsk(text, att.length ? { att: att, clear: true } : null);
         return false;
     };
-    // opts.attach { runId }: the question is about a command's output (aiCmdAsk); opts.show { shell, cmd } for its turn
+    // opts.att [{ runId, shell, cmd, key? }]: outputs sent with the question (attach { runIds }), shown as chips on its
+    // turn; opts.clear: they are the composer's chips, which go with it
     obj.aiAsk = function (text, opts) {
         var ph = pluginHandler.eventlog, a = ph.elState().ai;
         if (!ph.elCan('assistant')) return false;
-        text = String(text).slice(0, 4000);
-        var att = (opts && opts.attach && typeof opts.attach.runId == 'string') ? { runId: opts.attach.runId } : null, show = att ? ph.aiAttachIn(opts.show) : null;
+        text = String(text == null ? '' : text).slice(0, 4000);
+        var att = ph.aiChipsIn(opts && opts.att), show = att.length ? att.map(function (x) { return ph.aiAttLocal(x); }) : null;
+        var sendAtt = att.length ? { runIds: att.map(function (x) { return x.runId; }) } : null;
+        if (!text.trim() && !att.length) return false;
         var c = a.convs[a.chat];
         if (c && a.pend && a.pend.cid == c.id) { ph.aiSay('Wait until the chat is updated.'); return false; }
         // only the chat on screen is continued: from the chat list, the Diagnose setup or while a saved chat is still
         // loading, the question starts a new chat
         var shown = !a.hist && !a.diagSetup && !a.opening;
+        if (opts && opts.clear) { a.attach = []; a.attNote = null; }
         a.draft = ''; ph.aiDraftStore();
         var ta = Q('evlAiIn'); if (ta) { ta.value = ''; ph.aiInFit(ta); }
         a.hist = false; a.delAsk = null; a.diagSetup = false; a.act = null; a.opening = null;
@@ -2244,7 +2281,7 @@ module.exports.attach = function (obj) {
             c.status = 'running'; c.last = Date.now();
             var sm = { convId: c.convId, text: text }, sg = ph.aiGenOut(c.gen);
             if (sg) sm.gen = sg;
-            if (att) sm.attach = att;
+            if (sendAtt) sm.attach = sendAtt;
             if (sg && sg.model && c.info) c.info.model = sg.model;   // the header names the model that answers
             ph.aiSendMsg('aiSend', sm);
             ph.aiDogStart();
@@ -2260,7 +2297,7 @@ module.exports.attach = function (obj) {
             c.last = Date.now();
             var cm = { reqId: c.reqId, mode: 'ask', input: { text: text }, chatId: c.chatId }, cg = ph.aiGenOut(c.gen);
             if (cg) cm.gen = cg;
-            if (att) cm.attach = att;
+            if (sendAtt) cm.attach = sendAtt;
             ph.aiSendMsg('aiStart', cm);
             ph.aiDogStart();
         } else {
@@ -2268,10 +2305,11 @@ module.exports.attach = function (obj) {
             c = ph.aiNewConv('ask', { text: text }, text);
             if (show) c.turns[0].attach = show;
             a.chat = c.id;
-            ph.aiStartConv(c, att);
+            ph.aiStartConv(c, sendAtt);
         }
         a.open = true;
         ph.aiRenderPanel();
+        if (show) ph.aiAttSync();   // the Attach buttons of the outputs sent
         return false;
     };
     obj.aiFollow = function (cid, n, idx) {
@@ -2637,7 +2675,8 @@ module.exports.attach = function (obj) {
 
     // ---- Quote: selected text of one answer (or a whole answer) into the question, as "> " lines ------------------------
     // The text is taken from the page (pseudonymized values as shown; the server pseudonymizes questions again) and
-    // only ever set as the textarea's value.
+    // only ever set as the textarea's value. What the plugin adds around the answer's text (code bars and their
+    // buttons, notes, command outputs: marked data-evl-ui where they are made) is left out; code blocks keep their text.
     obj.aiQuoteSync = function () {
         var ph = pluginHandler.eventlog, slot = Q('evlAiQtSlot'), log = Q('evlAiLog');
         if (!slot) return;
@@ -2648,7 +2687,7 @@ module.exports.attach = function (obj) {
         var box = function (n) { var e = n && (n.nodeType == 1 ? n : n.parentNode); return (e && e.closest) ? e.closest('.evlAiA, .evlDgCard') : null; };
         var b = box(r.startContainer);
         if (!b || b !== box(r.endContainer) || !log.contains(b)) return hide();
-        var txt = ph.aiStripMarks(sel.toString()).trim();
+        var txt = ph.aiQuoteText(r.cloneContents());
         if (!txt) return hide();
         ph._aiQt = txt;
         if (!Q('evlAiQtBtn')) slot.innerHTML = '<button type=button id=evlAiQtBtn class="evlBtn mini evlAiQtBtn" title="Quote the selected text in your question" onmousedown="event.preventDefault()" onclick="return pluginHandler.eventlog.aiQuoteSel()">' + ph.aiIcon('quote') + 'Quote</button>';
@@ -2677,6 +2716,56 @@ module.exports.attach = function (obj) {
         try { window.getSelection().removeAllRanges(); } catch (e) { }
         if (txt) ph.aiQuoteInsert(txt);
         return false;
+    };
+    // The text of a copy of answer content (a range's cloneContents(), or a clone of an answer): the UI parts
+    // ([data-evl-ui]) removed, blocks on their own lines (paragraphs, lists and code blocks set apart by a blank line),
+    // code as it is, list items with "- " / "1. ", table cells by tabs, citation chips as [E3]; pseudonym markers become
+    // their values.
+    obj.aiQuoteText = function (node) {
+        var ph = pluginHandler.eventlog;
+        if (!node) return '';
+        var doc = node.ownerDocument || document, box = doc.createElement('div');
+        box.appendChild(node);
+        var ui = box.querySelectorAll('[data-evl-ui]');
+        for (var i = ui.length - 1; i >= 0; i--) { if (ui[i].parentNode) ui[i].parentNode.removeChild(ui[i]); }
+        var cs = box.querySelectorAll('.evlCite');   // a citation chip as the model wrote it: [E3]
+        for (var j = 0; j < cs.length; j++) cs[j].parentNode.replaceChild(doc.createTextNode('[' + cs[j].textContent + ']'), cs[j]);
+        var out = '', SEP = /^(P|PRE|UL|OL|H[1-6]|BLOCKQUOTE|TABLE|DETAILS)$/, BLK = /^(DIV|LI|TR|THEAD|TBODY|SUMMARY|HR|SECTION|ARTICLE|HEADER|FOOTER|ASIDE)$/;
+        var nl = function (two) { if (!out) return; out = out.replace(/[ \t]+$/, ''); if (!/\n$/.test(out)) out += '\n'; if (two && !/\n\n$/.test(out)) out += '\n'; };
+        var walk = function (n, pre) {
+            if (n.nodeType == 3) {
+                var v = pre ? n.nodeValue : n.nodeValue.replace(/\s+/g, ' ');
+                if (!pre && (!out || /\n$/.test(out))) v = v.replace(/^ /, '');
+                out += v;
+                return;
+            }
+            if (n.nodeType != 1) return;
+            var tag = n.tagName;
+            if (tag == 'BR') { out += '\n'; return; }
+            if (tag == 'SCRIPT' || tag == 'STYLE') return;
+            var sep = SEP.test(tag), blk = sep || BLK.test(tag);
+            if (blk) nl(sep);
+            if (tag == 'LI') {
+                var par = n.parentNode, k = 1;
+                if (par && par.tagName == 'OL') { for (var p = n.previousElementSibling; p; p = p.previousElementSibling) k++; out += (Number(par.getAttribute('start')) > 0 ? Number(par.getAttribute('start')) + k - 1 : k) + '. '; }
+                else out += '- ';
+            }
+            if ((tag == 'TD' || tag == 'TH') && n.previousElementSibling) out += '\t';
+            for (var ch = n.firstChild; ch; ch = ch.nextSibling) walk(ch, pre || tag == 'PRE');
+            if (blk) nl(sep);
+        };
+        for (var ch = box.firstChild; ch; ch = ch.nextSibling) walk(ch, false);
+        return ph.aiStripMarks(out).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    };
+    // the whole answer of turn t for the Quote action: as shown (aiQuoteText), else (not on screen, or a structured
+    // explanation or diagnosis) its text
+    obj.aiQuoteTurn = function (c, t) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        if (!t.structured && c && a.chat == c.id) {
+            var el = document.querySelector('#evlAiLog .evlAiTurn[data-n="' + Number(t.n) + '"] .evlAiA');
+            if (el) { var txt = ph.aiQuoteText(el.cloneNode(true)); if (txt) return txt; }
+        }
+        return ph.aiTurnText(c, t);
     };
     // "> " lines and a blank line at the cursor of the composer (about 2000 characters at most)
     obj.aiQuoteInsert = function (text) {
@@ -2928,7 +3017,7 @@ module.exports.attach = function (obj) {
                 if (ev2) h += '<div class=evlHypEv><span>Speaks against it</span> ' + ev2 + '</div>';
                 if (hy.confirm) h += '<div class="evlAiMd evlAiMuted"><p>Would confirm it: ' + ph.aiPlain(hy.confirm) + '</p></div>';
                 if (hid) {
-                    h += '<div class=evlAiActs>';
+                    h += '<div class=evlAiActs data-evl-ui>';
                     if (cls != 'wrong' && status != 'ruled_out') h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiAskAbout(\'' + c.id + '\',\'' + hid + '\')">Ask about this</button>';
                     if (!c.convId) { }   // a saved diagnosis: no conversation to give feedback to
                     else if (cls == 'wrong' || (status == 'ruled_out' && fb != 'reopen')) h += '<button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiVote(\'' + c.id + '\',1,\'hyp\',\'reopen\',\'' + hid + '\')">Reopen</button>';
@@ -2946,13 +3035,13 @@ module.exports.attach = function (obj) {
                 if (n.command && n.command.text) {
                     anyCmd = true;
                     var shk = (['powershell', 'cmd', 'bash'].indexOf(n.command.shell) >= 0) ? n.command.shell : '', sh = ph.aiShellName(shk);
-                    h += '<div class=evlAiCodeW' + (shk ? ' data-sh=' + shk : '') + '><div class=evlAiCodeBar><span>' + sh + '</span><button class="evlBtn mini" aria-label="Copy the command of step ' + (i + 1) + '" onclick="return pluginHandler.eventlog.aiCopyCmd(\'' + c.id + '\',' + i + ',this)">Copy</button></div>' +
+                    h += '<div class=evlAiCodeW' + (shk ? ' data-sh=' + shk : '') + '><div class=evlAiCodeBar data-evl-ui><span>' + sh + '</span><button class="evlBtn mini" aria-label="Copy the command of step ' + (i + 1) + '" onclick="return pluginHandler.eventlog.aiCopyCmd(\'' + c.id + '\',' + i + ',this)">Copy</button></div>' +
                          '<pre><code>' + esc(ph.aiStripMarks(n.command.text)) + '</code></pre></div>';
                 }
                 h += '</li>';
             });
             h += '</ol>';
-            if (anyCmd) h += '<p class=evlAiCmdNote>' + esc(ph.aiCmdNote(c.id)) + '</p>';
+            if (anyCmd) h += '<p class=evlAiCmdNote data-evl-ui>' + esc(ph.aiCmdNote(c.id)) + '</p>';
         }
         if (t.text && t.text.trim()) h += '<details class=evlAiMore><summary>More from the assistant</summary><div class=evlAiMd>' + t.html + '</div></details>';
         h += '</section><aside class=evlDgSide aria-label="Evidence">';
@@ -2967,7 +3056,7 @@ module.exports.attach = function (obj) {
             });
             var nIds = 0, seen = {};
             c.turns.forEach(function (tt) { for (var r in tt.cites) { var id = tt.cites[r].id; if (id != null && !seen[id]) { seen[id] = 1; nIds++; } } });
-            if (nIds && ph.elCan('history')) h += '<p><button class=evlLinkBtn onclick="return pluginHandler.eventlog.aiOpenCited(\'' + c.id + '\')">Open ' + (nIds == 1 ? 'this event' : 'these ' + nIds + ' events') + ' in History</button></p>';
+            if (nIds && ph.elCan('history')) h += '<p data-evl-ui><button class=evlLinkBtn onclick="return pluginHandler.eventlog.aiOpenCited(\'' + c.id + '\')">Open ' + (nIds == 1 ? 'this event' : 'these ' + nIds + ' events') + ' in History</button></p>';
         }
         var unx = Array.isArray(s.unexplained) ? s.unexplained : [];
         if (unx.length) {
@@ -3053,8 +3142,10 @@ module.exports.attach = function (obj) {
     // ---- run a suggested command (permission runCommands) -------------------------------------------------------------
     // A command block of a chat answer (or a diagnosis' next step) gets "Run…" when the user may run commands and its
     // shell fits the device (onAccess runShells). The confirm dialog shows the command editable; the server runs it
-    // through the agent (aiCmdRun) and answers with onAiCmdResult. The output is only ever set as text (textContent),
-    // kept per block in a.runs while this page lives, and can be the subject of the next question (attach { runId }).
+    // through the agent (aiCmdRun) and answers with onAiCmdResult. The output is only ever set as text (textContent) and
+    // kept per block in a.runs while this page lives. Attach puts it as a chip above the answer field (a.attach, up to
+    // 5), Send sends it right away with those and the field's text (attach { runIds }); the question's turn shows them
+    // as chips that open the command and its output.
     obj.aiCmdNote = function (cid) {
         var ph = pluginHandler.eventlog, a = ph.st && ph.st.ai, c = (a && cid) ? a.convs[cid] : null;
         return (ph.elCan('runCommands') && (!c || ph.aiIsChat(c))) ? 'Check a command before you run it.' : 'Commands are suggestions. Copy one to run it in Terminal.';
@@ -3076,15 +3167,240 @@ module.exports.attach = function (obj) {
         if (s.length > 60) return s.slice(0, 59) + '…';
         return s + (l.length > 1 ? ' …' : '');
     };
-    // { shell, cmd } shown on a question about a command's output (from the server or a saved chat)
+    // the outputs sent with a question, as the server or a saved chat has them: [{ shell, cmd, output|null, truncated,
+    // ok, ms, trimmed }] (at most 5; an earlier saved message has one { shell, cmd }, without its output), or null
     obj.aiAttachIn = function (v) {
-        if (!v || typeof v != 'object' || typeof v.cmd != 'string' || !v.cmd.trim()) return null;
-        return { shell: (['powershell', 'cmd', 'bash'].indexOf(v.shell) >= 0) ? v.shell : '', cmd: v.cmd.slice(0, 4000) };
+        var list = Array.isArray(v) ? v : ((v && typeof v == 'object') ? [v] : []), out = [];
+        for (var i = 0; i < list.length && out.length < 5; i++) {
+            var x = list[i];
+            if (!x || typeof x != 'object' || typeof x.cmd != 'string' || !x.cmd.trim()) continue;
+            out.push({ shell: (['powershell', 'cmd', 'bash'].indexOf(x.shell) >= 0) ? x.shell : '', cmd: x.cmd.slice(0, 4000),
+                       output: (typeof x.output == 'string') ? x.output.slice(0, 200000) : null, truncated: x.truncated === true, ok: x.ok !== false,
+                       ms: (typeof x.ms == 'number' && x.ms >= 0 && isFinite(x.ms)) ? x.ms : null, trimmed: x.trimmed === true });
+        }
+        return out.length ? out : null;
     };
-    obj.aiAttachHtml = function (t) {
-        var ph = pluginHandler.eventlog, at = t && t.attach;
-        if (!at) return '';
-        return '<div class=evlAiAtt>' + ph.aiIcon('run') + '<span>About the output of ' + ph.aiEsc(ph.aiShellName(at.shell)) + ': <code>' + ph.aiEsc(ph.aiCmdShort(ph.aiStripMarks(at.cmd))) + '</code></span></div>';
+    // the server's list for a turn sent from here: the run ids and blocks this page knows stay with it (same order)
+    obj.aiAttMerge = function (old, at) {
+        if (Array.isArray(old) && old.length == at.length) at.forEach(function (x, i) { if (old[i].runId) x.runId = old[i].runId; if (old[i].key) x.key = old[i].key; });
+        return at;
+    };
+    // chips for the composer (a.attach, a draft, a resend): [{ runId, shell, cmd, key? }], each run id once, at most 5
+    obj.aiChipsIn = function (list) {
+        var out = [], seen = {};
+        (Array.isArray(list) ? list : []).forEach(function (x) {
+            if (out.length >= 5 || !x || typeof x != 'object' || typeof x.runId != 'string' || !/^[\w-]{1,80}$/.test(x.runId) || seen[x.runId] || typeof x.cmd != 'string') return;
+            seen[x.runId] = 1;
+            var o = { runId: x.runId, shell: (['powershell', 'cmd', 'bash'].indexOf(x.shell) >= 0) ? x.shell : '', cmd: x.cmd.slice(0, 4000) };
+            if (typeof x.key == 'string' && /^c\d+-\d+-\d+$/.test(x.key)) o.key = x.key;
+            out.push(o);
+        });
+        return out;
+    };
+    // a chip as the turn shows it before the server answers: with the output this page has for that run
+    obj.aiAttLocal = function (x) {
+        var a = pluginHandler.eventlog.elState().ai, r = null, k;
+        for (k in (a.runs || {})) { var y = a.runs[k]; if (y && y.res && y.res.runId === x.runId) { r = y; break; } }
+        var o = { runId: x.runId, shell: x.shell, cmd: x.cmd, output: null, truncated: false, ok: true, ms: null, trimmed: false };
+        if (x.key) o.key = x.key;
+        if (r) { o.key = r.key; o.output = String(r.res.output || ''); o.truncated = r.res.truncated === true; o.ms = r.res.ms; }
+        return o;
+    };
+    // the outputs turn t carried that can go again (sent from this page: their run ids are known), else []
+    obj.aiAttSent = function (t) {
+        var l = (t && Array.isArray(t.attach)) ? t.attach : [];
+        return l.length && l.every(function (x) { return typeof x.runId == 'string'; }) ? pluginHandler.eventlog.aiChipsIn(l) : [];
+    };
+    obj.aiAttIdx = function (runId) {
+        var l = pluginHandler.eventlog.elState().ai.attach || [];
+        for (var i = 0; i < l.length; i++) { if (l[i].runId === runId) return i; }
+        return -1;
+    };
+    // Attach / Attached on an output: adds it as a chip above the answer field, or takes it off again
+    obj.aiCmdAttach = function (key) {
+        var ph = pluginHandler.eventlog, a = ph.st && ph.st.ai, r = (a && a.runs) ? a.runs[key] : null;
+        if (!r || !r.res || !r.res.runId || !r.ran) return false;
+        a.attach = a.attach || [];
+        a.attNote = null;
+        var i = ph.aiAttIdx(r.res.runId);
+        if (i >= 0) { a.attach.splice(i, 1); ph.aiSay('Removed from your question.'); }
+        else if (a.attach.length >= 5) { ph.aiSay('At most 5 outputs can go with one question.'); return false; }
+        else { a.attach.push({ runId: r.res.runId, shell: r.ran.shell, cmd: r.ran.text, key: key }); ph.aiSay('Attached to your question.'); }
+        ph.aiDraftStore();
+        ph.aiAttSync();
+        return false;
+    };
+    // Send on an output: it (attached if it is not yet) with the other attached outputs and the field's text, now
+    obj.aiCmdSend = function (key) {
+        var ph = pluginHandler.eventlog, a = ph.st && ph.st.ai, r = (a && a.runs) ? a.runs[key] : null, c = r ? a.convs[r.cid] : null;
+        if (!r || !r.res || !r.res.runId || !r.ran || !c) return false;
+        if (ph.aiBusy(c) || (a.pend && a.pend.cid == c.id)) { ph.aiSay('Wait until the answer is finished or stop it.'); return false; }
+        a.attach = a.attach || [];
+        if (ph.aiAttIdx(r.res.runId) < 0) {
+            if (a.attach.length >= 5) { ph.aiSay('At most 5 outputs can go with one question. Remove one first.'); return false; }
+            a.attach.push({ runId: r.res.runId, shell: r.ran.shell, cmd: r.ran.text, key: key });
+        }
+        var ta = Q('evlAiIn'), text = String((ta ? ta.value : a.draft) || '').trim();
+        return ph.aiAsk(text, { att: a.attach.slice(), clear: true });
+    };
+    // the composer's chips, the Attach buttons and the composer's height after a change of a.attach
+    obj.aiAttSync = function () {
+        var ph = pluginHandler.eventlog, a = ph.st && ph.st.ai;
+        if (!a) return;
+        ph.aiRenderChips();
+        var bs = document.querySelectorAll('#evlAiLog [data-att]');
+        for (var i = 0; i < bs.length; i++) ph.aiAttBtnSet(bs[i]);
+        var sb = Q('evlAiSend'); if (sb && sb._evlState == 'send') ph.aiRenderComposer();
+        ph.aiInFit();
+    };
+    obj.aiAttBtnSet = function (b) {
+        var ph = pluginHandler.eventlog, a = ph.st.ai, r = a.runs ? a.runs[b.getAttribute('data-att')] : null;
+        if (!r || !r.res || !r.res.runId) return;
+        var on = ph.aiAttIdx(r.res.runId) >= 0, full = !on && (a.attach || []).length >= 5, st = on ? 'on' : (full ? 'full' : 'off');
+        if (b._evlSt === st) return;
+        b._evlSt = st;
+        b.innerHTML = on ? ph.aiIcon('check') + 'Attached' : ph.aiIcon('clip') + 'Attach';
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+        b.disabled = full;
+        b.title = on ? 'Attached to your question. Select to remove it.' : (full ? 'At most 5 outputs can go with one question' : 'Add this output to your question');
+    };
+    // the chips above the answer field (and why some went, after attachExpired)
+    obj.aiRenderChips = function () {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, el = Q('evlAiChips'), esc = ph.aiEsc;
+        if (!el) return;
+        var l = a.attach || [], sig = (a.attNote || '') + '|' + l.map(function (x) { return x.runId; }).join(',');
+        if (el._evlSig === sig && el.innerHTML) return;
+        el._evlSig = sig;
+        var h = a.attNote ? '<p class=evlAiAttMsg role=alert>' + esc(a.attNote) + '</p>' : '';
+        if (l.length) {
+            h += '<ul class=evlAiChipL aria-label="Outputs sent with your question">';
+            l.forEach(function (x, i) {
+                h += '<li class=evlAiChip><span class=evlAiChipT id=evlAiChipT' + i + '>' + ph.aiIcon('run') + '<span class=sh>' + esc(ph.aiShellName(x.shell)) + '</span><code>' + esc(ph.aiCmdShort(ph.aiStripMarks(x.cmd))) + '</code></span>' +
+                     '<button type=button class=evlAiChipX aria-label="Remove" aria-describedby=evlAiChipT' + i + ' title="Remove from your question" onclick="return pluginHandler.eventlog.aiAttRemove(' + i + ')">' + ph.aiIcon('x') + '</button></li>';
+            });
+            h += '</ul>';
+        }
+        el.innerHTML = h;
+        el.hidden = !h;
+    };
+    obj.aiAttRemove = function (i) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, l = a.attach || [];
+        if (!(i >= 0 && i < l.length)) return false;
+        l.splice(i, 1);
+        a.attNote = null;
+        ph.aiDraftStore();
+        ph.aiAttSync();
+        var bs = document.querySelectorAll('#evlAiChips .evlAiChipX'), f = bs[Math.min(i, bs.length - 1)] || Q('evlAiIn');
+        if (f) f.focus();
+        ph.aiSay('Removed from your question.');
+        return false;
+    };
+    // attachExpired for a question sent from here: the turn goes again, its text and the outputs the server still has
+    // go back into the answer field (all when the server does not say which went), with a plain note
+    obj.aiAttExpired = function (c, t, m) {
+        var ph = pluginHandler.eventlog, a = ph.st.ai;
+        var exp = Array.isArray(m.expired) ? m.expired.filter(function (x) { return typeof x == 'string'; }) : null;
+        var sent = ph.aiChipsIn(t.attach), keep = sent.filter(function (x) { return !(exp && exp.indexOf(x.runId) >= 0); }), gone = sent.length - keep.length;
+        a.attach = ph.aiChipsIn(keep.concat(a.attach || []));
+        if (t.q) a.draft = (t.q + (String(a.draft || '').trim() ? '\n\n' + a.draft : '')).slice(0, 4000);
+        a.attNote = (exp && gone) ? (gone == 1 ? 'One output is no longer kept on the server and was removed. ' : gone + ' outputs are no longer kept on the server and were removed. ') + 'Run the command again to send it.'
+                                  : ph.aiErrText('attachExpired');
+        var i = c.turns.indexOf(t);
+        if (i >= 0) c.turns.splice(i, 1);
+        if (!c.turns.length) { delete a.convs[c.id]; if (a.chat == c.id) a.chat = null; if (a.focus == c.id) { a.focus = null; a.sel = null; } }
+        else { c.status = 'done'; if (c.convId == null) c.closed = true; }
+        var ta = Q('evlAiIn'); if (ta) ta.value = a.draft || '';
+        ph.aiDraftStore();
+        ph.aiRenderPanel();
+        ph.aiAttSync();
+        if (ta) ta.focus();
+        ph.aiSay(a.attNote);
+    };
+    // the chips of a question's turn: each opens the command and its output below the question (aria-expanded)
+    obj.aiAttachHtml = function (c, t) {
+        var ph = pluginHandler.eventlog, esc = ph.aiEsc, l = t && t.attach;
+        if (!l || !l.length) return '';
+        var pid = 'evlAiAttP' + c.id + '-' + t.n, h = '<span class=evlAiAttL role=group aria-label="Outputs sent">';
+        l.forEach(function (x, i) {
+            var open = t.attOpen === i;
+            h += '<button type=button class="evlAiAttC' + (open ? ' on' : '') + '" data-attc=' + i + ' aria-expanded=' + (open ? 'true' : 'false') + (open ? ' aria-controls=' + pid : '') +
+                 ' onclick="return pluginHandler.eventlog.aiAttToggle(\'' + c.id + '\',' + t.n + ',' + i + ')">' + ph.aiIcon('run') + '<span class=evlSr>Output of </span><span class=sh>' + esc(ph.aiShellName(x.shell)) + '</span><code>' + esc(ph.aiCmdShort(ph.aiStripMarks(x.cmd))) + '</code>' + ph.aiIcon('chev') + '</button>';
+        });
+        return h + '</span>';
+    };
+    // the open chip of a question: the whole command, how it went, its output, Copy output and Show in the chat
+    obj.aiAttXHtml = function (c, t) {
+        var ph = pluginHandler.eventlog, esc = ph.aiEsc, l = t && t.attach, i = t ? t.attOpen : null, x = (l && typeof i == 'number') ? l[i] : null;
+        if (!x) return '';
+        var meta = [x.ok === false ? 'Failed' : 'Finished'];
+        if (x.ms != null) meta.push(ph.aiCmdMs(x.ms));
+        if (x.truncated) meta.push('output truncated');
+        if (x.trimmed) meta.push('shortened when the chat was saved');
+        var out = (x.output == null) ? '<p class=evlAiMuted>The output was not kept with this chat.</p>' : (x.output ? '<pre class="evlAiRunPre evlAiAttOut" tabindex=0>' + esc(x.output) + '</pre>' : '<p class=evlAiMuted>No output.</p>');
+        return '<div class=evlAiAttX id=evlAiAttP' + c.id + '-' + t.n + ' data-attx=' + i + ' role=region aria-label="Command output" data-evl-ui>' +
+               '<div class=evlAiRunHd><span class=evlAiRunSt>' + esc(ph.aiShellName(x.shell)) + '</span><span class=evlAiRunMeta>' + esc(meta.join(' · ')) + '</span></div>' +
+               '<pre class=evlAiAttCmd>' + esc(ph.aiStripMarks(x.cmd)) + '</pre>' + out +
+               '<div class=evlAiActs>' + (x.output ? '<button type=button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiAttCopy(\'' + c.id + '\',' + t.n + ',' + i + ',this)">Copy output</button>' : '') +
+               '<button type=button class=evlLinkBtn data-attgo=1 onclick="return pluginHandler.eventlog.aiAttGo(\'' + c.id + '\',' + t.n + ',' + i + ')">Show in the chat</button></div></div>';
+    };
+    obj.aiAttToggle = function (cid, n, i) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[cid], t = ph.aiTurnOf(c, n);
+        if (!t || !t.attach || !t.attach[i]) return false;
+        t.attOpen = (t.attOpen === i) ? null : i;
+        ph.aiRenderPanel();
+        var b = document.querySelector('#evlAiLog .evlAiTurn[data-n="' + Number(n) + '"] [data-attc="' + Number(i) + '"]'); if (b) b.focus();
+        return false;
+    };
+    obj.aiAttCopy = function (cid, n, i, btn) {
+        var ph = pluginHandler.eventlog, c = ph.elState().ai.convs[cid], t = ph.aiTurnOf(c, n), x = (t && t.attach) ? t.attach[i] : null;
+        if (!x || !x.output) return false;
+        return ph.aiCopyText(String(x.output), btn);
+    };
+    // the command block of this chat an output came from: by its block key, by its run, else the last block before
+    // the question with the same command (shell and text); null when it is not shown (any more)
+    obj.aiAttTarget = function (log, c, t, x) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, keys = [], k;
+        if (!log || !c || !x) return null;
+        if (x.key) keys.push(x.key);
+        for (k in (a.runs || {})) { var r = a.runs[k]; if (r && r.cid == c.id && ((x.runId && r.res && r.res.runId === x.runId) || (r.ran && r.ran.text === x.cmd && r.ran.shell === x.shell))) keys.push(k); }
+        for (var i = 0; i < keys.length; i++) {
+            if (!/^c\d+-\d+-\d+$/.test(keys[i]) || keys[i].split('-')[0] != c.id) continue;
+            var o = log.querySelector('[data-runout="' + keys[i] + '"]'), w = o ? o.previousElementSibling : null;
+            if (w && w.classList.contains('evlAiCodeW')) return w;
+        }
+        var want = ph.aiStripMarks(x.cmd).replace(/\s+$/, ''), best = null, ws = log.querySelectorAll('.evlAiTurn[data-n] .evlAiCodeW');
+        for (var j = 0; j < ws.length; j++) {
+            var te = ws[j].closest('.evlAiTurn'), pre = ws[j].querySelector('pre'), sh = ws[j].getAttribute('data-sh') || '';
+            if (!pre || Number(te.getAttribute('data-n')) >= t.n || (x.shell && sh && sh != x.shell)) continue;
+            if (ph.aiStripMarks(pre.textContent).replace(/\s+$/, '') === want) best = ws[j];
+        }
+        return best;
+    };
+    // after a render: "Show in the chat" only where that block is still shown
+    obj.aiAttDress = function (log, c) {
+        var ph = pluginHandler.eventlog, ps = log ? log.querySelectorAll('[data-attx]') : [];
+        for (var i = 0; i < ps.length; i++) {
+            var te = ps[i].closest('.evlAiTurn'), t = te ? ph.aiTurnOf(c, Number(te.getAttribute('data-n'))) : null, x = (t && t.attach) ? t.attach[Number(ps[i].getAttribute('data-attx'))] : null;
+            var go = ps[i].querySelector('[data-attgo]');
+            if (go) go.hidden = !ph.aiAttTarget(log, c, t, x);
+        }
+    };
+    // Show in the chat: scrolls to the command block and highlights it for a moment
+    obj.aiAttGo = function (cid, n, i) {
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, c = a.convs[cid], t = ph.aiTurnOf(c, n), x = (t && t.attach) ? t.attach[i] : null, log = Q('evlAiLog');
+        var w = (a.chat == cid) ? ph.aiAttTarget(log, c, t, x) : null;
+        if (!w) { ph.aiSay('That command is no longer shown in this chat.'); return false; }
+        var lr = log.getBoundingClientRect(), wr = w.getBoundingClientRect();
+        log.scrollTop = Math.max(0, log.scrollTop + (wr.top - lr.top) - 24);
+        w.classList.remove('evlAiFlash');
+        void w.offsetWidth;   // restart the highlight
+        w.classList.add('evlAiFlash');
+        clearTimeout(w._evlFlT);
+        w._evlFlT = setTimeout(function () { try { w.classList.remove('evlAiFlash'); } catch (e) { } }, 1800);
+        if (!w.hasAttribute('tabindex')) w.tabIndex = -1;
+        try { w.focus({ preventScroll: true }); } catch (e) { }
+        ph.aiSay('The command is highlighted in the chat.');
+        return false;
     };
     obj.aiCmdErrText = function (code) {
         return ({
@@ -3136,7 +3452,7 @@ module.exports.attach = function (obj) {
                 }
                 if (r.status == 'idle') continue;
                 var o = doc.createElement('div'), pid = 'evlAiRunP' + key;
-                o.setAttribute('data-runout', key); o.tabIndex = -1;
+                o.setAttribute('data-runout', key); o.setAttribute('data-evl-ui', ''); o.tabIndex = -1;
                 if (r.status == 'running') {
                     o.className = 'evlAiRunOut run'; o.setAttribute('role', 'status');
                     o.innerHTML = '<div class=evlAiRunHd><svg class=evlAiRing width=16 height=16 viewBox="0 0 16 16" aria-hidden=true><circle class=trk cx=8 cy=8 r=6.5 /><circle class=arc cx=8 cy=8 r=6.5 /></svg><span>Running on the device…</span></div>';
@@ -3153,12 +3469,14 @@ module.exports.attach = function (obj) {
                         (has ? '<button type=button class=evlAiRunTg aria-expanded=' + (r.open ? 'true' : 'false') + ' aria-controls=' + pid + ' onclick="return pluginHandler.eventlog.aiCmdToggle(\'' + key + '\')">' + ph.aiIcon('chev') + '<span class=evlAiRunSt></span></button>' : '<span class=evlAiRunSt></span>') +
                         '<span class=evlAiRunMeta></span><span class=evlAiRunActs>' +
                         (has ? '<button type=button class="evlBtn mini" onclick="return pluginHandler.eventlog.aiCmdCopy(\'' + key + '\',this)">Copy output</button>' : '') +
-                        (res.runId ? '<button type=button class="evlBtn mini" data-ask=1' + (busy ? ' disabled title="Wait until the answer is finished or stop it"' : '') + ' onclick="return pluginHandler.eventlog.aiCmdAsk(\'' + key + '\')">Ask about the output</button>' : '') +
+                        (res.runId ? '<button type=button class="evlBtn mini evlAiAttBtn" data-att=' + key + ' aria-pressed=false onclick="return pluginHandler.eventlog.aiCmdAttach(\'' + key + '\')">Attach</button>' +
+                                     '<button type=button class="evlBtn mini" data-send=1' + (busy ? ' disabled title="Wait until the answer is finished or stop it"' : ' title="Send this output now, with your question and the other attached outputs"') + ' onclick="return pluginHandler.eventlog.aiCmdSend(\'' + key + '\')">Send</button>' : '') +
                         '</span></div>' + (res.error && res.error.message ? '<p class=evlAiRunMsg></p>' : '') + (has ? '<pre class=evlAiRunPre id=' + pid + (r.open ? '' : ' hidden') + '></pre>' : '');
                     o.querySelector('.evlAiRunSt').textContent = ok ? 'Finished' + (has ? '' : ', no output') : ph.aiCmdErrText(res.error && res.error.code);
                     o.querySelector('.evlAiRunMeta').textContent = meta.join(' · ');
                     if (res.error && res.error.message) o.querySelector('.evlAiRunMsg').textContent = res.error.message;
                     if (has) o.querySelector('pre').textContent = res.output;
+                    var ab = o.querySelector('[data-att]'); if (ab) ph.aiAttBtnSet(ab);
                     if (!ok) o.setAttribute('role', 'alert');
                 }
                 w.parentNode.insertBefore(o, w.nextSibling);   // right under the block, above its note
@@ -3275,15 +3593,6 @@ module.exports.attach = function (obj) {
         if (e && e.code == 'denied') { try { ph.elRequestAccess(true); } catch (x) { } }
         ph.aiCmdDone(a, r, res);
     };
-    // "Ask about the output": continues the chat on screen (aiAsk) with the composer's text, or a plain question
-    obj.aiCmdAsk = function (key) {
-        var ph = pluginHandler.eventlog, a = ph.st && ph.st.ai, r = a && a.runs ? a.runs[key] : null, c = r ? a.convs[r.cid] : null;
-        if (!r || !r.res || !r.res.runId || !r.ran || !c) return false;
-        if (ph.aiBusy(c) || (a.pend && a.pend.cid == c.id)) { ph.aiSay('Wait until the answer is finished or stop it.'); return false; }
-        var ta = Q('evlAiIn'), text = String((ta ? ta.value : a.draft) || '').trim() || 'What does this output show?';
-        return ph.aiAsk(text, { attach: { runId: r.res.runId }, show: { shell: r.ran.shell, cmd: r.ran.text } });
-    };
-
     // ---- data preview dialog (cloud endpoints) --------------------------------------------------------------------
     obj.aiDlgOpen = function (cid) {
         var ph = pluginHandler.eventlog, st = ph.st;
@@ -3703,9 +4012,37 @@ body.night #pluginEventLog .evlBtn.mini.evlAiQtBtn { box-shadow:0 6px 18px rgba(
 #pluginEventLog .evlAiRunActs .evlBtn.mini { display:inline-flex; align-items:center; height:26px; box-sizing:border-box; padding:0 9px; line-height:1; }
 #pluginEventLog .evlAiRunMsg { margin:2px 0; color:var(--evl-muted); }
 #pluginEventLog .evlAiRunPre { margin:4px 0 2px; padding:6px 8px; max-height:280px; overflow:auto; background:var(--evl-code); border:1px solid var(--evl-code-line); border-radius:2px; font-family:Consolas,"DejaVu Sans Mono",monospace; font-size:12px; line-height:1.45; white-space:pre-wrap; word-break:break-word; color:var(--evl-ink); }
-#pluginEventLog .evlAiAtt { display:flex; align-items:flex-start; gap:5px; margin:0 0 4px; font-size:11.5px; line-height:1.4; color:var(--evl-muted); }
-#pluginEventLog .evlAiAtt svg { flex:none; width:12px; height:12px; margin-top:2px; color:var(--evl-acc); }
-#pluginEventLog .evlAiAtt code { font-family:Consolas,"DejaVu Sans Mono",monospace; font-size:11.5px; background:none; border:0; padding:0; color:var(--evl-ink); }
+/* attached outputs: Attach on an output, chips above the answer field, chips on a question and the output they open */
+#pluginEventLog .evlAiRunActs .evlBtn.mini svg { width:14px; height:14px; margin:0 4px 0 -2px; flex:none; }
+#pluginEventLog .evlAiAttBtn[aria-pressed=true] { border-color:var(--evl-acc); color:var(--evl-acc); background:var(--evl-sel); }
+#pluginEventLog .evlAiChips { margin:0 0 6px; }
+#pluginEventLog .evlAiAttMsg { margin:0 0 5px; font-size:12px; line-height:1.4; color:var(--evl-err); }
+#pluginEventLog .evlAiChipL { list-style:none; margin:0; padding:0; display:flex; flex-wrap:wrap; gap:4px 6px; }
+#pluginEventLog .evlAiChip { display:inline-flex; align-items:center; max-width:100%; min-width:0; border:1px solid var(--evl-code-line); background:var(--evl-code); border-radius:3px; font-size:11.5px; line-height:1.3; }
+#pluginEventLog .evlAiChipT, #pluginEventLog .evlAiAttC { display:inline-flex; align-items:center; gap:5px; min-width:0; }
+#pluginEventLog .evlAiChipT { padding:3px 2px 3px 7px; }
+#pluginEventLog .evlAiChip svg, #pluginEventLog .evlAiAttC svg { flex:none; width:12px; height:12px; color:var(--evl-acc); }
+#pluginEventLog .evlAiChip .sh, #pluginEventLog .evlAiAttC .sh { flex:none; color:var(--evl-muted); }
+#pluginEventLog .evlAiChip code, #pluginEventLog .evlAiAttC code { font-family:Consolas,"DejaVu Sans Mono",monospace; font-size:11.5px; background:none; border:0; padding:0; color:var(--evl-ink); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#pluginEventLog .evlAiChipX { flex:none; display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; margin:0 1px 0 0; padding:0; border:0; border-radius:3px; background:none; color:var(--evl-muted); cursor:pointer; }
+#pluginEventLog .evlAiChipX svg { width:11px; height:11px; color:inherit; }
+#pluginEventLog .evlAiChipX:hover { color:var(--evl-err); background:var(--evl-hover); }
+#pluginEventLog .evlAiChipX:focus-visible, #pluginEventLog .evlAiAttC:focus-visible { outline:2px solid var(--evl-acc); outline-offset:0; }
+#pluginEventLog .evlAiAttL { display:flex; flex-wrap:wrap; gap:4px; margin:0 0 5px; }
+#pluginEventLog .evlAiQ.att .evlAiAttL { margin:0; }
+#pluginEventLog .evlAiAttC { max-width:100%; box-sizing:border-box; padding:2px 6px; border:1px solid var(--evl-bubble-line); border-radius:3px; background:var(--evl-bg); color:var(--evl-ink); font:inherit; font-size:11.5px; line-height:1.4; cursor:pointer; text-align:left; }
+#pluginEventLog .evlAiAttC:hover { border-color:var(--evl-acc); }
+#pluginEventLog .evlAiAttC svg:last-child { color:var(--evl-muted); transition:transform .12s ease-out; }
+#pluginEventLog .evlAiAttC.on { border-color:var(--evl-acc); }
+#pluginEventLog .evlAiAttC.on svg:last-child { transform:rotate(90deg); }
+#pluginEventLog .evlAiAttX { margin:2px 0 0; width:640px; max-width:100%; box-sizing:border-box; border:1px solid var(--evl-code-line); border-left:3px solid var(--evl-acc); border-radius:3px; padding:4px 8px 6px; font-size:12px; background:var(--evl-bg); }
+#pluginEventLog .evlAiAttX .evlAiRunSt { font-weight:bold; }
+#pluginEventLog .evlAiAttCmd { margin:2px 0 4px; padding:5px 8px; max-height:120px; overflow:auto; background:var(--evl-code); border:1px solid var(--evl-code-line); border-radius:2px; font-family:Consolas,"DejaVu Sans Mono",monospace; font-size:12px; line-height:1.45; white-space:pre-wrap; word-break:break-word; color:var(--evl-ink); }
+#pluginEventLog .evlAiAttX .evlAiActs { margin-top:4px; }
+#pluginEventLog .evlAiAttX .evlAiMuted { margin:4px 0; }
+#pluginEventLog .evlAiCodeW.evlAiFlash { animation:evlAiFlash 1.6s ease-out; }
+@keyframes evlAiFlash { 0%, 35% { box-shadow:0 0 0 3px var(--evl-acc); } 100% { box-shadow:0 0 0 3px transparent; } }
+@media (prefers-reduced-motion: reduce) { #pluginEventLog .evlAiCodeW.evlAiFlash { animation:none; box-shadow:0 0 0 3px var(--evl-acc); } #pluginEventLog .evlAiAttC svg:last-child { transition:none; } }
 /* citation chips: the link between an answer and the rows it relies on */
 #pluginEventLog .evlCite, #pluginEventLog .evlCitePend { display:inline-block; font-family:Consolas,"DejaVu Sans Mono",monospace; font-size:11px; font-weight:bold; line-height:16px; border:1px solid var(--evl-acc); color:var(--evl-acc); background:var(--evl-bg); border-radius:3px; padding:0 5px; margin:0 1px; vertical-align:1px; cursor:pointer; }
 #pluginEventLog .evlCite:hover { background:var(--evl-hover); }
@@ -3918,7 +4255,9 @@ body.night #evlAiDlg {
         'aiWinText', 'aiSetWin', 'aiDiagOpen', 'aiDiagCancel', 'aiDiagSetupHtml', 'aiDiagnose', 'aiStatusWord', 'aiChips', 'aiDiagCard', 'aiTlRange', 'aiLaneClusters', 'aiTimelineHtml',
         'aiAskAbout', 'aiCopyCmd',
         'aiCmdNote', 'aiShellName', 'aiCmdCan', 'aiCmdShort', 'aiAttachIn', 'aiAttachHtml', 'aiCmdErrText', 'aiCmdMs', 'aiCmdDress', 'aiCmdToggle', 'aiCmdCopy',
-        'aiCmdOpen', 'aiCmdDlgHtml', 'aiCmdWhy', 'aiCmdInput', 'aiCmdGo', 'aiCmdDog', 'aiCmdDone', 'onAiCmdResult', 'aiCmdAsk',
+        'aiCmdOpen', 'aiCmdDlgHtml', 'aiCmdWhy', 'aiCmdInput', 'aiCmdGo', 'aiCmdDog', 'aiCmdDone', 'onAiCmdResult',
+        'aiDraftParse', 'aiAttMerge', 'aiChipsIn', 'aiAttLocal', 'aiAttSent', 'aiAttIdx', 'aiCmdAttach', 'aiCmdSend', 'aiAttSync', 'aiAttBtnSet', 'aiRenderChips', 'aiAttRemove',
+        'aiAttExpired', 'aiAttXHtml', 'aiAttToggle', 'aiAttCopy', 'aiAttTarget', 'aiAttDress', 'aiAttGo', 'aiQuoteText', 'aiQuoteTurn',
         'aiDlgOpen', 'aiDlgHtml', 'aiDlgPvHtml', 'aiDlgTab', 'aiDlgCat', 'aiDlgRem', 'aiDlgKey', 'aiDlgCancel', 'aiDlgSend', 'aiDlgClose',
         'aiInjectStyles'
     ];

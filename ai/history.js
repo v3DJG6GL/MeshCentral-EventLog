@@ -17,8 +17,10 @@
 //                                             ignored; only items not migrated yet), 'explain' (key: the stored event id)
 //   remove(userid, nodeid, kind, key)      -> Promise<bool>
 //   saveChatTurn({ userid, nodeid, chatId, question, done, steps, endpointName, model, cont, type, window, range, gen,
-//                  attach })               -> Promise<bool>   attach { shell, cmd }: the question asked about the output
-//                                             of that command (msg.attach; the output itself is never saved);
+//                  attach })               -> Promise<bool>   attach [{ shell, cmd, output, truncated, ok, ms }]: the
+//                                             command outputs sent with the question (msg.attach; at most 5, each
+//                                             output at most 64 KB; the question may be empty then, the title is the
+//                                             first command); an earlier saved message has one { shell, cmd };
 //                                             type 'diagnosis' (with window '24h'|'7d'|'restart' and
 //                                             range) on the first message of a diagnosis chat; gen { model?,
 //                                             thinking?, temperature? } = the chat's model and answer settings
@@ -41,7 +43,8 @@
 // sweep removed them. Saving never throws into a turn: failures are logged and resolve false. What is saved is what
 // the user saw (restored values, pseudonym markers kept), never the model transcript: no tool results, no system
 // prompt. Caps: 50 chats per user and device (oldest pruned), 200 explanations per user and device, 512 KB per item
-// (citations and old messages are trimmed first; a turn is never refused for size).
+// (citations of older messages, then command outputs oldest first (to their first 2000 characters, trimmed: true),
+// then older answers and messages are trimmed; a turn is never refused for size).
 
 const crypto = require('crypto');
 const { sanitize } = require('./store.js');
@@ -49,6 +52,7 @@ const { sanitize } = require('./store.js');
 const DAY = 86400000;
 const MAX_CHATS = 50, MAX_EXPLAINS = 200, MAX_DOC = 512 * 1024;
 const MAX_CITES = 60, MAX_CITE_MSG = 4000, MAX_TEXT = 200000, MAX_Q = 4000, MAX_STEPS = 96;
+const MAX_ATTACH = 5, MAX_ATTACH_OUT = 64 * 1024, ATTACH_KEEP = 2000;
 const WINDOWS = ['24h', '7d', 'restart'];
 const CHAT_ID_RE = /^ch[0-9a-f]{24}$/;
 const KINDS = ['chat', 'diagnosis', 'explain'];
@@ -59,6 +63,32 @@ function size(v) { try { return Buffer.byteLength(JSON.stringify(v), 'utf8'); } 
 function clip(s, n) { s = s == null ? '' : String(s); return s.length > n ? s.slice(0, n) + '…' : s; }
 function hash(parts) { return crypto.createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, 40); }
 function okStr(v, max) { return typeof v === 'string' && v.length > 0 && v.length <= (max || 256); }
+// at most n bytes of UTF-8 (a pair of surrogates stays whole)
+function clipBytes(s, n) {
+    s = String(s == null ? '' : s);
+    if (Buffer.byteLength(s, 'utf8') <= n) return s;
+    let lo = 0, hi = Math.min(s.length, n);
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (Buffer.byteLength(s.slice(0, mid), 'utf8') <= n) lo = mid; else hi = mid - 1; }
+    if (lo > 0 && /[\uD800-\uDBFF]/.test(s.charAt(lo - 1))) lo--;
+    return s.slice(0, lo);
+}
+// the command outputs of a question as saved: [{ shell, cmd, output?, truncated?, ok?, ms? }] or null (an earlier
+// single { shell, cmd } becomes a list of one)
+function attachOf(a) {
+    const list = Array.isArray(a) ? a : (isObj(a) ? [a] : []), out = [];
+    for (const x of list.slice(0, MAX_ATTACH)) {
+        if (!isObj(x) || !okStr(x.shell, 20) || typeof x.cmd !== 'string') continue;
+        const o = { shell: x.shell, cmd: clip(x.cmd, 2000) };
+        if (typeof x.output === 'string') {
+            o.output = clipBytes(x.output, MAX_ATTACH_OUT);
+            o.truncated = x.truncated === true || o.output.length < x.output.length;
+            o.ok = x.ok !== false;
+            o.ms = typeof x.ms === 'number' && Number.isFinite(x.ms) && x.ms >= 0 ? Math.round(x.ms) : null;
+        }
+        out.push(o);
+    }
+    return out.length ? out : null;
+}
 // "Why did the device restart …" (first question, one line, at most 80 characters)
 function titleOf(q) {
     const t = String(q == null ? '' : q).replace(/[-]/g, '').replace(/\s+/g, ' ').trim();
@@ -161,6 +191,13 @@ function fitChat(doc) {
     if (fits()) return;
     const ms = doc.messages;
     for (let i = 0; i < ms.length - 1 && !fits(); i++) { ms[i].cites = {}; ms[i].citesDropped = true; }
+    // the command outputs, oldest first (the last message's too): their start is kept, marked as shortened
+    for (let i = 0; i < ms.length && !fits(); i++) {
+        const at = Array.isArray(ms[i].attach) ? ms[i].attach : [];
+        for (let k = 0; k < at.length && !fits(); k++) {
+            if (isObj(at[k]) && typeof at[k].output === 'string' && at[k].output.length > ATTACH_KEEP) { at[k].output = at[k].output.slice(0, ATTACH_KEEP); at[k].trimmed = true; }
+        }
+    }
     for (let i = 0; i < ms.length - 1 && !fits(); i++) { ms[i].steps = []; ms[i].a = clip(ms[i].a, 2000); ms[i].structured = null; }
     // a diagnosis chat keeps its diagnosis (message 0) as long as there is anything else to drop
     while (ms.length > 1 && !fits()) {
@@ -322,7 +359,8 @@ function create(o) {
                 // an id that belongs to someone else (or another device) is never written to
                 if (rec && (rec.userid !== c.userid || rec.nodeid !== c.nodeid || rec.kind !== 'chat')) return false;
                 const isDiag = c.type === 'diagnosis';
-                const doc = rec && isObj(rec.doc) && Array.isArray(rec.doc.messages) ? rec.doc : { title: titleOf(c.question), created: t, messages: [] };
+                const at0 = !String(c.question || '').trim() ? attachOf(c.attach) : null;   // only outputs: the first command names the chat
+                const doc = rec && isObj(rec.doc) && Array.isArray(rec.doc.messages) ? rec.doc : { title: titleOf(c.question || (at0 ? at0[0].cmd.split('\n')[0] : '')), created: t, messages: [] };
                 const r = result(c.done, c.steps);
                 if (!rec && isDiag) {
                     doc.type = 'diagnosis'; doc.window = WINDOWS.indexOf(c.window) >= 0 ? c.window : '24h';
@@ -332,7 +370,8 @@ function create(o) {
                 const msg = { time: t, q: clip(c.question, MAX_Q), a: r.text, structured: r.structured, steps: r.steps, cites: r.cites, invalid: r.invalid,
                               followups: r.followups, usage: r.usage, redactionCounts: r.redactionCounts, model: String(c.model || '').slice(0, 200), endpointName: String(c.endpointName || '').slice(0, 120) };
                 if (c.cont) msg.cont = true;
-                if (isObj(c.attach) && okStr(c.attach.shell, 20) && typeof c.attach.cmd === 'string') msg.attach = { shell: c.attach.shell, cmd: clip(c.attach.cmd, 2000) };
+                const at = attachOf(c.attach);
+                if (at) msg.attach = at;
                 doc.messages.push(msg);
                 doc.updated = t;
                 doc.model = msg.model; doc.endpointName = msg.endpointName;

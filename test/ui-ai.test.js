@@ -1743,12 +1743,12 @@ test('quote: a selection within one answer gets a Quote button; it and the Quote
     ph.aiQuoteSync();
     assert.strictEqual(doc.getElementById('evlAiQtBtn'), null);
     sel.removeAllRanges();
-    // the Quote action quotes the whole answer, inserted at the cursor
+    // the Quote action quotes the whole answer as shown (citations as [E1]), inserted at the cursor
     var qa = actBtn(doc, 1, 'quote');
     assert.ok(qa && qa.getAttribute('aria-label') == 'Quote the answer in your question');
     ta.value = 'Before after'; ta.setSelectionRange(7, 7);
     ph.aiMsgAct(c.id, 1, 'quote', qa);
-    assert.strictEqual(ta.value, 'Before \n\n> The drive **stalls** on PC01.\n>\n> Second paragraph [E1].\n\nafter');
+    assert.strictEqual(ta.value, 'Before \n\n> The drive stalls on PC01.\n>\n> Second paragraph [E1].\n\nafter');
     // long text: about 2000 characters at most
     ta.value = ''; ta.setSelectionRange(0, 0);
     ph.aiQuoteInsert('word '.repeat(1000));
@@ -2272,7 +2272,7 @@ test('run: Run sends aiCmdRun, the block shows it running; the result is escaped
     assert.strictEqual(doc.querySelectorAll('#evlAiLog img, #evlAiLog b').length, 0, 'never markup');
     assert.strictEqual(out.querySelector('.evlAiRunSt').textContent, 'Finished');
     assert.strictEqual(out.querySelector('.evlAiRunMeta').textContent, 'edited · as the logged-in user · 1.2 s · output truncated');
-    assert.deepStrictEqual(Array.prototype.map.call(out.querySelectorAll('.evlAiRunActs button'), function (x) { return x.textContent; }), ['Copy output', 'Ask about the output']);
+    assert.deepStrictEqual(Array.prototype.map.call(out.querySelectorAll('.evlAiRunActs button'), function (x) { return x.textContent; }), ['Copy output', 'Attach', 'Send']);
     assert.strictEqual(ph._aiCmdT[m.reqId], undefined, 'the watchdog is cleared');
     b = doc.querySelector('#evlAiLog [data-run="' + key + '"]');
     assert.ok(!b.disabled && b.textContent == 'Run…', 'can run again');
@@ -2325,63 +2325,294 @@ test('run: Run sends aiCmdRun, the block shows it running; the result is escaped
     Object.keys(ph._aiCmdT || {}).forEach(function (k) { w.clearTimeout(ph._aiCmdT[k]); });
 });
 
-test('run: "Ask about the output" continues the chat on screen with attach { runId }; the question shows what it is about; attachExpired', { skip: SKIP }, function () {
+function runOnce(w, key, output, runId, ms) {
+    var ph = w.ph, doc = w.document;
+    ph.aiCmdOpen(key, doc.querySelector('#evlAiLog [data-run="' + key + '"]'));
+    var tx = doc.getElementById('evlCmdTx');
+    if (/\[secret\]/.test(tx.value)) tx.value = 'ipconfig /all';   // (Run waits for [secret] to be replaced)
+    ph.aiCmdGo();
+    var m = sentOf(w, 'aiCmdRun').pop();
+    ph.onAiCmdResult(null, { nodeid: NODE, reqId: m.reqId, ok: true, runId: runId, output: output, ms: ms == null ? 80 : ms });
+    return doc.querySelector('#evlAiLog [data-runout="' + key + '"]');
+}
+function chipTexts(doc) { return Array.prototype.map.call(doc.querySelectorAll('#evlAiChips .evlAiChipT'), function (x) { return x.textContent; }); }
+function clearTimers(w) {
+    var ph = w.ph;
+    if (ph._aiDog) w.clearInterval(ph._aiDog);
+    Object.keys(ph._aiCmdT || {}).forEach(function (k) { w.clearTimeout(ph._aiCmdT[k]); });
+    if (ph._aiDraftT) w.clearTimeout(ph._aiDraftT);
+}
+
+test('run: Attach puts the output as a chip above the answer field (pressed "Attached", again removes it); once per run, at most 5; chips survive a re-render, a re-created composer and a reload', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document, dkey = 'evl_ai_draft:' + NODE;
+    grantRun(w); loadHistory(w);
+    var c = runChat(w);
+    var k0 = runBtns(doc)[0].getAttribute('data-run'), k1 = runBtns(doc)[1].getAttribute('data-run');
+    var out = runOnce(w, k0, 'Healthy', 'run_1');
+    var ab = out.querySelector('[data-att]');
+    assert.deepStrictEqual([ab.textContent, ab.getAttribute('aria-pressed'), ab.disabled], ['Attach', 'false', false]);
+    assert.strictEqual(doc.getElementById('evlAiChips').hidden, true, 'no chips yet');
+    ph.aiCmdAttach(k0);
+    ab = doc.querySelector('#evlAiLog [data-att="' + k0 + '"]');
+    assert.deepStrictEqual([ab.textContent, ab.getAttribute('aria-pressed')], ['Attached', 'true']);
+    assert.strictEqual(doc.getElementById('evlAiChips').hidden, false);
+    assert.deepStrictEqual(chipTexts(doc), ['PowerShellGet-PhysicalDisk -FriendlyName PC01']);
+    var x = doc.querySelector('#evlAiChips .evlAiChipX');
+    assert.deepStrictEqual([x.tagName, x.getAttribute('aria-label'), x.getAttribute('aria-describedby')], ['BUTTON', 'Remove', 'evlAiChipT0']);
+    assert.strictEqual(doc.getElementById('evlAiSend').getAttribute('aria-label'), 'Send the question with the attached output');
+    // again: removed
+    ph.aiCmdAttach(k0);
+    assert.deepStrictEqual([doc.querySelector('#evlAiLog [data-att="' + k0 + '"]').getAttribute('aria-pressed'), chipTexts(doc).length], ['false', 0]);
+    ph.aiCmdAttach(k0);
+    // another block's output; a run of the same block again is a new output (a new chip); the same run only once
+    runOnce(w, k1, 'ok', 'run_2');
+    ph.aiCmdAttach(k1);
+    assert.deepStrictEqual(plain(ph.st.ai.attach.map(function (a) { return a.runId; })), ['run_1', 'run_2']);
+    ph.st.ai.attach.push({ runId: 'run_1', shell: 'powershell', cmd: 'dup' });
+    assert.strictEqual(ph.aiChipsIn(ph.st.ai.attach).length, 2, 'a run id once');
+    ph.st.ai.attach.pop();
+    // at most 5: a sixth Attach is disabled and refused
+    ph.st.ai.attach.push({ runId: 'run_3', shell: 'cmd', cmd: 'a' }, { runId: 'run_4', shell: 'cmd', cmd: 'b' }, { runId: 'run_5', shell: 'cmd', cmd: 'c' });
+    out = runOnce(w, k0, 'Healthy again', 'run_6');
+    ab = out.querySelector('[data-att]');
+    assert.deepStrictEqual([ab.textContent, ab.disabled], ['Attach', true]);
+    assert.strictEqual(ph.aiCmdAttach(k0), false);
+    assert.strictEqual(ph.st.ai.attach.length, 5);
+    // the ✕ of a chip removes it, focus goes to the next one
+    ph.aiAttRemove(2);
+    assert.deepStrictEqual(plain(ph.st.ai.attach.map(function (a) { return a.runId; })), ['run_1', 'run_2', 'run_4', 'run_5']);
+    assert.strictEqual(doc.activeElement, doc.querySelectorAll('#evlAiChips .evlAiChipX')[2]);
+    assert.strictEqual(doc.querySelector('#evlAiLog [data-att="' + k0 + '"]').disabled, false, 'room again');
+    ph.aiAttRemove(3); ph.aiAttRemove(2);
+    // a re-render of the panel, and a composer re-created behind our back (another plugin re-parsed the page)
+    ph.aiRenderPanel();
+    assert.strictEqual(chipTexts(doc).length, 2);
+    var ft = doc.getElementById('evlAiFt'); ft.innerHTML = ft.innerHTML;
+    ph.aiRenderComposer();
+    assert.deepStrictEqual(chipTexts(doc), ['PowerShellGet-PhysicalDisk -FriendlyName PC01', 'Command Promptipconfig /all']);
+    // the draft carries them: { text, attach } in sessionStorage, read back on a fresh state (a reload)
+    var ta = doc.getElementById('evlAiIn');
+    ta.value = 'Compare them'; ph.aiDraft(ta); ph.aiDraftStore();
+    var stored = JSON.parse(w.sessionStorage.getItem(dkey));
+    assert.deepStrictEqual(plain(stored), { text: 'Compare them', attach: [{ runId: 'run_1', shell: 'powershell', cmd: 'Get-PhysicalDisk -FriendlyName PC01' }, { runId: 'run_2', shell: 'cmd', cmd: 'ipconfig /all' }] });
+    ph.st = null;
+    w.QH('pluginEventLog', '');
+    ph.elEnsureShell();
+    assert.deepStrictEqual([ph.st.ai.draft, ph.st.ai.attach.length], ['Compare them', 2]);
+    ph.aiToggle(); if (!ph.st.ai.open) ph.aiToggle();
+    assert.strictEqual(chipTexts(doc).length, 2);
+    // a plain-text draft (as earlier versions stored it) still reads as text
+    assert.deepStrictEqual(plain(ph.aiDraftParse('Just text')), { text: 'Just text', attach: [] });
+    assert.deepStrictEqual(plain(ph.aiDraftParse('{"no":1}')), { text: '{"no":1}', attach: [] });
+    assert.deepStrictEqual(plain(ph.aiDraftParse('{"text":"t","attach":[{"runId":"x\\"><b>","shell":"cmd","cmd":"a"},{"runId":"r9","shell":"evil","cmd":"b"}]}')), { text: 't', attach: [{ runId: 'r9', shell: '', cmd: 'b' }] });
+    // chips only, no text: still kept
+    doc.getElementById('evlAiIn').value = ''; ph.aiDraft(doc.getElementById('evlAiIn')); ph.aiDraftStore();
+    assert.strictEqual(JSON.parse(w.sessionStorage.getItem(dkey)).attach.length, 2);
+    void c;
+    clearTimers(w);
+});
+
+test('run: Attach and the chips survive the device page refresh (elHeal)', { skip: SKIP }, async function () {
+    var w = makeDom({ p19: true }), ph = w.ph, doc = w.document;
+    grantRun(w); loadHistory(w);
+    ph.livelognode = w.currentNode;
+    runChat(w);
+    var k0 = runBtns(doc)[0].getAttribute('data-run');
+    runOnce(w, k0, 'Healthy', 'run_1');
+    ph.aiCmdAttach(k0);
+    var wrap = doc.getElementById('evlWrap');
+    w.pluginHandler.registerPluginTab({ tabId: 'pluginOther', tabTitle: 'Other' });   // a re-parsed copy
+    await sleep(5);
+    assert.strictEqual(doc.getElementById('evlWrap'), wrap, 'the original is back');
+    assert.deepStrictEqual(chipTexts(doc), ['PowerShellGet-PhysicalDisk -FriendlyName PC01']);
+    w.QH('p19pages', ''); ph.onDeviceRefreshEnd(NODE);
+    assert.deepStrictEqual(chipTexts(doc), ['PowerShellGet-PhysicalDisk -FriendlyName PC01']);
+    assert.strictEqual(doc.querySelector('#evlAiLog [data-att="' + k0 + '"]').getAttribute('aria-pressed'), 'true');
+    clearTimers(w);
+});
+
+test('run: Send sends the output now with the attached ones and the text (attach { runIds }); Send with chips only; the question shows only chips; a chip opens the output (escaped); Show in the chat', { skip: SKIP }, function () {
     var w = makeDom(), ph = w.ph, doc = w.document;
     grantRun(w); loadHistory(w);
     var c = runChat(w);
-    var key = runBtns(doc)[0].getAttribute('data-run');
-    var runOnce = function (output, runId) {
-        ph.aiCmdOpen(key, doc.querySelector('#evlAiLog [data-run="' + key + '"]'));
-        ph.aiCmdGo();
-        var m = sentOf(w, 'aiCmdRun').pop();
-        ph.onAiCmdResult(null, { nodeid: NODE, reqId: m.reqId, ok: true, runId: runId, output: output, ms: 80 });
-    };
-    runOnce('Healthy', 'run_1');
-    ph.aiCmdAsk(key);
-    var s = sentOf(w, 'aiSend').pop();
-    assert.deepStrictEqual([s.convId, s.text, plain(s.attach)], ['cvL', 'What does this output show?', { runId: 'run_1' }]);
-    var t = c.turns[c.turns.length - 1];
-    assert.deepStrictEqual(plain(t.attach), { shell: 'powershell', cmd: 'Get-PhysicalDisk -FriendlyName PC01' });
-    var chip = doc.querySelector('#evlAiLog .evlAiTurn.last .evlAiQ .evlAiAtt');
-    assert.strictEqual(chip.textContent, 'About the output of PowerShell: Get-PhysicalDisk -FriendlyName PC01');
-    // while that answer runs: no second question from the output
-    assert.ok(doc.querySelector('#evlAiLog [data-ask]').disabled);
-    assert.strictEqual(ph.aiCmdAsk(key), false);
-    ph.onAiDone(null, { nodeid: NODE, convId: 'cvL', turn: 2, text: 'It is healthy.', citations: {}, usage: {}, followups: [], attach: { shell: 'powershell', cmd: 'Get-PhysicalDisk -FriendlyName PC01 | Format-List' } });
-    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiTurn.last .evlAiAtt').textContent, 'About the output of PowerShell: Get-PhysicalDisk -FriendlyName PC01 | Format-List', 'onAiDone names it as stored');
-    // the composer's text is the question when there is one
+    var k0 = runBtns(doc)[0].getAttribute('data-run'), k1 = runBtns(doc)[1].getAttribute('data-run');
+    var evil = '<img src=x onerror=alert(1)>\nSerialNumber : <b>1234</b>';
+    runOnce(w, k0, evil, 'run_1', 1234);
+    runOnce(w, k1, 'Connected', 'run_2');
+    ph.aiCmdAttach(k1);
     doc.getElementById('evlAiIn').value = 'Is the disk failing?'; ph.aiDraft(doc.getElementById('evlAiIn'));
-    ph.aiCmdAsk(key);
+    // Send on the first output: the chat on screen continues with both outputs and the text
+    ph.aiCmdSend(k0);
+    var s = sentOf(w, 'aiSend').pop();
+    assert.deepStrictEqual([s.convId, s.text, plain(s.attach)], ['cvL', 'Is the disk failing?', { runIds: ['run_2', 'run_1'] }]);
+    assert.deepStrictEqual([doc.getElementById('evlAiIn').value, ph.st.ai.attach.length, chipTexts(doc).length], ['', 0, 0], 'the field and its chips go with it');
+    var t = c.turns[c.turns.length - 1];
+    assert.deepStrictEqual(plain(t.attach.map(function (x) { return [x.runId, x.shell, x.output]; })), [['run_2', 'cmd', 'Connected'], ['run_1', 'powershell', evil]]);
+    var q = doc.querySelector('#evlAiLog .evlAiTurn.last .evlAiQ');
+    assert.deepStrictEqual(Array.prototype.map.call(q.querySelectorAll('.evlAiAttC'), function (b) { return b.textContent; }), ['Output of Command Promptipconfig /all', 'Output of PowerShellGet-PhysicalDisk -FriendlyName PC01']);
+    assert.ok(/Is the disk failing\?$/.test(q.textContent));
+    // while the answer runs: Send is disabled and refused; Attach still works
+    assert.ok(doc.querySelector('#evlAiLog [data-runout="' + k0 + '"] [data-send]').disabled);
+    assert.strictEqual(ph.aiCmdSend(k0), false);
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvL', turn: 2, text: 'It is healthy.', citations: {}, usage: {}, followups: [],
+        attach: [{ shell: 'cmd', cmd: 'ipconfig /all', output: 'Connected', truncated: false, ok: true, ms: 80 }, { shell: 'powershell', cmd: 'Get-PhysicalDisk -FriendlyName PC01', output: evil, truncated: true, ok: true, ms: 1234 }] });
+    t = c.turns[c.turns.length - 1];
+    assert.deepStrictEqual(plain(t.attach.map(function (x) { return x.runId; })), ['run_2', 'run_1'], 'the run ids stay with the server\'s list');
+    // the composer's Send with chips only: no made-up question
+    ph.aiCmdAttach(k0);
+    ph.aiSubmit();
     s = sentOf(w, 'aiSend').pop();
-    assert.deepStrictEqual([s.text, plain(s.attach)], ['Is the disk failing?', { runId: 'run_1' }]);
-    assert.strictEqual(doc.getElementById('evlAiIn').value, '');
-    // the expired output comes back as an error of that turn
-    ph.onAiError(null, { nodeid: NODE, convId: 'cvL', turn: 3, code: 'attachExpired', message: '' });
-    assert.match(doc.querySelector('#evlAiLog .evlAiTurn.last .evlAiErr').textContent, /no longer kept on the server/);
-    // a chat whose server conversation is gone: a new one starts with it (aiStart with attach)
+    assert.deepStrictEqual([s.text, plain(s.attach)], ['', { runIds: ['run_1'] }]);
+    t = c.turns[c.turns.length - 1];
+    q = doc.querySelector('#evlAiLog .evlAiTurn.last .evlAiQ');
+    assert.ok(q.classList.contains('att'));
+    assert.strictEqual(q.textContent, 'Output of PowerShellGet-PhysicalDisk -FriendlyName PC01', 'only the chip, no question text');
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiTurn.last [data-act=copyq]'), null, 'nothing to copy');
+    ph.onAiDone(null, { nodeid: NODE, convId: 'cvL', turn: 3, text: 'Same disk.', citations: {}, usage: {}, followups: [],
+        attach: [{ shell: 'powershell', cmd: 'Get-PhysicalDisk -FriendlyName PC01', output: evil, truncated: false, ok: true, ms: 1234 }] });
+    // nothing typed and no chips: nothing is sent
+    var n = w.sent.length;
+    ph.aiSubmit();
+    assert.strictEqual(w.sent.length, n);
+    // a chip opens the command and its output below the question; again closes it
+    var chip = doc.querySelector('#evlAiLog .evlAiTurn.last .evlAiAttC');
+    assert.strictEqual(chip.getAttribute('aria-expanded'), 'false');
+    ph.aiAttToggle(c.id, t.n, 0);
+    chip = doc.querySelector('#evlAiLog .evlAiTurn.last .evlAiAttC');
+    assert.deepStrictEqual([chip.getAttribute('aria-expanded'), chip.getAttribute('aria-controls'), doc.activeElement === chip], ['true', 'evlAiAttP' + c.id + '-' + t.n, true]);
+    var px = doc.getElementById('evlAiAttP' + c.id + '-' + t.n);
+    assert.ok(px && px.previousElementSibling.classList.contains('evlAiQ'), 'right below the question');
+    assert.strictEqual(px.querySelector('.evlAiAttCmd').textContent, 'Get-PhysicalDisk -FriendlyName PC01');
+    assert.strictEqual(px.querySelector('.evlAiRunMeta').textContent, 'Finished · 1.2 s');
+    assert.strictEqual(px.querySelector('.evlAiAttOut').textContent, evil);
+    assert.strictEqual(doc.querySelectorAll('#evlAiLog img, #evlAiLog b').length, 0, 'never markup');
+    assert.ok(!/onerror/.test(Array.prototype.map.call(px.querySelectorAll('*'), function (e) { return Array.prototype.map.call(e.attributes, function (a) { return a.value; }).join(' '); }).join(' ')), 'no output in attributes');
+    assert.deepStrictEqual(Array.prototype.map.call(px.querySelectorAll('button'), function (b) { return b.textContent; }), ['Copy output', 'Show in the chat']);
+    // Show in the chat: the command block, scrolled to and highlighted
+    var go = px.querySelector('[data-attgo]');
+    assert.strictEqual(go.hidden, false);
+    ph.aiAttGo(c.id, t.n, 0);
+    var blk = doc.querySelectorAll('#evlAiLog .evlAiTurn[data-n="1"] .evlAiCodeW')[0];
+    assert.ok(blk.classList.contains('evlAiFlash'));
+    assert.strictEqual(doc.activeElement, blk);
+    // a re-render keeps it open; again closes it
+    ph.aiRenderPanel();
+    assert.ok(doc.getElementById('evlAiAttP' + c.id + '-' + t.n));
+    ph.aiAttToggle(c.id, t.n, 0);
+    assert.strictEqual(doc.getElementById('evlAiAttP' + c.id + '-' + t.n), null);
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiTurn.last .evlAiAttC').getAttribute('aria-expanded'), 'false');
+    // a block that is no longer shown: no "Show in the chat"
+    t.attach[0].key = null; t.attach[0].runId = null; t.attach[0].cmd = 'Get-Something-Else';
+    ph.aiAttToggle(c.id, t.n, 0);
+    assert.strictEqual(doc.querySelector('#evlAiAttP' + c.id + '-' + t.n + ' [data-attgo]').hidden, true);
+    // a chat whose server conversation is gone: Send starts a new one (aiStart with attach), only the chat on screen continues
     c.closed = true; c.status = 'done';
-    ph.aiCmdAsk(key);
+    ph.aiCmdSend(k1);
     var st = sentOf(w, 'aiStart').pop();
-    assert.deepStrictEqual([st.mode, st.input.text, plain(st.attach)], ['ask', 'What does this output show?', { runId: 'run_1' }]);
+    assert.deepStrictEqual([st.mode, st.input.text, plain(st.attach)], ['ask', '', { runIds: ['run_2'] }]);
     var nc = ph.st.ai.convs[ph.st.ai.chat];
-    assert.ok(nc !== c && nc.turns[0].attach && nc.turns[0].attach.shell == 'powershell');
-    // onAiStarted names it as the server stored it
-    ph.onAiStarted(null, { nodeid: NODE, reqId: st.reqId, convId: 'cvN', mode: 'ask', attach: { shell: 'cmd', cmd: '<b>ipconfig</b> /all\nsecond line' } });
-    chip = doc.querySelector('#evlAiLog .evlAiTurn .evlAiQ .evlAiAtt');
-    assert.strictEqual(chip.textContent, 'About the output of Command Prompt: <b>ipconfig</b> /all …');
+    assert.ok(nc !== c && nc.turns[0].attach && nc.turns[0].attach[0].shell == 'cmd');
+    ph.onAiStarted(null, { nodeid: NODE, reqId: st.reqId, convId: 'cvN', mode: 'ask', attach: [{ shell: 'cmd', cmd: '<b>ipconfig</b> /all\nsecond line', output: 'x', ok: true }] });
+    chip = doc.querySelector('#evlAiLog .evlAiTurn .evlAiQ .evlAiAttC');
+    assert.strictEqual(chip.textContent, 'Output of Command Prompt<b>ipconfig</b> /all …');
     assert.strictEqual(chip.querySelectorAll('b').length, 0, 'escaped');
-    // a saved chat shows it too
-    var w2 = makeDom(), ph2 = w2.ph, doc2 = w2.document;
-    grantRun(w2); loadHistory(w2);
-    ph2.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'x', updated: Date.now(), count: 2 }], explains: [] });
-    ph2.aiHistoryOpen(CH1);
-    var it = chatItem(); it.messages[1].attach = { shell: 'bash', cmd: 'df -h' };
-    ph2.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: it });
-    ph2.aiToggle(); if (!ph2.st.ai.open) ph2.aiToggle();
-    var chips = doc2.querySelectorAll('#evlAiLog .evlAiAtt');
-    assert.strictEqual(chips.length, 1);
-    assert.strictEqual(chips[0].textContent, 'About the output of Shell: df -h');
-    if (ph._aiDog) w.clearInterval(ph._aiDog);
-    if (ph2._aiDog) w2.clearInterval(ph2._aiDog);
-    Object.keys(ph._aiCmdT || {}).forEach(function (k) { w.clearTimeout(ph._aiCmdT[k]); });
+    assert.strictEqual(nc.turns[0].attach[0].runId, 'run_2', 'kept');
+    clearTimers(w);
+});
+
+test('run: attachExpired puts the question back into the answer field with the outputs the server still has (all of them when it does not say)', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantRun(w); loadHistory(w);
+    var c = runChat(w);
+    var k0 = runBtns(doc)[0].getAttribute('data-run'), k1 = runBtns(doc)[1].getAttribute('data-run');
+    runOnce(w, k0, 'Healthy', 'run_1');
+    runOnce(w, k1, 'ok', 'run_2');
+    ph.aiCmdAttach(k0); ph.aiCmdAttach(k1);
+    doc.getElementById('evlAiIn').value = 'Compare'; ph.aiDraft(doc.getElementById('evlAiIn'));
+    ph.aiSubmit();
+    assert.strictEqual(c.turns.length, 2);
+    ph.onAiError(null, { nodeid: NODE, convId: 'cvL', code: 'attachExpired', message: 'The command output is no longer available. Run the command again.', expired: ['run_1'] });
+    assert.strictEqual(c.turns.length, 1, 'the question that was not taken goes');
+    assert.strictEqual(c.status, 'done');
+    assert.strictEqual(doc.getElementById('evlAiIn').value, 'Compare');
+    assert.deepStrictEqual(plain(ph.st.ai.attach.map(function (x) { return x.runId; })), ['run_2'], 'only the expired one is dropped');
+    var msg = doc.querySelector('#evlAiChips .evlAiAttMsg');
+    assert.ok(msg && msg.getAttribute('role') == 'alert');
+    assert.strictEqual(msg.textContent, 'One output is no longer kept on the server and was removed. Run the command again to send it.');
+    assert.strictEqual(doc.querySelector('#evlAiLog [data-att="' + k0 + '"]').getAttribute('aria-pressed'), 'false');
+    assert.strictEqual(doc.querySelector('#evlAiLog [data-att="' + k1 + '"]').getAttribute('aria-pressed'), 'true');
+    // without a list: everything stays, the plain message
+    ph.aiSubmit();
+    assert.deepStrictEqual(plain(sentOf(w, 'aiSend').pop().attach), { runIds: ['run_2'] });
+    assert.strictEqual(doc.querySelector('#evlAiChips .evlAiAttMsg'), null, 'the note went with the send');
+    ph.onAiError(null, { nodeid: NODE, convId: 'cvL', code: 'attachExpired', message: '' });
+    assert.deepStrictEqual([doc.getElementById('evlAiIn').value, ph.st.ai.attach.length], ['Compare', 1]);
+    assert.strictEqual(doc.querySelector('#evlAiChips .evlAiAttMsg').textContent, 'The command\'s output is no longer kept on the server. Run the command again, then send it.');
+    // a new chat refused: it goes, the text and chips stay
+    c.closed = true;
+    ph.aiSubmit();
+    var st = sentOf(w, 'aiStart').pop(), nc = ph.st.ai.convs[ph.st.ai.chat];
+    ph.onAiError(null, { nodeid: NODE, reqId: st.reqId, code: 'attachExpired', message: '', expired: ['run_2'] });
+    assert.strictEqual(ph.st.ai.convs[nc.id], undefined);
+    assert.deepStrictEqual([doc.getElementById('evlAiIn').value, ph.st.ai.attach.length], ['Compare', 0]);
+    clearTimers(w);
+});
+
+test('run: a saved chat shows the outputs sent with its questions and opens them (also an earlier { shell, cmd } without the output)', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantRun(w); loadHistory(w);
+    ph.onAiHistory(null, { nodeid: NODE, enabled: true, retentionDays: 30, chats: [{ id: CH1, title: 'x', updated: Date.now(), count: 2 }], explains: [] });
+    ph.aiHistoryOpen(CH1);
+    var it = chatItem();
+    it.messages[1].q = '';
+    it.messages[1].attach = [{ shell: 'bash', cmd: 'df -h', output: '/dev/sda1  91%  <script>x</script>', truncated: false, ok: true, ms: 40, trimmed: true }, { shell: 'cmd', cmd: 'ver' }];
+    it.messages[0].attach = { shell: 'powershell', cmd: 'Get-Service' };
+    ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: it });
+    ph.aiToggle(); if (!ph.st.ai.open) ph.aiToggle();
+    var c = ph.st.ai.convs[ph.st.ai.chat];
+    var qs = doc.querySelectorAll('#evlAiLog .evlAiQ');
+    assert.deepStrictEqual(Array.prototype.map.call(qs[1].querySelectorAll('.evlAiAttC'), function (b) { return b.textContent; }), ['Output of Shelldf -h', 'Output of Command Promptver']);
+    assert.strictEqual(qs[1].textContent, 'Output of Shelldf -hOutput of Command Promptver');
+    assert.strictEqual(qs[0].querySelectorAll('.evlAiAttC').length, 1, 'the earlier single form');
+    ph.aiAttToggle(c.id, c.turns[1].n, 0);
+    var px = doc.querySelector('#evlAiLog [data-attx]');
+    assert.strictEqual(px.querySelector('.evlAiAttOut').textContent, '/dev/sda1  91%  <script>x</script>');
+    assert.strictEqual(px.querySelectorAll('script').length, 0);
+    assert.strictEqual(px.querySelector('.evlAiRunMeta').textContent, 'Finished · 40 ms · shortened when the chat was saved');
+    assert.strictEqual(px.querySelector('[data-attgo]').hidden, true, 'no such block in this chat');
+    ph.aiAttToggle(c.id, c.turns[1].n, 1);
+    px = doc.querySelector('#evlAiLog [data-attx]');
+    assert.strictEqual(px.querySelector('.evlAiMuted').textContent, 'The output was not kept with this chat.');
+    assert.strictEqual(px.querySelectorAll('button').length, 1, 'no Copy output');
+    // the outputs of a saved chat cannot go again: no Retry for a question without text
+    assert.strictEqual(doc.querySelector('#evlAiLog .evlAiTurn[data-n="' + c.turns[1].n + '"] [data-act=retry]'), null);
+    clearTimers(w);
+});
+
+test('quote: a selection over a paragraph, a command block with its output and the next paragraph leaves out the code bar, buttons, note and output', { skip: SKIP }, function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grantRun(w); loadHistory(w);
+    var c = runChat(w, 'First paragraph [E1].\n\n```powershell\nGet-PhysicalDisk |\n  Format-List\n```\n\nLast paragraph.');
+    var k0 = runBtns(doc)[0].getAttribute('data-run');
+    runOnce(w, k0, 'SECRET OUTPUT', 'run_1');
+    var ans = doc.querySelector('#evlAiLog .evlAiA'), ps = ans.querySelectorAll(':scope > p');
+    assert.ok(ans.querySelector('.evlAiCodeBar[data-evl-ui]') && ans.querySelector('.evlAiCmdNote[data-evl-ui]') && ans.querySelector('.evlAiRunOut[data-evl-ui]'));
+    var sel = w.getSelection(), r = doc.createRange();
+    r.setStart(ps[0].firstChild, 6); r.setEnd(ps[ps.length - 1].firstChild, 4);
+    sel.removeAllRanges(); sel.addRange(r);
+    ph.aiQuoteSync();
+    assert.strictEqual(ph._aiQt, 'paragraph [E1].\n\nGet-PhysicalDisk |\n  Format-List\n\nLast');
+    var ta = doc.getElementById('evlAiIn'); ta.value = ''; ta.setSelectionRange(0, 0);
+    ph.aiQuoteSel();
+    assert.strictEqual(ta.value, '> paragraph [E1].\n>\n> Get-PhysicalDisk |\n>   Format-List\n>\n> Last\n\n');
+    // the Quote action: the same for the whole answer
+    ta.value = ''; ta.setSelectionRange(0, 0);
+    ph.aiMsgAct(c.id, 1, 'quote', actBtn(doc, 1, 'quote'));
+    assert.strictEqual(ta.value, '> First paragraph [E1].\n>\n> Get-PhysicalDisk |\n>   Format-List\n>\n> Last paragraph.\n\n');
+    assert.ok(!/Shell|PowerShell|Copy|Run…|Check a command|SECRET OUTPUT|Attach|Send/.test(ta.value));
+    // lists and tables
+    var d = doc.createElement('div');
+    d.innerHTML = '<ol><li>one</li><li>two <code>x</code></li></ol><table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>';
+    assert.strictEqual(ph.aiQuoteText(d), '1. one\n2. two x\n\nA\tB\n1\t2');
+    clearTimers(w);
 });

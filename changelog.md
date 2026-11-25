@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Changed
+- Assistant: command output goes back to the Assistant with *Attach* (collects up to five outputs as chips above the answer field) or *Send* (right away, with or without a question) instead of *Ask about the output*; no made-up question text; a chip in a sent question opens the command and its output, with *Show in the chat*; outputs are saved with the chat (64 KB each)
+
+### Fixed
+- Assistant: quoting across a code block no longer picks up button labels and notes
 
 ## [0.8.2] - 2026-11-25
 ### Changed

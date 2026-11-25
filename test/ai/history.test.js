@@ -167,6 +167,39 @@ test('history: editChat deletes or truncates messages of the owner\'s chat only;
     assert.strictEqual(x.db.rows.has(dg), false);
 });
 
+test('history: command outputs of a question are saved (5 at most, 64 KB each, an earlier { shell, cmd } as a list); the oldest are shortened first to fit 512 KB', async function () {
+    const x = makeHistory(), h = x.h;
+    const id = h.newChatId();
+    const item = function (i, out) { return { shell: 'powershell', cmd: 'Get-Thing ' + i, output: out, truncated: false, ok: true, ms: 120.4 }; };
+    const six = []; for (let i = 0; i < 6; i++) six.push(item(i, 'out ' + i));
+    assert.strictEqual(await h.saveChatTurn({ userid: U1, nodeid: N1, chatId: id, question: '', done: done('a'), attach: six }), true);
+    let it = await h.get(U1, N1, 'chat', id);
+    assert.strictEqual(it.title, 'Get-Thing 0', 'only outputs: named after the first command');
+    assert.strictEqual(it.messages[0].q, '');
+    assert.strictEqual(it.messages[0].attach.length, 5);
+    assert.deepStrictEqual(it.messages[0].attach[1], { shell: 'powershell', cmd: 'Get-Thing 1', output: 'out 1', truncated: false, ok: true, ms: 120 });
+    // an output over 64 KB is cut (truncated); the earlier single form; junk is dropped
+    x.clock.t += 10;
+    await h.saveChatTurn({ userid: U1, nodeid: N1, chatId: id, question: 'q2', done: done('b'), attach: [item(9, 'ü'.repeat(40000)), { shell: '', cmd: 'x' }, 'junk'] });
+    x.clock.t += 10;
+    await h.saveChatTurn({ userid: U1, nodeid: N1, chatId: id, question: 'q3', done: done('c'), attach: { shell: 'bash', cmd: 'df -h' } });
+    it = await h.get(U1, N1, 'chat', id);
+    const a2 = it.messages[1].attach;
+    assert.strictEqual(a2.length, 1);
+    assert.ok(Buffer.byteLength(a2[0].output, 'utf8') <= 64 * 1024 && a2[0].truncated === true);
+    assert.deepStrictEqual(it.messages[2].attach, [{ shell: 'bash', cmd: 'df -h' }]);
+    // many large outputs: the oldest are shortened (to 2000 characters, trimmed) before any message goes
+    const id2 = h.newChatId(), five = function (k) { const l = []; for (let i = 0; i < 5; i++) l.push(item(k * 10 + i, String(k) + 'O'.repeat(60000))); return l; };
+    for (let k = 0; k < 6; k++) { x.clock.t += 10; assert.strictEqual(await h.saveChatTurn({ userid: U1, nodeid: N1, chatId: id2, question: 'm' + k, done: done('ans ' + k), attach: five(k) }), true); }
+    const raw = x.db.rows.get(id2);
+    assert.ok(Buffer.byteLength(JSON.stringify(raw)) <= historyMod.MAX_DOC, 'within 512 KB: ' + Buffer.byteLength(JSON.stringify(raw)));
+    const ms = raw.doc.messages;
+    assert.strictEqual(ms.length, 6, 'no message dropped');
+    assert.ok(ms[0].attach.every(function (a) { return a.trimmed === true && a.output.length === 2000; }), 'the oldest shortened');
+    assert.ok(ms[5].attach.every(function (a) { return !a.trimmed && a.output.length === 60001; }), 'the newest kept');
+    assert.ok(ms.every(function (m) { return m.a.indexOf('ans ') === 0; }), 'the answers stay');
+});
+
 test('history: caps (50 chats, 200 explanations, 512 KB per item) never fail a save', async function () {
     const x = makeHistory(), h = x.h;
     const ids = [];
