@@ -211,13 +211,17 @@ test('rendering: command blocks get Copy, their shell and the note; tables scrol
     assert.ok(d.textContent.indexOf('can only read') < 0, 'the old note is gone');
     assert.strictEqual(wraps[0].getAttribute('data-sh'), 'powershell');
     assert.strictEqual(wraps[1].getAttribute('data-sh'), null, 'other code has no shell');
+    assert.deepStrictEqual([wraps[0].querySelector('.evlAiCodeBar span').textContent, wraps[1].querySelector('.evlAiCodeBar span').textContent], ['PowerShell', 'Code'], 'the bar names the shell');
     // the shell names a model may use, normalized; "terminal" is a command of no known shell
-    var sh = {};
+    var sh = {}, lab = {};
     ['pwsh', 'ps1', 'ps', 'bat', 'batch', 'cmd', 'sh', 'zsh', 'shell', 'console', 'bash', 'terminal', 'constructor'].forEach(function (l) {
         var e = w.document.createElement('div'); e.innerHTML = ph.aiMd('```' + l + '\nx\n```', conv());
         var cw = e.querySelector('.evlAiCodeW');
         sh[l] = [cw.getAttribute('data-sh'), !!e.querySelector('.evlAiCmdNote')];
+        lab[l] = cw.querySelector('.evlAiCodeBar span').textContent;
     });
+    assert.deepStrictEqual(lab, { pwsh: 'PowerShell', ps1: 'PowerShell', ps: 'PowerShell', bat: 'Command Prompt', batch: 'Command Prompt', cmd: 'Command Prompt',
+        sh: 'Shell', zsh: 'Shell', shell: 'Shell', console: 'Shell', bash: 'Shell', terminal: 'Command', constructor: 'Code' }, 'the same labels as next steps and the Run dialog');
     assert.deepStrictEqual(sh, { pwsh: ['powershell', true], ps1: ['powershell', true], ps: ['powershell', true], bat: ['cmd', true], batch: ['cmd', true], cmd: ['cmd', true],
         sh: ['bash', true], zsh: ['bash', true], shell: ['bash', true], console: ['bash', true], bash: ['bash', true], terminal: [null, true], constructor: [null, false] });
     assert.strictEqual(d.querySelectorAll('pre[title]').length, 0);
@@ -832,9 +836,10 @@ test('saved chats: after a reload the panel opens on the list (nothing opens by 
     assert.strictEqual(doc.querySelector('#evlAiHd h2').textContent, 'Saved chats');
     ph.aiHistoryOpen(CH1);
     assert.deepStrictEqual(plain(sentOf(w, 'aiHistoryGet').map(function (m) { return m.kind + ':' + m.id; })), ['chat:' + CH1]);
-    ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: chatItem() });
+    var it = chatItem(), today = new Date(it.created).toDateString() == new Date().toDateString();
+    ph.onAiHistoryItem(null, { nodeid: NODE, kind: 'chat', id: CH1, item: it });
     var log = doc.getElementById('evlAiLog');
-    assert.match(log.textContent, /Saved chat from \d/);
+    assert.match(log.textContent, today ? /Saved chat from \d/ : /Saved chat from yesterday, \d/);   // ten minutes ago crosses midnight just after 00:00
     assert.deepStrictEqual(Array.prototype.map.call(log.querySelectorAll('.evlAiQ'), function (e) { return e.textContent; }), ['Why did it restart?', 'And the power?']);
     assert.ok(log.querySelector('.evlCite[data-r=E1]') && log.querySelector('.evlCite[data-r=E2]'), 'citation chips of the saved answers');
     assert.ok(log.querySelector('mark.evlPs'), 'restored values stay marked');
@@ -1789,8 +1794,10 @@ test('drafts: a refresh of the device page and another plugin re-parsing it keep
     ta.focus(); ta.value = 'Half a question'; ta.setSelectionRange(4, 4);
     ph.aiDraft(ta);
     ta.dispatchEvent(new w.Event('keyup', { bubbles: true }));
+    var lst = 0; Object.defineProperty(log, 'scrollTop', { get: function () { return lst; }, set: function (v) { lst = v; }, configurable: true });   // jsdom keeps no offset
+    log.scrollTop = 120;
     log.dispatchEvent(new w.Event('scroll'));
-    assert.ok(Array.isArray(log._evlScroll), 'scroll offsets are tracked');
+    assert.deepStrictEqual(plain(log._evlScroll), [120, 0], 'scroll offsets are tracked');
     // MeshCentral: devicesessions -> gotoDevice(..., true) empties the page and calls the hooks
     w.QH('p19pages', '');
     ph.onDeviceRefreshEnd(NODE);
@@ -1800,6 +1807,10 @@ test('drafts: a refresh of the device page and another plugin re-parsing it keep
     w.pluginHandler.registerPluginTab({ tabId: 'pluginOther', tabTitle: 'Other' });
     var copy = doc.getElementById('evlWrap');
     assert.notStrictEqual(copy, wrap);
+    // a detached element reads 0 and may get a scroll event (the browser resets it): the recorded offset stays
+    log.scrollTop = 0;
+    log.dispatchEvent(new w.Event('scroll'));
+    assert.deepStrictEqual(plain(log._evlScroll), [120, 0], 'a scroll while detached is not recorded');
     assert.strictEqual(doc.getElementById('evlAiIn').value, '', 'the copy lost the text');
     ph.aiRenderComposer();
     assert.strictEqual(doc.getElementById('evlAiIn').value, 'Half a question', 'fallback: the draft fills a re-created field');
@@ -1812,6 +1823,7 @@ test('drafts: a refresh of the device page and another plugin re-parsing it keep
     assert.strictEqual(doc.activeElement, ta);
     assert.deepStrictEqual([ta.selectionStart, ta.selectionEnd], [4, 4]);
     assert.strictEqual(doc.getElementById('evlAiLog')._evlConv, sig, 'properties on the elements survive');
+    assert.strictEqual(log.scrollTop, 120, 'the conversation scrolls back to where it was');
     // our own rebuild (permissions changed) and a different device still build anew
     w.QH('pluginEventLog', '');
     ph.elEnsureShell();
@@ -2056,6 +2068,7 @@ test('run: the diagnosis\' next steps get Run for their shell', { skip: SKIP }, 
     assert.strictEqual(ws.length, 2);
     assert.strictEqual(ws[0].querySelectorAll('.evlAiRunBtn').length, 1);
     assert.strictEqual(ws[1].querySelectorAll('.evlAiRunBtn').length, 0);
+    assert.strictEqual(ws[1].querySelector('.evlAiCodeBar span').textContent, 'Shell', 'labelled like an answer\'s code bar');
     assert.strictEqual(doc.querySelector('#evlAiLog .evlNext + .evlAiCmdNote').textContent, 'Check a command before you run it.');
     ph.aiCmdOpen(runBtns(doc)[0].getAttribute('data-run'), runBtns(doc)[0]);
     assert.strictEqual(doc.getElementById('evlCmdTx').value, 'Get-PhysicalDisk');

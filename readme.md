@@ -117,6 +117,11 @@ An optional helper based on a language model (LLM) that you choose. It **only re
   <img alt="Ask panel beside the table with cited events" src="docs/screenshots/assistant-ask-light.png">
 </picture>
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/assistant-run-dark.png">
+  <img alt="Run dialog for a suggested PowerShell command" src="docs/screenshots/assistant-run-light.png">
+</picture>
+
 ### Setup
 
 1. *Assistant → Endpoints → Add endpoint.* Choose the server type, address, API key (if needed) and model; *Fetch models* lists the models the server offers. *Advanced options → Generation* sets the thinking level, temperature, top-p, top-k and seed; empty fields keep the server's defaults.

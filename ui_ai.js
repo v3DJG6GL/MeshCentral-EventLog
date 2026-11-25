@@ -951,7 +951,7 @@ module.exports.attach = function (obj) {
             var w = doc.createElement('div'); w.className = 'evlAiCodeW';
             if (kind && kind[1]) w.setAttribute('data-sh', kind[1]);   // the shell, for Run (aiCmdDress)
             var bar = doc.createElement('div'); bar.className = 'evlAiCodeBar';
-            var lab = doc.createElement('span'); lab.textContent = cmd ? 'Command' : 'Code'; bar.appendChild(lab);
+            var lab = doc.createElement('span'); lab.textContent = cmd ? ph.aiShellName(kind[1]) : 'Code'; bar.appendChild(lab);
             var b = doc.createElement('button'); b.type = 'button'; b.className = 'evlBtn mini'; b.textContent = 'Copy';
             b.setAttribute('aria-label', cmd ? 'Copy the command' : 'Copy the code');
             b.setAttribute('onclick', 'return pluginHandler.eventlog.aiCopyCode(this)'); bar.appendChild(b);
@@ -2621,14 +2621,22 @@ module.exports.attach = function (obj) {
         if (!txt) return hide();
         ph._aiQt = txt;
         if (!Q('evlAiQtBtn')) slot.innerHTML = '<button type=button id=evlAiQtBtn class="evlBtn mini evlAiQtBtn" title="Quote the selected text in your question" onmousedown="event.preventDefault()" onclick="return pluginHandler.eventlog.aiQuoteSel()">' + ph.aiIcon('quote') + 'Quote</button>';
-        // below the end of the selection, inside the conversation's visible part
-        var btn = Q('evlAiQtBtn'), par = btn.offsetParent, rs = (typeof r.getClientRects == 'function') ? r.getClientRects() : null;
-        var end = (rs && rs.length) ? rs[rs.length - 1] : ((typeof r.getBoundingClientRect == 'function') ? r.getBoundingClientRect() : null);
-        if (!par || !end) return;
+        // centred above the selection (6 px gap); below it when the conversation's visible part has no room above
+        var btn = Q('evlAiQtBtn'), par = btn.offsetParent, sb = (typeof r.getBoundingClientRect == 'function') ? r.getBoundingClientRect() : null;
+        if (!sb || !(sb.width || sb.height)) {
+            var rs = (typeof r.getClientRects == 'function') ? r.getClientRects() : null;
+            sb = null;
+            for (var k = 0; rs && k < rs.length; k++) {
+                var q = rs[k];
+                sb = !sb ? { top: q.top, bottom: q.bottom, left: q.left, right: q.right } : { top: Math.min(sb.top, q.top), bottom: Math.max(sb.bottom, q.bottom), left: Math.min(sb.left, q.left), right: Math.max(sb.right, q.right) };
+            }
+        }
+        if (!par || !sb) return;
         var pr = par.getBoundingClientRect(), lr = log.getBoundingClientRect(), bw = btn.offsetWidth || 72, bh = btn.offsetHeight || 28;
-        if (end.bottom < lr.top || end.top > lr.bottom) { slot.innerHTML = ''; return; }
-        var top = Math.max(lr.top + 4, Math.min(end.bottom + 6, lr.bottom - bh - 4)) - pr.top;
-        var left = Math.max(pr.left + 6, Math.min(end.right - bw / 2, pr.right - bw - 6)) - pr.left;
+        if (sb.bottom < lr.top || sb.top > lr.bottom) { slot.innerHTML = ''; return; }
+        var above = sb.top - 6 - bh;
+        var top = (above >= lr.top + 4 ? above : Math.max(lr.top + 4, Math.min(sb.bottom + 6, lr.bottom - bh - 4))) - pr.top;
+        var left = Math.max(pr.left + 6, Math.min((sb.left + sb.right) / 2 - bw / 2, pr.right - bw - 6)) - pr.left;
         btn.style.top = Math.round(top) + 'px'; btn.style.left = Math.round(left) + 'px';
     };
     obj.aiQuoteSel = function () {
@@ -2906,7 +2914,7 @@ module.exports.attach = function (obj) {
                 h += '<li>' + (n.text ? '<div class=evlAiMd>' + md(n.text) + '</div>' : '');
                 if (n.command && n.command.text) {
                     anyCmd = true;
-                    var shk = (['powershell', 'cmd', 'bash'].indexOf(n.command.shell) >= 0) ? n.command.shell : '', sh = ({ powershell: 'PowerShell', cmd: 'Command Prompt', bash: 'Shell' })[shk] || 'Command';
+                    var shk = (['powershell', 'cmd', 'bash'].indexOf(n.command.shell) >= 0) ? n.command.shell : '', sh = ph.aiShellName(shk);
                     h += '<div class=evlAiCodeW' + (shk ? ' data-sh=' + shk : '') + '><div class=evlAiCodeBar><span>' + sh + '</span><button class="evlBtn mini" aria-label="Copy the command of step ' + (i + 1) + '" onclick="return pluginHandler.eventlog.aiCopyCmd(\'' + c.id + '\',' + i + ',this)">Copy</button></div>' +
                          '<pre><code>' + esc(ph.aiStripMarks(n.command.text)) + '</code></pre></div>';
                 }
@@ -3020,8 +3028,10 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, a = ph.st && ph.st.ai, c = (a && cid) ? a.convs[cid] : null;
         return (ph.elCan('runCommands') && (!c || ph.aiIsChat(c))) ? 'Check a command before you run it.' : 'Commands are suggestions. Copy one to run it in Terminal.';
     };
+    // the label of a command's shell (code bars of answers and next steps, the Run dialog, the output chip)
     obj.aiShellName = function (sh) {
-        return ({ powershell: 'PowerShell', cmd: 'Command Prompt', bash: 'Shell' })[sh] || 'Command';
+        var m = { powershell: 'PowerShell', cmd: 'Command Prompt', bash: 'Shell' };
+        return Object.prototype.hasOwnProperty.call(m, sh) ? m[sh] : 'Command';
     };
     // may a command of shell sh run on this device
     obj.aiCmdCan = function (sh) {
@@ -3505,6 +3515,8 @@ body.night #pluginEventLog .evlAiPop { box-shadow:0 10px 28px rgba(0,0,0,.75); b
 #pluginEventLog .evlAiGenSeg button:focus-visible { outline:2px solid var(--evl-acc); outline-offset:-3px; }
 #pluginEventLog .evlAiGenSeg .sm { display:none; }
 @container evlpop (max-width: 282px) { #pluginEventLog .evlAiGenSeg .lg { display:none; } #pluginEventLog .evlAiGenSeg .sm { display:inline; } }
+/* six levels (with Max) do not fit "Endpoint default" at the popover's full width either */
+#pluginEventLog .evlAiGenSeg:has(> button:nth-child(6)) .lg { display:none; } #pluginEventLog .evlAiGenSeg:has(> button:nth-child(6)) .sm { display:inline; }
 #pluginEventLog .evlAiGenSel { display:block; width:100%; box-sizing:border-box; min-height:28px; padding:3px 6px; border:1px solid var(--evl-bline); border-radius:3px; background:var(--evl-input); color:var(--evl-ink); font:inherit; font-size:12px; }
 #pluginEventLog .evlAiGenSel:focus-visible { outline:2px solid var(--evl-acc); outline-offset:1px; }
 #pluginEventLog .evlAiGenHint { margin:6px 0 0; font-size:11.5px; color:var(--evl-muted); line-height:1.4; }
@@ -3583,7 +3595,7 @@ body.night #pluginEventLog .evlAiPop { box-shadow:0 10px 28px rgba(0,0,0,.75); b
 #pluginEventLog .evlAiUnv { color:var(--evl-muted); font-size:11px; }
 /* running state: progress strip, status line with elapsed time, streaming caret, dot on the Ask button */
 #pluginEventLog .evlAiStripSlot { position:relative; height:0; z-index:1; }
-/* Quote: floats under the end of the text selected in an answer (placed by aiQuoteSync, relative to .evlAiIn) */
+/* Quote: floats above the text selected in an answer, below it when there is no room (placed by aiQuoteSync, relative to .evlAiIn) */
 #pluginEventLog .evlBtn.mini.evlAiQtBtn { position:absolute; top:0; left:0; z-index:9; display:inline-flex; align-items:center; gap:5px; box-sizing:border-box; height:28px; padding:0 10px; font-size:12px; line-height:1; white-space:nowrap;
   background:var(--evl-panel); border-color:var(--evl-acc); color:var(--evl-ink); box-shadow:0 4px 14px rgba(0,0,0,.18); }
 #pluginEventLog .evlBtn.mini.evlAiQtBtn:hover { background:var(--evl-hover); }
@@ -3660,8 +3672,8 @@ body.night #pluginEventLog .evlBtn.mini.evlAiQtBtn { box-shadow:0 6px 18px rgba(
 #pluginEventLog .evlAiRunActs .evlBtn.mini { display:inline-flex; align-items:center; height:26px; box-sizing:border-box; padding:0 9px; line-height:1; }
 #pluginEventLog .evlAiRunMsg { margin:2px 0; color:var(--evl-muted); }
 #pluginEventLog .evlAiRunPre { margin:4px 0 2px; padding:6px 8px; max-height:280px; overflow:auto; background:var(--evl-code); border:1px solid var(--evl-code-line); border-radius:2px; font-family:Consolas,"DejaVu Sans Mono",monospace; font-size:12px; line-height:1.45; white-space:pre-wrap; word-break:break-word; color:var(--evl-ink); }
-#pluginEventLog .evlAiAtt { display:flex; align-items:center; gap:5px; margin:0 0 4px; font-size:11.5px; color:var(--evl-muted); }
-#pluginEventLog .evlAiAtt svg { flex:none; width:12px; height:12px; color:var(--evl-acc); }
+#pluginEventLog .evlAiAtt { display:flex; align-items:flex-start; gap:5px; margin:0 0 4px; font-size:11.5px; line-height:1.4; color:var(--evl-muted); }
+#pluginEventLog .evlAiAtt svg { flex:none; width:12px; height:12px; margin-top:2px; color:var(--evl-acc); }
 #pluginEventLog .evlAiAtt code { font-family:Consolas,"DejaVu Sans Mono",monospace; font-size:11.5px; background:none; border:0; padding:0; color:var(--evl-ink); }
 /* citation chips: the link between an answer and the rows it relies on */
 #pluginEventLog .evlCite, #pluginEventLog .evlCitePend { display:inline-block; font-family:Consolas,"DejaVu Sans Mono",monospace; font-size:11px; font-weight:bold; line-height:16px; border:1px solid var(--evl-acc); color:var(--evl-acc); background:var(--evl-bg); border-radius:3px; padding:0 5px; margin:0 1px; vertical-align:1px; cursor:pointer; }

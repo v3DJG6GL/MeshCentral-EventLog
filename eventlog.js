@@ -600,6 +600,8 @@ body.night #pluginEventLog {
 /* toolbar: icon and text centred in every button; icon-only buttons nearly square */
 #pluginEventLog .evlBar .evlBtn { display:inline-flex; align-items:center; justify-content:center; gap:5px; vertical-align:middle; }
 #pluginEventLog .evlBar .evlBtn.evlIcoBtn { padding-left:6px; padding-right:6px; }
+/* every control of a toolbar line as tall as the tallest one (an icon-only button has no text line to size it) */
+#pluginEventLog .evlBar > .evlBtn, #pluginEventLog .evlBar > .evlSeg, #pluginEventLog .evlBar > input.evlIn, #pluginEventLog .evlBar > select.evlSel { align-self:stretch; }
 #pluginEventLog .evlBar .evlBtn svg, #pluginEventLog .evlSeg button svg { display:block; margin:0; flex:none; }
 #pluginEventLog .evlSeg button { display:inline-flex; align-items:center; gap:3px; }
 #pluginEventLog .evlSeg button:hover:not(.on) { background:var(--evl-hover); color:var(--evl-ink); }
@@ -848,6 +850,7 @@ body.night #pluginEventLog {
         var ph = pluginHandler.eventlog, el = ev.target, w = ev.currentTarget;
         if (!el || el.nodeType != 1 || !w) return;
         if (ev.type == 'scroll') {
+            if (!document.documentElement.contains(el)) return;   // a scroll while the shell is detached reads 0: keep the offset
             el._evlScroll = [el.scrollTop, el.scrollLeft];
             var l = (w._evlScr || []).filter(function(x) { return x !== el && w.contains(x); });
             l.push(el); w._evlScr = l.slice(-40);
