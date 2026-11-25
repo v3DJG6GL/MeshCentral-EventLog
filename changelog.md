@@ -7,6 +7,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+
+## [0.8.1] - 2026-11-25
 ### Fixed
 - Event Log tab: scroll positions are kept when another plugin redraws the plugin tabs
 - Toolbar buttons have the same height as the selects next to them; *Default* is no longer cut off in Answer settings when Max is offered
