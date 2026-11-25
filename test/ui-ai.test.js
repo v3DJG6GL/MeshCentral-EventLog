@@ -445,7 +445,7 @@ function runDiagnosis(w, win) {
     return s;
 }
 
-test('Diagnose: the toolbar button opens the window choice in full width; the diagnosis is the first answer of a chat, follow-ups continue it', { skip: SKIP }, async function () {
+test('Diagnose: the toolbar button opens the window choice in the Assistant view; the diagnosis is the first answer of a chat, follow-ups continue it', { skip: SKIP }, async function () {
     var w = makeDom(), ph = w.ph, doc = w.document;
     grant(w); loadHistory(w);
     assert.strictEqual(ph.st.ai.open, false);
@@ -453,6 +453,8 @@ test('Diagnose: the toolbar button opens the window choice in full width; the di
     assert.strictEqual(sentOf(w, 'aiStart').length, 0, 'nothing runs before Diagnose');
     assert.strictEqual(doc.getElementById('evlAi').hidden, false);
     assert.ok(doc.getElementById('evlMain').classList.contains('evlAiFull'), 'opens in full width');
+    assert.strictEqual(ph.st.view, 'ai', 'the Assistant view');
+    assert.strictEqual(doc.getElementById('evlTxtIn'), null, 'no filters in the Assistant view');
     assert.strictEqual(doc.getElementById('evlAiFullBtn').getAttribute('aria-pressed'), 'true');
     var radios = doc.querySelectorAll('#evlAiLog .evlDgWin input[type=radio]');
     assert.deepStrictEqual(Array.prototype.map.call(radios, function (r) { return r.value; }), ['24h', '7d', 'restart']);
@@ -521,9 +523,10 @@ test('Diagnose: the toolbar button opens the window choice in full width; the di
     ph.onAiDone(null, { nodeid: NODE, convId: 'cv4', turn: 2, text: 'Likely, see [E1].', citations: { E1: REC }, usage: {}, chatId: DCH });
     assert.strictEqual(doc.querySelectorAll('#evlAiLog .evlAiTurn').length, 2);
     assert.ok(doc.querySelector('#evlAiLog .evlDgCard'), 'the card stays above');
-    // a chip in the card jumps to the row: full width docks first
+    // a chip in the card jumps to the row: the Assistant view docks first
     ph.aiGotoCite(c.id, 'E1');
-    assert.strictEqual(ph.st.ai.full, false);
+    assert.strictEqual(ph.st.view, 'history');
+    assert.strictEqual(ph.st.ai.open, true);
     assert.ok(!doc.getElementById('evlMain').classList.contains('evlAiFull'));
     assert.strictEqual(ph.st.expanded[ph.elNormalize(REC).key], true);
     assert.ok(doc.getElementById('evlR_' + ph.elNormalize(REC).key).classList.contains('evlFlash'));
@@ -1181,42 +1184,217 @@ function savedChat(w, id, qs) {
 }
 function actBtn(doc, n, kind) { return doc.querySelector('#evlAiLog .evlAiTurn[data-n="' + n + '"] [data-act=' + kind + ']'); }
 
-test('full width: the toggle hides the table column, is remembered, Esc docks again; hidden when stacked', { skip: SKIP }, async function () {
+test('Assistant view: the panel header button switches between it and the docked panel, is remembered, Esc docks again; also narrow', { skip: SKIP }, async function () {
     var w = makeDom(), ph = w.ph, doc = w.document;
     grant(w); loadHistory(w);
     await sleep(5);
     mockLayout(w, { vh: 1000, top: 120, width: 1400 });
     ph.aiToggle();
     var main = doc.getElementById('evlMain'), b = doc.getElementById('evlAiFullBtn');
+    assert.strictEqual(ph.st.view, 'history');
     assert.strictEqual(b.getAttribute('aria-pressed'), 'false');
     assert.strictEqual(b.getAttribute('aria-label'), 'Full width');
+    assert.strictEqual(b.getAttribute('title'), 'Full width (Assistant view)');
     assert.ok(!main.classList.contains('evlAiFull'));
+    assert.ok(doc.getElementById('evlTxtIn') && !doc.getElementById('evlChips').hidden, 'docked: the filters and the table stay');
     ph.aiFullToggle();
+    assert.strictEqual(ph.st.view, 'ai');
     assert.ok(main.classList.contains('evlAiFull'));
     assert.strictEqual(doc.getElementById('evlAiFullBtn').getAttribute('aria-pressed'), 'true');
     assert.strictEqual(doc.getElementById('evlAiFullBtn').getAttribute('title'), 'Dock beside the table (Esc)');
-    assert.strictEqual(w.store.evl_ai_full, '1');
-    assert.ok(doc.getElementById('evlToolbar').querySelector('#evlTxtIn'), 'the filter toolbar stays');
+    assert.strictEqual(doc.activeElement, doc.getElementById('evlAiFullBtn'), 'focus stays on the button');
+    assert.strictEqual(w.store.evl_view, 'ai');
+    assert.strictEqual(doc.getElementById('evlVAi').getAttribute('aria-pressed'), 'true', 'the switch shows the Assistant view');
+    var tb = doc.getElementById('evlToolbar');
+    ['evlTxtIn', 'evlIdIn', 'evlRangeSel', 'evlShowSel', 'evlRowsSel', 'evlFoldBtn', 'evlCsvBtn', 'evlAiBtn'].forEach(function (id) { assert.strictEqual(doc.getElementById(id), null, id + ' is not in the Assistant view'); });
+    assert.deepStrictEqual(Array.prototype.map.call(tb.querySelectorAll('.evlBar > *'), function (e) { return e.className; }), ['evlSeg evlViewSeg', 'evlAiGrp'], 'the switch and Diagnose only');
+    assert.deepStrictEqual(Array.prototype.map.call(tb.querySelectorAll('.evlAiGrp > *'), function (e) { return e.id; }), ['evlAiDiagBtn'], 'Diagnose on the right');
+    assert.match(doc.getElementById('evlStyles').textContent, /\.evlBar > \.evlAiGrp \{ display:flex; gap:6px; margin-left:auto;/);
+    assert.ok(doc.getElementById('evlChips').hidden && doc.getElementById('evlBody').hidden && doc.getElementById('evlStatus').hidden, 'no level chips, table or status line');
     var css = doc.getElementById('evlAiStyles').textContent;
-    assert.match(css, /\.evlMain\.evlAiFull:not\(\.evlStack\) \.evlCol, #pluginEventLog \.evlMain\.evlAiOnly \.evlCol \{ display:none; \}/);
-    assert.match(css, /\.evlStack \.evlAiHd \.evlBtn\.evlAiFullBtn \{ display:none; \}/, 'more specific than the header button rule');
+    assert.match(css, /#pluginEventLog \.evlMain\.evlAiFull \.evlCol \{ display:none; \}/);
+    assert.ok(!/evlAiFullBtn \{ display:none/.test(css), 'offered narrow too');
     assert.strictEqual(doc.getElementById('evlAi').style.height, (1000 - 120 - 6) + 'px', 'the height fit is the same in full width');
     // Esc inside the panel docks it; an Esc already taken (inline editor) does not
     var ev = { key: 'Escape', defaultPrevented: true, preventDefault: function () { } };
     assert.strictEqual(ph.aiPanelKey(ev), true);
-    assert.ok(main.classList.contains('evlAiFull'));
+    assert.strictEqual(ph.st.view, 'ai');
     ph.aiPanelKey({ key: 'Escape', defaultPrevented: false, preventDefault: function () { } });
+    assert.strictEqual(ph.st.view, 'history', 'back to the view it came from');
     assert.ok(!main.classList.contains('evlAiFull'));
-    assert.strictEqual(w.store.evl_ai_full, '');
-    // remembered: a new page load opens full width
-    var w2 = makeDom(); w2.store.evl_ai_full = '1'; grant(w2); loadHistory(w2); await sleep(5);
-    mockLayout(w2, { vh: 1000, top: 120, width: 1400 }); w2.ph.aiToggle();
+    assert.strictEqual(doc.getElementById('evlAi').hidden, false, 'the panel stays open, docked');
+    assert.strictEqual(w.store.evl_view, 'history');
+    // Close in the Assistant view: back to the table with the panel closed
+    ph.aiFullToggle(true);
+    ph.aiClosePanel();
+    assert.deepStrictEqual([ph.st.view, ph.st.ai.open, doc.getElementById('evlAi').hidden], ['history', false, true]);
+    assert.strictEqual(doc.activeElement, doc.getElementById('evlAiBtn'));
+    // remembered: a new page load opens the Assistant view
+    var w2 = makeDom(); w2.store.evl_view = 'ai'; grant(w2); loadHistory(w2); await sleep(5);
+    assert.strictEqual(w2.ph.st.view, 'ai');
     assert.ok(w2.document.getElementById('evlMain').classList.contains('evlAiFull'));
-    // stacked (narrow): already full width, the table stays above, no toggle
-    var w3 = makeDom(); w3.store.evl_ai_full = '1'; grant(w3); loadHistory(w3); await sleep(5);
+    assert.strictEqual(w2.document.getElementById('evlAi').hidden, false);
+    w2.ph.aiFullToggle(false);
+    assert.strictEqual(w2.ph.st.view, 'history', 'docks to a view this user has (no Live permission)');
+    // narrow: the Assistant view hides the table too; the button goes back with the panel stacked below the table
+    var w3 = makeDom(); grant(w3); loadHistory(w3); await sleep(5);
     mockLayout(w3, { vh: 900, top: 700, width: 600 }); w3.ph.aiToggle();
     var m3 = w3.document.getElementById('evlMain');
     assert.ok(m3.classList.contains('evlStack') && !m3.classList.contains('evlAiFull'));
+    w3.ph.aiFullToggle();
+    assert.ok(m3.classList.contains('evlStack') && m3.classList.contains('evlAiFull'));
+    w3.ph.aiFullToggle();
+    assert.ok(!m3.classList.contains('evlAiFull') && !w3.document.getElementById('evlAi').hidden);
+    // an unknown stored view (older versions) falls back
+    var w4 = makeDom(); w4.store.evl_view = 'diag'; grant(w4); await sleep(5);
+    assert.strictEqual(w4.ph.st.view, 'history');
+});
+
+test('view switch: Live, History and Assistant by permission, with icons and names; the Ask button docks the panel', { skip: SKIP }, async function () {
+    var all = function (w) { return Array.prototype.map.call(w.document.querySelectorAll('#evlToolbar .evlViewSeg button'), function (b) { return b.id + (b.hidden ? ':hidden' : ''); }); };
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w, { live: true }); loadHistory(w); await sleep(5);
+    assert.deepStrictEqual(all(w), ['evlVLive', 'evlVHist', 'evlVAi']);
+    Array.prototype.forEach.call(doc.querySelectorAll('#evlToolbar .evlViewSeg button'), function (b) {
+        assert.ok(b.querySelector('svg.evlIco') && b.querySelector('.evlTx').textContent == b.getAttribute('aria-label') && b.title == b.getAttribute('aria-label'), b.outerHTML);
+    });
+    assert.deepStrictEqual(['evlVLive', 'evlVHist', 'evlVAi'].map(function (id) { return doc.getElementById(id).getAttribute('aria-pressed'); }), ['true', 'false', 'false']);
+    assert.strictEqual(doc.querySelector('#evlToolbar .evlViewSeg').getAttribute('role'), 'group');
+    // Ask in Live: the panel beside the table, the filters stay
+    ph.aiToggle();
+    assert.deepStrictEqual([ph.st.view, doc.getElementById('evlAi').hidden, doc.getElementById('evlMain').classList.contains('evlAiFull')], ['live', false, false]);
+    assert.ok(doc.getElementById('evlTxtIn'));
+    // the switch: focus stays on the pressed button
+    doc.getElementById('evlVAi').focus();
+    ph.elSetView('ai');
+    assert.strictEqual(doc.activeElement, doc.getElementById('evlVAi'));
+    assert.strictEqual(ph.st.back, 'live');
+    doc.getElementById('evlVHist').focus();
+    ph.elSetView('history');
+    assert.deepStrictEqual([ph.st.view, doc.activeElement.id, doc.getElementById('evlAi').hidden], ['history', 'evlVHist', false], 'the panel stays docked');
+    ph.elSetView('ai'); ph.aiFullToggle(false);
+    assert.strictEqual(ph.st.view, 'history', 'back to where it was opened from');
+    // no Assistant: no Assistant entry; Assistant only: no switch at all
+    var w2 = makeDom(); grant(w2, { live: true, assistant: false }); await sleep(5);
+    assert.deepStrictEqual(all(w2), ['evlVLive', 'evlVHist', 'evlVAi:hidden']);
+    assert.strictEqual(w2.ph.elSetView('ai'), false);
+    assert.strictEqual(w2.ph.st.view, 'live');
+    var w3 = makeDom(); grant(w3, { history: false }); await sleep(5);
+    assert.deepStrictEqual(all(w3), []);
+    assert.strictEqual(w3.ph.st.view, 'ai');
+    // the Assistant permission revoked in the Assistant view: back to a table view
+    ph.elSetView('ai');
+    ph.onAccess(null, { nodeid: NODE, live: true, history: true, assistant: false });
+    assert.strictEqual(ph.st.view, 'history');
+    assert.strictEqual(doc.getElementById('evlVAi').hidden, true);
+});
+
+test('toolbar: short labels, icon-only Table/Viewer with aria-pressed, the IDs field, compact when the bar would wrap (with hysteresis)', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w, { live: true }); loadHistory(w); await sleep(5);
+    var fold = doc.getElementById('evlFoldBtn'), csv = doc.getElementById('evlCsvBtn');
+    assert.deepStrictEqual([fold.textContent, fold.getAttribute('aria-label'), fold.getAttribute('aria-pressed')], ['Fold', 'Fold repeats', 'true']);
+    ph.elToggleFold();
+    assert.strictEqual(fold.getAttribute('aria-pressed'), 'false');
+    assert.deepStrictEqual([csv.textContent, csv.getAttribute('aria-label')], ['CSV', 'CSV export']);
+    var lay = doc.querySelectorAll('#evlToolbar .evlIcoSeg button');
+    assert.deepStrictEqual(Array.prototype.map.call(lay, function (b) { return [b.getAttribute('aria-label'), b.title, b.getAttribute('aria-pressed'), b.textContent, !!b.querySelector('svg.evlIco')]; }),
+        [['Table', 'Table', 'true', '', true], ['Viewer', 'Viewer', 'false', '', true]]);
+    ph.elSetLayout('viewer');
+    lay = doc.querySelectorAll('#evlToolbar .evlIcoSeg button');
+    assert.deepStrictEqual([lay[0].getAttribute('aria-pressed'), lay[1].getAttribute('aria-pressed')], ['false', 'true']);
+    ph.elSetLayout('ledger');
+    var ids = doc.getElementById('evlIdIn');
+    assert.deepStrictEqual([ids.placeholder, ids.getAttribute('aria-label')], ['IDs', 'Event IDs']);
+    assert.ok(/1112, 100-199/.test(ids.title));
+    assert.match(doc.getElementById('evlStyles').textContent, /input\.evlIn\.evlIdIn \{ width:calc\(6ch \+ 16px\);/);
+    // every button that can lose its label keeps a name and a tooltip
+    Array.prototype.forEach.call(doc.querySelectorAll('#evlToolbar button'), function (b) {
+        if (b.id == 'evlAiBtn' || b.id == 'evlAiDiagBtn') return;
+        assert.ok(b.getAttribute('aria-label') && b.title, b.outerHTML);
+    });
+    // compact: measured with the labels; wrapping -> .evlCompact; back only with 24 px to spare
+    var bar = doc.querySelector('#evlToolbar .evlBar'), m = { wraps: true, slack: 0 };
+    bar.getClientRects = function () { return [1]; };
+    ph.elBarMeasure = function (b) { assert.ok(!b.classList.contains('evlCompact'), 'measured with the labels'); return m; };
+    ph.elFitBar();
+    assert.ok(bar.classList.contains('evlCompact'));
+    m = { wraps: false, slack: 10 }; ph.elFitBar();
+    assert.ok(bar.classList.contains('evlCompact'), 'fits, but only just: stays compact');
+    m = { wraps: false, slack: 30 }; ph.elFitBar();
+    assert.ok(!bar.classList.contains('evlCompact'));
+    m = { wraps: false, slack: 2 }; ph.elFitBar();
+    assert.ok(!bar.classList.contains('evlCompact'), 'labels stay while the bar fits');
+    m = { wraps: true, slack: 0 }; ph.elFitBar();
+    assert.ok(bar.classList.contains('evlCompact'));
+    bar.getClientRects = function () { return []; };
+    m = { wraps: false, slack: 500 }; ph.elFitBar();
+    assert.ok(bar.classList.contains('evlCompact'), 'a hidden tab keeps what it has');
+    assert.match(doc.getElementById('evlStyles').textContent, /\.evlBar\.evlCompact \.evlTx \{ display:none; \}/);
+    // the measurement: an item below the first row is a wrap; the slack is the search field's width above its minimum
+    var w2 = makeDom(); grant(w2, { live: true }); await sleep(5);
+    var bar2 = w2.document.querySelector('#evlToolbar .evlBar'), rows = {};
+    var grow = w2.document.getElementById('evlTxtIn');
+    Array.prototype.forEach.call(bar2.children, function (e, i) { e.getBoundingClientRect = function () { var t = rows[i] || 0; return { top: t, bottom: t + 28, height: 28, width: e === grow ? 200 : 40, left: 0, right: 0 }; }; });
+    grow.style.minWidth = '140px';
+    assert.deepStrictEqual(plain(w2.ph.elBarMeasure(bar2)), { wraps: false, slack: 60 });
+    rows[bar2.children.length - 1] = 34;
+    assert.strictEqual(w2.ph.elBarMeasure(bar2).wraps, true);
+});
+
+test('time range: the options, one ms map for the filter and the History query, unknown values fall back to 24 hours', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w); loadHistory(w); await sleep(5);
+    var opts = Array.prototype.map.call(doc.querySelectorAll('#evlRangeSel option'), function (o) { return [o.value, o.textContent]; });
+    assert.deepStrictEqual(opts, [['all', 'Any time'], ['1h', '1 hour'], ['24h', '24 hours'], ['3d', '3 days'], ['7d', '7 days'], ['30d', '30 days'], ['60d', '60 days'], ['90d', '90 days'], ['180d', '180 days'], ['365d', '365 days']]);
+    assert.strictEqual(doc.getElementById('evlRangeSel').value, '24h');
+    var D = 86400e3;
+    assert.deepStrictEqual(['all', '1h', '24h', '3d', '7d', '30d', '60d', '90d', '180d', '365d', 'x'].map(ph.elRangeMs), [0, 3600e3, D, 3 * D, 7 * D, 30 * D, 60 * D, 90 * D, 180 * D, 365 * D, null]);
+    var t0 = Date.now();
+    ph.elSetRange('90d');
+    var q = sentOf(w, 'getNodeHistory').pop();
+    assert.ok(Math.abs(q.since - (t0 - 90 * D)) < 2000, 'History asks the server for 90 days');
+    assert.strictEqual(w.store.evl_range, '90d');
+    ph.elFiltered();
+    assert.ok(Math.abs(ph.st._cutoff - (t0 - 90 * D)) < 2000, 'the same span filters the loaded events');
+    ph.elSetRange('all');
+    assert.strictEqual(sentOf(w, 'getNodeHistory').pop().since, null);
+    ph.elSetRange('2w');
+    assert.strictEqual(ph.st.range, '24h');
+    var w2 = makeDom(); w2.store.evl_range = '14d'; grant(w2); await sleep(5);
+    assert.strictEqual(w2.ph.st.range, '24h');
+    assert.strictEqual(w2.document.getElementById('evlRangeSel').value, '24h');
+    var w3 = makeDom(); w3.store.evl_range = '365d'; grant(w3); await sleep(5);
+    assert.strictEqual(w3.document.getElementById('evlRangeSel').value, '365d');
+});
+
+test('selects: as wide as the chosen option (field-sizing, else measured), up to their max-width', { skip: SKIP }, async function () {
+    var w = makeDom(), ph = w.ph, doc = w.document;
+    grant(w); loadHistory(w); await sleep(5);
+    var css = doc.getElementById('evlStyles').textContent;
+    assert.match(css, /select\.evlSel \{ field-sizing:content; text-overflow:ellipsis;/);
+    assert.match(css, /select#evlLogSel \{ max-width:180px; \}/);
+    assert.match(css, /select#evlSrcSel \{ max-width:260px; \}/);
+    // no field-sizing: the option text measured in the select's font, plus padding, border and the arrow
+    ph._fsc = false;
+    var seen = [];
+    ph.elTextW = function (el, t) { seen.push(el.id + ':' + t); return t.length * 7; };
+    ph.elUpdate();
+    var src = doc.getElementById('evlSrcSel');
+    assert.strictEqual(src.options[src.selectedIndex].text, 'All (2)');
+    assert.ok(seen.indexOf('evlSrcSel:All (2)') >= 0 && seen.indexOf('evlRangeSel:24 hours') >= 0 && seen.indexOf('evlShowSel:100') >= 0 && seen.indexOf('evlRowsSel:Normal') >= 0, seen.join());
+    assert.strictEqual(src.style.width, Math.ceil(7 * 7 + 6 + 6 + 1 + 1 + 24) + 'px');
+    // a long source: capped at the max-width
+    ph.elSelSource({ value: 'stornvme' });
+    ph.elTextW = function () { return 900; };
+    src.style.maxWidth = '260px';
+    ph.elUpdate();
+    assert.strictEqual(doc.getElementById('evlSrcSel').style.width, '260px');
+    // the browser sizes them itself: nothing set
+    var w2 = makeDom(); grant(w2); loadHistory(w2); await sleep(5);
+    w2.ph._fsc = true; w2.ph.elTextW = function () { throw new Error('not measured'); };
+    w2.ph.elUpdate();
+    assert.strictEqual(w2.document.getElementById('evlSrcSel').style.width, '');
 });
 
 test('message actions: copy, edit, delete on questions; copy, retry on answers; disabled while a request runs', { skip: SKIP }, async function () {
@@ -1382,8 +1560,13 @@ test('scrolling: the conversation (diagnosis card, chat list) scrolls inside the
     assert.ok(log.querySelector('.evlAiHist'), 'the chat list is in the same scrolling log');
     var w2 = makeDom(); grant(w2); loadHistory(w2); await sleep(5);
     mockLayout(w2, { vh: 900, top: 700, width: 600 });
-    runDiagnosis(w2);
-    assert.strictEqual(w2.document.getElementById('evlAi').style.height, (900 - 24) + 'px', 'stacked: the visible height');
+    w2.ph.aiToggle();
+    assert.strictEqual(w2.document.getElementById('evlAi').style.height, (900 - 24) + 'px', 'stacked below the table: the visible height');
+    var w3 = makeDom(); grant(w3); loadHistory(w3); await sleep(5);
+    mockLayout(w3, { vh: 900, top: 120, width: 600 });
+    runDiagnosis(w3);
+    assert.ok(w3.document.getElementById('evlMain').classList.contains('evlStack'));
+    assert.strictEqual(w3.document.getElementById('evlAi').style.height, (900 - 120 - 6) + 'px', 'the Assistant view, narrow: from its top to the window bottom');
 });
 
 test('Ask panel height: dragging follows the pointer; layout callbacks during the drag never put the stored height back', { skip: SKIP }, async function () {

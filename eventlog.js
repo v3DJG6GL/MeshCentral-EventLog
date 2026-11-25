@@ -39,6 +39,8 @@ module.exports.eventlog = function (parent) {
       'elFixText',
       'elNormalize',
       'elFmtTime',
+      'elRanges',
+      'elRangeMs',
       'elParseIds',
       'elMatch',
       'elFiltered',
@@ -51,6 +53,10 @@ module.exports.eventlog = function (parent) {
       'elRestoreView',
       'elIcon',
       'elRenderShell',
+      'elSizeSels',
+      'elTextW',
+      'elFitBar',
+      'elBarMeasure',
       'elUpdate',
       'elRenderChips',
       'elRenderFacets',
@@ -59,6 +65,7 @@ module.exports.eventlog = function (parent) {
       'elRenderDetailHtml',
       'elRenderStatus',
       'elSetView',
+      'elBackView',
       'elSetLayout',
       'elToggleFold',
       'elSetShow',
@@ -387,15 +394,20 @@ module.exports.eventlog = function (parent) {
         var ph = pluginHandler.eventlog;
         if (ph.st == null) {
             ph.byKey = {};
+            // the last view and range of this browser (unknown values from older versions fall back)
+            var v0 = getstore('evl_view', 'live'), rg = getstore('evl_range', '24h');
+            if (['live', 'history', 'ai'].indexOf(v0) < 0) v0 = 'live';
+            if (ph.elRangeMs(rg) == null) rg = '24h';
             ph.st = {
-                view: 'live',
+                view: v0,                                            // 'live' | 'history' | 'ai' (the Assistant view: the panel in full width)
+                back: (v0 == 'history') ? 'history' : 'live',        // the view the Assistant view docks back to
                 os: ph.elPlatform(),                                 // 'windows' | 'linux' | 'macos' | null (state resets on node change)
                 lsel: '',                                            // View selector: Linux ('', kernel, auth, audit, boot), macOS ('', kernel, auth, install, crash, boot)
                 meta: null,                                          // {os, caps} reported by the agent / server
                 layout: getstore('evl_layout', 'ledger'),           // 'ledger' | 'viewer'
                 fold: (getstore('evl_fold', '1') == '1'),
                 show: Number(getstore('evl_show', '100')),
-                range: getstore('evl_range', '24h'),
+                range: rg,
                 rows: getstore('evl_rows', 'normal'),                // 'dense' | 'normal' | 'wrap'
                 cols: { ledger: ph.elLoadJson('evl_cols_ledger'), viewer: ph.elLoadJson('evl_cols_viewer') },   // user column widths (px) per layout
                 sideW: Number(getstore('evl_side', '0')) || 0,          // Viewer sidebar width (px), 0 = automatic
@@ -487,6 +499,19 @@ module.exports.eventlog = function (parent) {
         return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
     };
 
+    // time ranges of the toolbar: [value, label, ms] (0 = any time); the filter and the History query use the same list
+    obj.elRanges = function() {
+        var H = 3600e3, D = 86400e3;
+        return [['all', 'Any time', 0], ['1h', '1 hour', H], ['24h', '24 hours', D], ['3d', '3 days', 3 * D], ['7d', '7 days', 7 * D], ['30d', '30 days', 30 * D],
+                ['60d', '60 days', 60 * D], ['90d', '90 days', 90 * D], ['180d', '180 days', 180 * D], ['365d', '365 days', 365 * D]];
+    };
+    // ms of a range value (0 = any time), null for an unknown value
+    obj.elRangeMs = function(r) {
+        var l = pluginHandler.eventlog.elRanges();
+        for (var i = 0; i < l.length; i++) { if (l[i][0] === r) return l[i][2]; }
+        return null;
+    };
+
     obj.elParseIds = function(str) {
         var out = [];
         String(str || '').split(',').forEach(function(part) {
@@ -520,8 +545,8 @@ module.exports.eventlog = function (parent) {
         var ph = pluginHandler.eventlog, st = ph.elState();
         st._idRanges = ph.elParseIds(st.filters.ids);
         st._text = String(st.filters.text || '').trim().toLowerCase();
-        var ranges = { '1h': 3600e3, '24h': 86400e3, '7d': 7 * 86400e3, '30d': 30 * 86400e3 };
-        st._cutoff = ranges[st.range] ? (Date.now() - ranges[st.range]) : 0;
+        var rms = ph.elRangeMs(st.range);
+        st._cutoff = rms ? (Date.now() - rms) : 0;
         // Diagnosis has no event table; History with recIds shows exactly the cited events (the server picked them)
         var evs = (st.view == 'live') ? st.live.events : ((st.view == 'history') ? st.hist.events : []);
         var exact = (st.view == 'history' && st.hist.recIds != null && st.hist.recIds.length > 0);
@@ -606,6 +631,19 @@ body.night #pluginEventLog {
 #pluginEventLog .evlSeg button { display:inline-flex; align-items:center; gap:3px; }
 #pluginEventLog .evlSeg button:hover:not(.on) { background:var(--evl-hover); color:var(--evl-ink); }
 #pluginEventLog .evlSeg button:active:not(.on) { background:var(--evl-sel); }
+/* labels that go when the bar would wrap (elFitBar); Table/Viewer are icons always */
+#pluginEventLog .evlBar .evlTx { white-space:nowrap; }
+#pluginEventLog .evlBar.evlCompact .evlTx { display:none; }
+#pluginEventLog .evlBar.evlCompact .evlSeg button, #pluginEventLog .evlSeg.evlIcoSeg button { padding-left:7px; padding-right:7px; }
+#pluginEventLog .evlBar.evlCompact .evlBtn { padding-left:6px; padding-right:6px; }
+#pluginEventLog .evlBar.evlCompact .evlBtn.evlAiBtn, #pluginEventLog .evlBar.evlCompact .evlBtn.evlAiDgBtn { padding-left:9px; padding-right:9px; }
+#pluginEventLog .evlBar > .evlAiGrp { display:flex; gap:6px; margin-left:auto; align-self:stretch; }
+#pluginEventLog .evlAiGrp > .evlBtn { align-self:stretch; margin-left:0; }
+#pluginEventLog input.evlIn.evlIdIn { width:calc(6ch + 16px); min-width:0; }
+/* closed selects as wide as the chosen option (elSizeSels measures where field-sizing is missing) */
+#pluginEventLog select.evlSel { field-sizing:content; text-overflow:ellipsis; white-space:nowrap; }
+#pluginEventLog select#evlLogSel { max-width:180px; }
+#pluginEventLog select#evlSrcSel { max-width:260px; }
 #pluginEventLog .evlChip:hover { border-color:var(--evl-acc); }
 #pluginEventLog .evlFacet:hover .t { color:var(--evl-acc); }
 #pluginEventLog .evlDTabs button:hover:not(.on) { color:var(--evl-ink); }
@@ -797,13 +835,14 @@ body.night #pluginEventLog {
         if (!ph.elAccessGate()) { ph._evlWrapEl = null; return false; }   // a notice took the tab: build anew later
         ph.elHeal();   // MeshCentral rebuilt the tab: the same shell goes back in (typed text, focus, scroll positions)
         if (!Q('evlWrap')) {
-            var st0 = ph.elState();   // open on a view this user is allowed to see ('ai': the Assistant is all they have)
+            var st0 = ph.elState();   // open on a view this user is allowed to see ('ai' only: the Assistant is all they have)
             var canL = ph.elCan('live'), canH = ph.elCan('history'), canA = ph.elCan('assistant');
             if (st0.view == 'live' && !canL) st0.view = canH ? 'history' : (canA ? 'ai' : 'live');
             else if (st0.view == 'history' && !canH) st0.view = canL ? 'live' : (canA ? 'ai' : 'history');
-            else if (st0.view == 'ai' && (canL || canH || !canA)) st0.view = canL ? 'live' : 'history';
+            else if (st0.view == 'ai' && !canA) st0.view = canL ? 'live' : 'history';
+            if (st0.view == 'ai') st0.ai.open = true;
             // #evlCol holds the table and its status line; the Assistant panel #evlAi docks beside it (or below it on
-            // narrow screens, or takes its place in full width). Both render from state; the element is kept, so
+            // narrow screens, or takes its place in the Assistant view). Both render from state; the element is kept, so
             // MeshCentral's rebuild of the tab on a refresh puts it back as it was (elHeal).
             QH('pluginEventLog', '<div id=evlWrap><div id=evlToolbar></div><div id=evlMain class=evlMain><div id=evlCol class=evlCol>' +
                 '<div id=evlChips class=evlChips></div><div id=evlBody></div><div id=evlStatus class=evlStatus></div></div>' +
@@ -816,12 +855,12 @@ body.night #pluginEventLog {
             });
             ph.elRenderShell();
             if (typeof ResizeObserver == 'function') {   // the page can change width without a window resize (side menu)
-                try { if (ph._aiRO) ph._aiRO.disconnect(); ph._aiRO = new ResizeObserver(function() { try { pluginHandler.eventlog.aiLayout(); } catch (e) { } }); ph._aiRO.observe(Q('evlWrap')); ph._aiRO.observe(Q('evlToolbar')); } catch (e) { }
+                try { if (ph._aiRO) ph._aiRO.disconnect(); ph._aiRO = new ResizeObserver(function() { try { pluginHandler.eventlog.elFitBar(); pluginHandler.eventlog.aiLayout(); } catch (e) { } }); ph._aiRO.observe(Q('evlWrap')); ph._aiRO.observe(Q('evlToolbar')); } catch (e) { }
             }
         }
         ph.elFitHeight();   // the tab may have been hidden during the last render
         ph.aiLayout();      // the Ask panel's height too (fit to the window, or the height set with its grip)
-        if (!ph._fitBound) { ph._fitBound = true; window.addEventListener('resize', function() { pluginHandler.eventlog.elFitHeight(); pluginHandler.eventlog.aiLayout(); }); }
+        if (!ph._fitBound) { ph._fitBound = true; window.addEventListener('resize', function() { pluginHandler.eventlog.elFitBar(); pluginHandler.eventlog.elFitHeight(); pluginHandler.eventlog.aiLayout(); }); }
         return true;
     };
 
@@ -881,65 +920,74 @@ body.night #pluginEventLog {
     // toolbar icons: the Assistant's metrics (16 px, stroke 1.6, round caps)
     obj.elIcon = function(name) {
         var d = ({
-            fold: '<path d="M4.5 2.8L8 6.3l3.5-3.5M4.5 13.2L8 9.7l3.5 3.5"/>',
+            fold: '<path d="M2.5 8h11M8 2.3v3.4M6.2 4.2L8 6l1.8-1.8M8 13.7v-3.4M6.2 11.8L8 10l1.8 1.8"/>',
             pause: '<path d="M5.5 3.5v9M10.5 3.5v9" stroke-width=2.2 />',
             play: '<path d="M5 3.3v9.4L12.5 8z" fill=currentColor />',
             refresh: '<path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.8v3.4H9.6"/>',
             download: '<path d="M8 2.5v8M4.6 7.3L8 10.7l3.4-3.4M3 13.5h10"/>',
-            live: '<circle cx=8 cy=8 r=3.4 fill=currentColor stroke=none />',
-            ask: '<path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/>'
+            live: '<circle cx=8 cy=8 r=1.9 fill=currentColor stroke=none /><path d="M5.2 4.9a4.4 4.4 0 0 0 0 6.2M10.8 4.9a4.4 4.4 0 0 1 0 6.2"/>',
+            history: '<path d="M2.9 8a5.1 5.1 0 1 0 1.5-3.6M2.7 2.4v2.7h2.7M8 5.2v3l2 1.4"/>',
+            ask: '<path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z"/>',
+            table: '<rect x=2.5 y=3 width=11 height=10 rx=1.2 /><path d="M2.5 6.4h11M2.5 9.7h11M6.4 6.4V13"/>',
+            viewer: '<rect x=2.5 y=3 width=11 height=10 rx=1.2 /><path d="M6.3 3v10M6.3 7.6h7.2"/>'
         })[name] || '';
         return '<svg class=evlIco width=16 height=16 viewBox="0 0 16 16" fill=none stroke=currentColor stroke-width=1.6 stroke-linecap=round stroke-linejoin=round aria-hidden=true>' + d + '</svg>';
     };
 
     obj.elRenderShell = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
-        var esc = EscapeHtml;
+        var esc = EscapeHtml, ai = (st.view == 'ai');
         var h = '<div class=evlBar>';
-        var seg = function(id, v, perm, label) {
-            return '<button id=' + id + (ph.elCan(perm) ? '' : ' hidden') + ' class="' + (st.view == v ? 'on' : '') + '" aria-pressed=' + (st.view == v ? 'true' : 'false') + ' onclick="return pluginHandler.eventlog.elSetView(\'' + v + '\')">' + label + '</button>';
+        // icon and label; the label (.evlTx) goes when the bar would wrap (elFitBar), the name stays in aria-label/title
+        var seg = function(id, v, perm, ico, label) {
+            var on = (st.view == v);
+            return '<button type=button id=' + id + (ph.elCan(perm) ? '' : ' hidden') + ' class="' + (on ? 'on' : '') + '" aria-pressed=' + (on ? 'true' : 'false') + ' aria-label="' + label + '" title="' + label + '"' +
+                   ' onclick="return pluginHandler.eventlog.elSetView(\'' + v + '\')">' + ph.elIcon(ico) + '<span class=evlTx>' + label + '</span></button>';
         };
-        if (st.view != 'ai') h += '<div class=evlSeg role=group aria-label="View">' + seg('evlVLive', 'live', 'live', ph.elIcon('live') + 'Live') + seg('evlVHist', 'history', 'history', 'History') + '</div>';
-        if (st.view == 'ai') {
-            // the Assistant only: no event list, so no filters
-        } else {
+        // no switch when the Assistant is all this user has
+        if (ph.elCan('live') || ph.elCan('history')) h += '<div class="evlSeg evlViewSeg" role=group aria-label="View">' + seg('evlVLive', 'live', 'live', 'live', 'Live') + seg('evlVHist', 'history', 'history', 'history', 'History') + seg('evlVAi', 'ai', 'assistant', 'ask', 'Assistant') + '</div>';
+        if (!ai) {   // the Assistant view has no event list, so no filters
         if (ph.elIsNix(st.os)) {
             var vTitle = (st.os == 'macos')
                 ? 'Log view - in Live view this is queried from the unified log directly (Kernel = kernel messages, Security = authentication and authorization, Software install = installer and updates, Crash reports = DiagnosticReports, This boot = since the last boot)'
                 : 'Log view - in Live view this is queried from journalctl directly (Kernel = -k, Security = auth facilities, This boot = -b)';
-            h += '<span class=evlLbl>View</span> <select id=evlLxSel class=evlSel title="' + vTitle + '" onchange="return pluginHandler.eventlog.elSelCat(this.value)">';
+            h += '<span class=evlLbl>View</span> <select id=evlLxSel class=evlSel title="' + vTitle + '" aria-label="Log view" onchange="return pluginHandler.eventlog.elSelCat(this.value)">';
             ph.elLxViews(st.os).forEach(function(o){ h += '<option value="' + o[0] + '"' + (st.lsel == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
             h += '</select>';
         }
         if (st.layout == 'ledger') {
-            h += '<span class=evlLbl>' + ph.elLbl('log') + '</span> <select id=evlLogSel class=evlSel onchange="return pluginHandler.eventlog.elSelLog(this)"><option value="">All</option></select>';
-            h += '<span class=evlLbl>Source</span> <select id=evlSrcSel class=evlSel onchange="return pluginHandler.eventlog.elSelSource(this)"><option value="">All</option></select>';
+            h += '<span class=evlLbl>' + ph.elLbl('log') + '</span> <select id=evlLogSel class=evlSel aria-label="' + ph.elLbl('log') + '" onchange="return pluginHandler.eventlog.elSelLog(this)"><option value="">All</option></select>';
+            h += '<span class=evlLbl>Source</span> <select id=evlSrcSel class=evlSel aria-label="Source" onchange="return pluginHandler.eventlog.elSelSource(this)"><option value="">All</option></select>';
         }
-        h += '<input id=evlIdIn class=evlIn style=width:120px placeholder="IDs: 1112, 100-199" value="' + esc(st.filters.ids) + '" oninput="return pluginHandler.eventlog.elIdInput(this)">';
-        h += '<input id=evlTxtIn class="evlIn evlGrow" placeholder="Search message, source, ID&hellip;" value="' + esc(st.filters.text) + '" oninput="return pluginHandler.eventlog.elTextInput(this)">';
-        h += '<select id=evlRangeSel class=evlSel title="Time range" onchange="return pluginHandler.eventlog.elSetRange(this.value)">';
-        [['all','Any time'],['1h','Last hour'],['24h','Last 24 h'],['7d','Last 7 days'],['30d','Last 30 days']].forEach(function(o){ h += '<option value=' + o[0] + (st.range == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
+        h += '<input id=evlIdIn class="evlIn evlIdIn" placeholder="IDs" title="Event IDs, e.g. 1112, 100-199" aria-label="Event IDs" value="' + esc(st.filters.ids) + '" oninput="return pluginHandler.eventlog.elIdInput(this)">';
+        h += '<input id=evlTxtIn class="evlIn evlGrow" placeholder="Search message, source, ID&hellip;" aria-label="Search" value="' + esc(st.filters.text) + '" oninput="return pluginHandler.eventlog.elTextInput(this)">';
+        h += '<select id=evlRangeSel class=evlSel title="Time range" aria-label="Time range" onchange="return pluginHandler.eventlog.elSetRange(this.value)">';
+        ph.elRanges().forEach(function(o){ h += '<option value=' + o[0] + (st.range == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
         h += '</select>';
-        h += '<span class=evlLbl>Show</span> <select id=evlShowSel class=evlSel title="Entries per log (Live) / per page (History)" onchange="return pluginHandler.eventlog.elSetShow(this.value)">';
+        h += '<span class=evlLbl>Show</span> <select id=evlShowSel class=evlSel title="Entries per log (Live) / per page (History)" aria-label="Show" onchange="return pluginHandler.eventlog.elSetShow(this.value)">';
         [10,15,25,50,100,250,500].forEach(function(n){ h += '<option value=' + n + (st.show == n ? ' selected' : '') + '>' + n + '</option>'; });
         h += '</select>';
-        h += '<span class=evlLbl>Rows</span> <select id=evlRowsSel class=evlSel title="Row density: Compact (tight), Normal, Wrap (message text wraps onto several lines)" onchange="return pluginHandler.eventlog.elSetRows(this.value)">';
+        h += '<span class=evlLbl>Rows</span> <select id=evlRowsSel class=evlSel title="Row density: Compact (tight), Normal, Wrap (message text wraps onto several lines)" aria-label="Rows" onchange="return pluginHandler.eventlog.elSetRows(this.value)">';
         [['dense','Compact'],['normal','Normal'],['wrap','Wrap']].forEach(function(o){ h += '<option value=' + o[0] + (st.rows == o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; });
         h += '</select>';
         var pz = st.paused ? 'Resume live updates' : 'Pause live updates';
-        h += '<button id=evlFoldBtn class="evlBtn ' + (st.fold ? 'on' : '') + '" title="Fold repeated events into one line" onclick="return pluginHandler.eventlog.elToggleFold()">' + ph.elIcon('fold') + 'Fold repeats</button>';
-        h += '<button id=evlPauseBtn class="evlBtn evlIcoBtn" title="' + pz + '" aria-label="' + pz + '" onclick="return pluginHandler.eventlog.elTogglePause()" ' + (st.view != 'live' ? 'hidden' : '') + '>' + ph.elIcon(st.paused ? 'play' : 'pause') + '</button>';
-        h += '<button class="evlBtn evlIcoBtn" title="Refresh" aria-label="Refresh" onclick="return pluginHandler.eventlog.elRefresh()">' + ph.elIcon('refresh') + '</button>';
-        h += '<button class=evlBtn title="Export the filtered rows as CSV" onclick="return pluginHandler.eventlog.elExportCsv()">' + ph.elIcon('download') + 'CSV</button>';
-        h += '<div class=evlSeg title="Layout">' +
-             '<button class="' + (st.layout == 'ledger' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetLayout(\'ledger\')">Table</button>' +
-             '<button class="' + (st.layout == 'viewer' ? 'on' : '') + '" onclick="return pluginHandler.eventlog.elSetLayout(\'viewer\')">Viewer</button></div>';
+        h += '<button type=button id=evlFoldBtn class="evlBtn' + (st.fold ? ' on' : '') + '" aria-pressed=' + (st.fold ? 'true' : 'false') + ' title="Fold repeated events into one line" aria-label="Fold repeats" onclick="return pluginHandler.eventlog.elToggleFold()">' + ph.elIcon('fold') + '<span class=evlTx>Fold</span></button>';
+        h += '<button type=button id=evlPauseBtn class="evlBtn evlIcoBtn" title="' + pz + '" aria-label="' + pz + '" onclick="return pluginHandler.eventlog.elTogglePause()" ' + (st.view != 'live' ? 'hidden' : '') + '>' + ph.elIcon(st.paused ? 'play' : 'pause') + '</button>';
+        h += '<button type=button class="evlBtn evlIcoBtn" title="Refresh" aria-label="Refresh" onclick="return pluginHandler.eventlog.elRefresh()">' + ph.elIcon('refresh') + '</button>';
+        h += '<button type=button id=evlCsvBtn class=evlBtn title="Export the filtered rows as CSV" aria-label="CSV export" onclick="return pluginHandler.eventlog.elExportCsv()">' + ph.elIcon('download') + '<span class=evlTx>CSV</span></button>';
+        var lay = function(v, ico, label) {
+            var on = (st.layout == v);
+            return '<button type=button class="' + (on ? 'on' : '') + '" aria-pressed=' + (on ? 'true' : 'false') + ' aria-label="' + label + '" title="' + label + '" onclick="return pluginHandler.eventlog.elSetLayout(\'' + v + '\')">' + ph.elIcon(ico) + '</button>';
+        };
+        h += '<div class="evlSeg evlIcoSeg" role=group aria-label="Layout">' + lay('ledger', 'table', 'Table') + lay('viewer', 'viewer', 'Viewer') + '</div>';
         }
         if (ph.elCan('assistant')) {
-            // Ask opens the chat panel; Diagnose opens it in full width with the time window (it never runs by itself)
-            if (st.view != 'ai') h += '<button id=evlAiBtn class="evlBtn evlAiBtn' + (st.ai.open ? ' on' : '') + '" aria-expanded=' + (st.ai.open ? 'true' : 'false') + ' aria-controls=evlAi onclick="return pluginHandler.eventlog.aiToggle()">' +
+            // Ask opens the chat panel beside the table; Diagnose opens the Assistant view with the time window (it never
+            // runs by itself). Both on the right, and onto the next row together.
+            h += '<div class=evlAiGrp>';
+            if (!ai) h += '<button type=button id=evlAiBtn class="evlBtn evlAiBtn' + (st.ai.open ? ' on' : '') + '" aria-expanded=' + (st.ai.open ? 'true' : 'false') + ' aria-controls=evlAi onclick="return pluginHandler.eventlog.aiToggle()">' +
                  ph.elIcon('ask') + 'Ask about this device<span class=evlAiDot aria-hidden=true></span></button>';
-            h += '<button id=evlAiDiagBtn class="evlBtn evlAiDgBtn' + (st.view == 'ai' ? ' evlAiBtn' : '') + '" aria-controls=evlAi title="Diagnose this device: choose a time window, then start" onclick="return pluginHandler.eventlog.aiDiagOpen()">' + ph.aiIcon('diag') + 'Diagnose</button>';
+            h += '<button type=button id=evlAiDiagBtn class="evlBtn evlAiDgBtn" aria-controls=evlAi title="Diagnose this device: choose a time window, then start" onclick="return pluginHandler.eventlog.aiDiagOpen()">' + ph.aiIcon('diag') + 'Diagnose</button></div>';
         } else {   // say why the Assistant is not offered here (nothing for users without its permission)
             var why = ph.aiUnavailText(ph.elAccess);
             if (why) h += '<span id=evlAiWhy class=evlAiWhy role=note>' + esc(why) + '</span>';
@@ -947,16 +995,69 @@ body.night #pluginEventLog {
         h += '</div>';
         QH('evlToolbar', h);
         ph.elUpdate();
+        ph.elFitBar();
         ph.aiRenderPanel();
+    };
+    // Log, Source and the other toolbar selects as wide as the chosen option, up to their max-width: CSS field-sizing
+    // where the browser has it, else measured here (on every render and update; the options change with the counts)
+    obj.elSizeSels = function() {
+        var ph = pluginHandler.eventlog, tb = Q('evlToolbar');
+        if (!tb) return;
+        if (ph._fsc == null) { try { ph._fsc = !!(window.CSS && CSS.supports && CSS.supports('field-sizing', 'content')); } catch (e) { ph._fsc = false; } }
+        if (ph._fsc) return;
+        Array.prototype.forEach.call(tb.querySelectorAll('select.evlSel'), function(sel) {
+            var o = sel.options[sel.selectedIndex], tw = ph.elTextW(sel, o ? o.text : '');
+            if (!tw) return;   // not laid out (hidden tab): keep the width
+            var cs = getComputedStyle(sel), px = function(k) { return parseFloat(cs[k]) || 0; };
+            var w = Math.ceil(tw + px('paddingLeft') + px('paddingRight') + px('borderLeftWidth') + px('borderRightWidth') + 24);   // 24: the arrow
+            var mx = parseFloat(cs.maxWidth);
+            if (mx > 0 && w > mx) w = mx;
+            sel.style.width = w + 'px';
+        });
+    };
+    // width of text in the font of el (px), 0 when nothing is laid out
+    obj.elTextW = function(el, text) {
+        var cs = getComputedStyle(el), s = document.createElement('span');
+        s.setAttribute('aria-hidden', 'true');
+        s.style.cssText = 'position:absolute;left:-9999px;top:0;visibility:hidden;white-space:pre;';
+        ['fontStyle', 'fontVariant', 'fontWeight', 'fontStretch', 'fontSize', 'fontFamily', 'letterSpacing'].forEach(function(k) { if (cs[k]) s.style[k] = cs[k]; });
+        s.textContent = text;
+        (el.parentNode || document.body).appendChild(s);
+        var w = s.getBoundingClientRect().width;
+        s.parentNode.removeChild(s);
+        return w;
+    };
+    // Labels of the view switch, Fold and CSV only while the bar fits in one row: measured with the labels, .evlCompact
+    // when it wraps. Back to the labels only with 24 px to spare, so a scrollbar coming and going cannot flip it.
+    obj.elFitBar = function() {
+        var ph = pluginHandler.eventlog, bar = document.querySelector('#evlToolbar .evlBar');
+        if (!bar || !bar.getClientRects().length) return;   // hidden tab: keep what it has
+        var was = bar.classList.contains('evlCompact');
+        if (was) bar.classList.remove('evlCompact');
+        var m = ph.elBarMeasure(bar), compact = m.wraps || (was && m.slack < 24);
+        if (compact) bar.classList.add('evlCompact');
+    };
+    // { wraps: an item sits below the first row, slack: px the search field has above its minimum width }
+    obj.elBarMeasure = function(bar) {
+        var rs = [], top = Infinity, i;
+        for (i = 0; i < bar.children.length; i++) {
+            var r = bar.children[i].getBoundingClientRect();
+            if (!r.width && !r.height) continue;   // hidden
+            rs.push(r); if (r.top < top) top = r.top;
+        }
+        var wraps = false;
+        for (i = 0; i < rs.length; i++) { if (rs[i].top - top > rs[i].height / 2) wraps = true; }
+        var g = bar.querySelector('.evlGrow'), slack = Infinity;
+        if (g) slack = g.getBoundingClientRect().width - (parseFloat(getComputedStyle(g).minWidth) || 0);
+        return { wraps: wraps, slack: slack };
     };
 
     obj.elUpdate = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
         if (!Q('evlWrap')) return;
         var fr = ph.elFiltered();
-        // the Assistant only: no event table (the panel takes the page)
         var only = (st.view == 'ai'), b0 = Q('evlBody'), c0 = Q('evlChips'), s0 = Q('evlStatus');
-        if (b0) b0.hidden = only; if (c0) c0.hidden = only; if (s0) s0.hidden = only;
+        if (b0) b0.hidden = only; if (c0) c0.hidden = only; if (s0) s0.hidden = only;   // the Assistant view: no event table
         if (only) return;
         ph.elRenderChips(fr);
         ph.elRenderBody(fr);
@@ -976,6 +1077,8 @@ body.night #pluginEventLog {
                 sel.innerHTML = oh;
             });
         }
+        ph.elSizeSels();   // new counts change the option texts
+        ph.elFitBar();
     };
 
     obj.elRenderChips = function(fr) {
@@ -1205,15 +1308,27 @@ body.night #pluginEventLog {
     };
 
     // ---- interactions ----
+    // 'live' | 'history' | 'ai' (the Assistant view: the panel in full width, no filters); remembered per browser.
+    // The panel stays open when the Assistant view docks back. The Live tunnel stays as in History (elEnsureLive).
     obj.elSetView = function(v) {
         var ph = pluginHandler.eventlog, st = ph.elState();
-        if (v != 'live' && v != 'history') return false;
-        if (!ph.elCan(v)) return false;
+        if (v != 'live' && v != 'history' && v != 'ai') return false;
+        if (!ph.elCan(v == 'ai' ? 'assistant' : v)) return false;
+        var f = document.activeElement, inSeg = !!(f && f.closest && f.closest('.evlViewSeg'));
+        if (v == 'ai') { if (st.view == 'live' || st.view == 'history') st.back = st.view; st.ai.open = true; }
         st.view = v;
+        try { putstore('evl_view', v); } catch (e) { }
         st.ai.notice = null; st.ai.peek = null;
         if (v == 'history' && !st.hist.loaded && !st.hist.loading) ph.elLoadHistory(true);
         ph.elRenderShell();
+        if (inSeg) { var b = Q({ live: 'evlVLive', history: 'evlVHist', ai: 'evlVAi' }[v]); if (b) b.focus(); }   // the switch was rebuilt
         return false;
+    };
+    // where the Assistant view docks back to: the view it was opened from, if this user still has it
+    obj.elBackView = function() {
+        var ph = pluginHandler.eventlog, b = ph.elState().back;
+        if ((b == 'live' || b == 'history') && ph.elCan(b)) return b;
+        return ph.elCan('live') ? 'live' : (ph.elCan('history') ? 'history' : 'ai');
     };
     obj.elSetLayout = function(l) {
         var ph = pluginHandler.eventlog, st = ph.elState();
@@ -1224,7 +1339,7 @@ body.night #pluginEventLog {
     obj.elToggleFold = function() {
         var ph = pluginHandler.eventlog, st = ph.elState();
         st.fold = !st.fold; putstore('evl_fold', st.fold ? '1' : '0');
-        var b = Q('evlFoldBtn'); if (b) b.classList.toggle('on', st.fold);
+        var b = Q('evlFoldBtn'); if (b) { b.classList.toggle('on', st.fold); b.setAttribute('aria-pressed', st.fold ? 'true' : 'false'); }
         if (st.view == 'live' && st.fold) ph.elRequestLive(null);
         ph.elUpdate();
         if (st.view == 'history' && st.fold) ph.elHistAutoFill();
@@ -1241,6 +1356,7 @@ body.night #pluginEventLog {
     };
     obj.elSetRange = function(r) {
         var ph = pluginHandler.eventlog, st = ph.elState();
+        if (ph.elRangeMs(r) == null) r = '24h';
         st.range = r; putstore('evl_range', r);
         st.hist.recIds = null;
         if (st.view == 'history') ph.elLoadHistory(true); else ph.elUpdate();
@@ -1677,8 +1793,8 @@ body.night #pluginEventLog {
         if (typeof currentNode == 'undefined' || currentNode == null) return false;
         if (reset === true) { st.hist.skip = 0; st.hist.base = 0; }
         st.hist.loading = true;
-        var ranges = { '1h': 3600e3, '24h': 86400e3, '7d': 7 * 86400e3, '30d': 30 * 86400e3 };
-        var since = ranges[st.range] ? (Date.now() - ranges[st.range]) : null;
+        var rms = ph.elRangeMs(st.range);
+        var since = rms ? (Date.now() - rms) : null;
         var msg = { action: 'plugin', plugin: 'eventlog', pluginaction: 'getNodeHistory', nodeid: currentNode._id, meshid: currentNode.meshid, limit: st.show, skip: st.hist.skip, since: since };
         if (st.hist.recIds != null && st.hist.recIds.length) {
             msg.recIds = st.hist.recIds.slice(0, 200);   // exactly the events an answer cited, whatever the filters say

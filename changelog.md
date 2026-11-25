@@ -7,7 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - None. Please feel free to submit an issue via [GitHub](https://github.com/ryanblenis/MeshCentral-EventLog) if you find anything.
 
 ## [Unreleased]
+### Added
+- Event Log tab: third view *Assistant* (Live | History | Assistant): the Assistant in full width without the filter toolbar; the panel's full-width button switches to it and Esc docks back. The split view beside the table stays
+- Time ranges 3, 60, 90, 180 and 365 days (labels without "Last")
+
 ### Changed
+- Event Log toolbar: icons for Live, History and Assistant; *Fold repeats* is *Fold*; Table and Viewer are icon buttons; labels give way to icons when the toolbar would wrap; the IDs field is narrower; Log, Source and the other selects are only as wide as the chosen entry (Source up to 260 px)
 - Assistant: command output goes back to the Assistant with *Attach* (collects up to five outputs as chips above the answer field) or *Send* (right away, with or without a question) instead of *Ask about the output*; no made-up question text; a chip in a sent question opens the command and its output, with *Show in the chat*; outputs are saved with the chat (64 KB each)
 
 ### Fixed

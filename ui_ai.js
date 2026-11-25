@@ -122,7 +122,7 @@ module.exports.attach = function (obj) {
         // saved: the server's saved results of this user on this device (null until asked for; ai/history.js on the
         // server), hist: the chat list is shown, opening: a chat id being loaded, delAsk: a chat id waiting for the
         // delete confirmation, exReq: saved explanations asked for (event id -> 1)
-        // full: the panel takes the whole width (evl_ai_full), diagSetup: the window choice before a diagnosis runs,
+        // diagSetup: the window choice before a diagnosis runs (the full width is the Assistant view, st.view 'ai'),
         // act: a message action waiting for its inline editor or confirmation { cid, n, kind: 'edit'|'del'|'retry' },
         // pend: a message action sent to the server { cid, n, op, then }
         // genNew: the answer settings { thinking?, temperature? } for a chat not started yet (a chat keeps its own in
@@ -131,13 +131,12 @@ module.exports.attach = function (obj) {
         // cmdReq: reqId of a run waiting for its result -> its key
         // attach: the outputs attached to the next question [{ runId, shell, cmd, key? }] (chips above the answer
         // field), attNote: why some of them went again (attachExpired)
-        var full = false, raw = '';
-        try { full = getstore('evl_ai_full', '') == '1'; } catch (e) { }
+        var raw = '';
         try { if (nid) raw = String(window.sessionStorage.getItem('evl_ai_draft:' + nid) || ''); } catch (e) { }
         var dr = ph.aiDraftParse(raw), draft = dr.text;
         return { nodeid: nid, open: false, w: Number(getstore('evl_ai_w', '0')) || 0, convs: {}, chat: null, explainBy: {},
                  focus: null, sel: null, draft: draft, diagWin: win, notice: null, reveal: null, peek: null, hyp: {}, citeVer: 0,
-                 saved: null, hist: false, opening: null, delAsk: null, exReq: {}, full: full, diagSetup: false, act: null, pend: null,
+                 saved: null, hist: false, opening: null, delAsk: null, exReq: {}, diagSetup: false, act: null, pend: null,
                  genNew: {}, genOpen: false, fuReq: null, runs: {}, cmdReq: {}, attach: dr.attach, attNote: null };
     };
     // a stored draft: plain text (also what earlier versions stored), or { text, attach } -> { text, attach: [...] }
@@ -1474,8 +1473,8 @@ module.exports.attach = function (obj) {
         a.focus = cid; a.sel = ref; a.notice = null; a.peek = null;
         // no event list at all (the Assistant permission only): the cited event in a small card
         if (!ph.elCan('live') && !ph.elCan('history')) { a.peek = { cid: cid, ref: ref, where: 'panel' }; ph.aiRenderPeek(); ph.aiApplySel(); return false; }
-        // full width: back beside the table, so the row can be shown
-        if (a.full) { a.full = false; ph.aiRenderPanel(); }
+        // the Assistant view: back beside the table, so the row can be shown
+        if (st.view == 'ai') ph.elSetView(ph.elBackView());
         ph.aiReveal(cid, ref, 0);
         return false;
     };
@@ -1571,8 +1570,8 @@ module.exports.attach = function (obj) {
         c.turns.forEach(function (t) { for (var r in t.cites) { var id = t.cites[r].id; if (id != null && ids.indexOf(id) < 0) ids.push(id); } });
         if (!ids.length) return false;
         st.hist.recIds = ids.slice(0, 200);
-        st.ai.focus = cid; st.ai.citeVer++; st.ai.full = false;   // the events show beside the panel
-        st.view = 'history';
+        st.ai.focus = cid; st.ai.citeVer++;
+        st.view = 'history';   // the events show beside the panel (also from the Assistant view)
         ph.elRenderShell();
         ph.elLoadHistory(true);
         return false;
@@ -1609,11 +1608,9 @@ module.exports.attach = function (obj) {
         var was = main.classList.contains('evlStack');
         var stack = (w > 0) ? (was ? (w < lim + 24) : (w < lim)) : was;   // a little hysteresis: no flip-flop at the edge
         main.classList.toggle('evlStack', stack);
-        // full width: the panel takes the table's place (the toolbar stays); stacked it is full width anyway; without
-        // an event list (the Assistant permission only) it always is
-        var only = ph.aiOnly(), pe = Q('evlAi'), open = !!(pe && !pe.hidden);
-        main.classList.toggle('evlAiOnly', only);
-        main.classList.toggle('evlAiFull', open && (only || (!!st.ai.full && !stack)));
+        // the Assistant view (also all there is with the Assistant permission only): the panel takes the table's place
+        main.classList.toggle('evlAiOnly', ph.aiOnly());
+        main.classList.toggle('evlAiFull', st.view == 'ai');
         main.style.setProperty('--evl-ai-w', (st.ai.w || 400) + 'px');
         if (stack != was) ph.elFitHeight();
         ph.aiFitPanel();
@@ -1624,22 +1621,21 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog;
         return ph.elCan('assistant') && !ph.elCan('live') && !ph.elCan('history');
     };
-    // Full width <-> docked beside the table (remembered per browser); Esc in the panel docks it again.
+    // The panel header's full-width button: the Assistant view <-> the view it came from with the panel docked
+    // (on: true/false, or toggle); Esc in the panel docks it again.
     obj.aiFullToggle = function (on) {
-        var ph = pluginHandler.eventlog, a = ph.elState().ai;
-        a.full = (on == null) ? !a.full : !!on;
-        try { putstore('evl_ai_full', a.full ? '1' : ''); } catch (e) { }
-        ph.aiRenderPanel();
-        ph.elFitHeight();
+        var ph = pluginHandler.eventlog, st = ph.elState();
+        if (ph.aiOnly() || !ph.elCan('assistant')) return false;
+        var full = (on == null) ? (st.view != 'ai') : !!on;
+        if (full == (st.view == 'ai')) return false;
+        ph.elSetView(full ? 'ai' : ph.elBackView());
         var b = Q('evlAiFullBtn'); if (b) b.focus();
-        ph.aiSay(a.full ? 'The assistant uses the full width.' : 'The assistant is docked beside the table.');
+        ph.aiSay(full ? 'Assistant view: the assistant uses the full width.' : 'The assistant is docked beside the table.');
         return false;
     };
     obj.aiPanelKey = function (ev) {
-        var ph = pluginHandler.eventlog, a = ph.elState().ai;
-        if (ev.key != 'Escape' || ev.defaultPrevented || !a.full || ph.aiOnly()) return true;
-        var main = Q('evlMain');
-        if (main && main.classList.contains('evlStack')) return true;
+        var ph = pluginHandler.eventlog;
+        if (ev.key != 'Escape' || ev.defaultPrevented || ph.elState().view != 'ai' || ph.aiOnly()) return true;
         ev.preventDefault();
         ph.aiFullToggle(false);
         return false;
@@ -1665,7 +1661,7 @@ module.exports.attach = function (obj) {
         var ph = pluginHandler.eventlog, main = Q('evlMain'), MIN = 360;
         if (!main || !main.offsetParent) return 0;
         var vb = ph.elViewBox();
-        if (main.classList.contains('evlStack')) return Math.max(MIN, Math.floor(vb.bottom - vb.top - 24));
+        if (main.classList.contains('evlStack') && !main.classList.contains('evlAiFull')) return Math.max(MIN, Math.floor(vb.bottom - vb.top - 24));
         // docked: the panel's top is the row's top (the panel itself may be sticky in Diagnosis, so measure the row),
         // taken as if the page were scrolled to the top; 6 px below like the table, so both end on the same line
         var top = main.getBoundingClientRect().top + vb.scroll;
@@ -1774,9 +1770,9 @@ module.exports.attach = function (obj) {
         return false;
     };
     obj.aiToggle = function () {
-        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        var ph = pluginHandler.eventlog, st = ph.elState(), a = st.ai;
         if (!ph.elCan('assistant')) return false;
-        a.open = ph.aiOnly() ? true : !a.open;
+        a.open = (st.view == 'ai') ? true : !a.open;
         if (a.open) {
             a.diagSetup = false;
             // no chat in this visit yet: the saved chats instead of the newest one opening by itself
@@ -1787,10 +1783,11 @@ module.exports.attach = function (obj) {
         return false;
     };
     obj.aiClosePanel = function () {
-        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        var ph = pluginHandler.eventlog, st = ph.elState(), a = st.ai;
         if (ph.aiOnly()) return false;   // the panel is all there is
         a.open = false; a.diagSetup = false;
-        ph.aiRenderPanel();
+        if (st.view == 'ai') ph.elSetView(ph.elBackView());   // closed in the Assistant view: back to the table
+        else ph.aiRenderPanel();
         var b = Q('evlAiBtn'); if (b) b.focus();
         return false;
     };
@@ -1817,7 +1814,7 @@ module.exports.attach = function (obj) {
     };
     obj.aiRenderPanel = function () {
         var ph = pluginHandler.eventlog, st = ph.elState(), a = st.ai, el = Q('evlAi');
-        if (ph.aiOnly()) a.open = true;
+        if (st.view == 'ai') a.open = true;
         var btn = Q('evlAiBtn');
         if (btn) { btn.setAttribute('aria-expanded', a.open ? 'true' : 'false'); btn.classList.toggle('on', a.open && !a.diagSetup); }
         var db = Q('evlAiDiagBtn'); if (db) db.classList.toggle('on', a.open && a.diagSetup);
@@ -1886,7 +1883,7 @@ module.exports.attach = function (obj) {
         ph.aiGenSync();
     };
     obj.aiHeadHtml = function (c) {
-        var ph = pluginHandler.eventlog, a = ph.elState().ai, sv = a.saved, only = ph.aiOnly();
+        var ph = pluginHandler.eventlog, a = ph.elState().ai, sv = a.saved, only = ph.aiOnly(), full = (ph.elState().view == 'ai');
         if (a.diagSetup) c = null;   // the window choice is about a new diagnosis, not the chat shown before
         var line = ph.aiInfoLine(c);
         var hb = '';
@@ -1897,9 +1894,9 @@ module.exports.attach = function (obj) {
                  ph.aiIcon('list') + '<span class=evlAiHistLbl>Chats</span>' + (n ? '<span class=evlAiN>' + n + '</span>' : '') + '</button>';
         }
         var title = a.hist ? 'Saved chats' : (a.diagSetup ? 'Diagnose' : (c && c.mode == 'diagnose' ? 'Diagnosis' : 'Ask'));
-        // full width <-> docked beside the table (not offered stacked below the table, nor without a table)
-        var fb = only ? '' : '<button id=evlAiFullBtn class="evlBtn mini evlAiIco evlAiFullBtn" aria-pressed=' + (a.full ? 'true' : 'false') + ' aria-label="Full width"' +
-                 ' title="' + (a.full ? 'Dock beside the table (Esc)' : 'Full width') + '" onclick="return pluginHandler.eventlog.aiFullToggle()">' + ph.aiIcon(a.full ? 'dock' : 'full') + '</button>';
+        // the Assistant view (full width) <-> docked beside the table (not offered without a table)
+        var fb = only ? '' : '<button id=evlAiFullBtn class="evlBtn mini evlAiIco evlAiFullBtn" aria-pressed=' + (full ? 'true' : 'false') + ' aria-label="Full width"' +
+                 ' title="' + (full ? 'Dock beside the table (Esc)' : 'Full width (Assistant view)') + '" onclick="return pluginHandler.eventlog.aiFullToggle()">' + ph.aiIcon(full ? 'dock' : 'full') + '</button>';
         // Answer settings (thinking, temperature) of this chat: the button, and what is changed from the endpoint's
         var gi = a.hist ? null : ph.aiGenInfo(), gb = '', tag = '';
         if (gi) {
@@ -2915,13 +2912,13 @@ module.exports.attach = function (obj) {
         a.diagWin = v; putstore('evl_diag_win', v);
         return true;
     };
-    // Toolbar "Diagnose" and the entry in the empty panel: the panel in full width with the window choice; nothing
+    // Toolbar "Diagnose" and the entry in the empty panel: the Assistant view with the window choice; nothing
     // runs before the Diagnose button (each run uses the model).
     obj.aiDiagOpen = function () {
-        var ph = pluginHandler.eventlog, a = ph.elState().ai;
+        var ph = pluginHandler.eventlog, st = ph.elState(), a = st.ai;
         if (!ph.elCan('assistant')) return false;
-        a.open = true; a.full = true; a.diagSetup = true; a.hist = false; a.act = null;
-        ph.aiRenderPanel();
+        a.open = true; a.diagSetup = true; a.hist = false; a.act = null;
+        if (st.view != 'ai') ph.elSetView('ai'); else ph.aiRenderPanel();
         ph.elFitHeight();
         setTimeout(function () { try { var r = document.querySelector('#evlAiLog .evlDgWin input:checked') || document.querySelector('#evlAiLog .evlDgWin input'); if (r) r.focus(); } catch (e) { } }, 0);
         return false;
@@ -3729,10 +3726,10 @@ module.exports.attach = function (obj) {
 #pluginEventLog .evlMain.evlStack .evlCol { align-self:stretch; }
 #pluginEventLog .evlMain.evlStack .evlAi { flex:none; align-self:stretch; max-width:none; margin:10px 0 0; }
 /* full width: the panel takes the table's place (the toolbar stays); the conversation keeps a readable measure */
-#pluginEventLog .evlMain.evlAiFull:not(.evlStack) .evlCol, #pluginEventLog .evlMain.evlAiOnly .evlCol { display:none; }
-#pluginEventLog .evlMain.evlAiFull:not(.evlStack) .evlAi, #pluginEventLog .evlMain.evlAiOnly .evlAi { flex:1 1 auto; max-width:none; margin-left:0; }
-#pluginEventLog .evlMain.evlAiOnly.evlStack .evlAi { margin-top:0; }
-#pluginEventLog .evlAiFull .evlAiSplit, #pluginEventLog .evlAiOnly .evlAiSplit, #pluginEventLog .evlStack .evlAiHd .evlBtn.evlAiFullBtn { display:none; }
+#pluginEventLog .evlMain.evlAiFull .evlCol { display:none; }
+#pluginEventLog .evlMain.evlAiFull .evlAi { flex:1 1 auto; max-width:none; margin-left:0; }
+#pluginEventLog .evlMain.evlAiFull.evlStack .evlAi { margin-top:0; }
+#pluginEventLog .evlAiFull .evlAiSplit { display:none; }
 #pluginEventLog .evlAiFull .evlAiLog, #pluginEventLog .evlAiFull .evlAiFt { padding-left:max(13px, calc((100% - 1040px) / 2)); padding-right:max(13px, calc((100% - 1040px) / 2)); }
 /* icon-only buttons: square, a 16 px icon in the middle (.sm: inside the conversation, notes and lists) */
 #pluginEventLog .evlBtn.evlAiIco, #pluginEventLog .evlBtn.mini.evlAiIco { display:inline-flex; align-items:center; justify-content:center; box-sizing:border-box; min-width:28px; height:28px; min-height:0; padding:0; line-height:1; flex:none; }
